@@ -5,10 +5,10 @@ use std::{fmt, str::FromStr};
 use winnow::Parser;
 use winnow::token::literal;
 
-use crate::recorder::protocol::control_chars::{CR, ESC, RCDR, RCDR_LOWER};
-use crate::recorder::protocol::instructions::{Instruction, UnknownInstruction};
-use crate::recorder::protocol::payload_helpers::normalize;
-use crate::recorder::protocol::{In, ParseFn, Value, parser_of};
+use crate::protocol::control_chars::{CR, ESC, RCDR, RCDR_LOWER};
+use crate::protocol::instructions::{Instruction, UnknownInstruction};
+use crate::protocol::payload_helpers::normalize;
+use crate::protocol::{In, ParseFn, Value, parser_of};
 
 /// A built-in recorder command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

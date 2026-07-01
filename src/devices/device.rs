@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::recorder::protocol::Value;
-use crate::recorder::protocol::instructions::Instruction;
+use crate::protocol::Value;
+use crate::protocol::instructions::Instruction;
 
 use super::config::DeviceConfig;
 use super::connector::{ConnectError, Connector};
@@ -125,7 +125,7 @@ mod tests {
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::Transport;
     use crate::devices::transport::fake::FakeTransport;
-    use crate::recorder::protocol::instructions::query::Query;
+    use crate::protocol::instructions::query::Query;
 
     const PORT_REPLY: &str = "BPMAP\r\n22023\r\r";
 
@@ -171,7 +171,11 @@ mod tests {
         assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
         // The cached connection is now exhausted; the device should heal.
         assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
-        assert_eq!(opens.load(Ordering::SeqCst), 2, "stale connection must reconnect");
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            2,
+            "stale connection must reconnect"
+        );
     }
 
     #[tokio::test]
@@ -186,7 +190,11 @@ mod tests {
             err,
             DeviceError::Command(ControllerError::ConnectionClosed { .. })
         ));
-        assert_eq!(opens.load(Ordering::SeqCst), 1, "must not loop on a fresh failure");
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "must not loop on a fresh failure"
+        );
     }
 
     #[tokio::test]

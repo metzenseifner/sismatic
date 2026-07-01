@@ -14,9 +14,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::recorder::protocol::Step;
-use crate::recorder::protocol::Value;
-use crate::recorder::protocol::instructions::Instruction;
+use crate::protocol::Step;
+use crate::protocol::Value;
+use crate::protocol::instructions::Instruction;
 
 use super::transport::{Transport, TransportError};
 
@@ -26,7 +26,10 @@ use super::transport::{Transport, TransportError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerError {
     /// No complete reply arrived within `command_timeout`.
-    Timeout { instruction: String, after: Duration },
+    Timeout {
+        instruction: String,
+        after: Duration,
+    },
     /// The channel closed before a complete reply was parsed.
     ConnectionClosed { instruction: String },
     /// The underlying transport failed mid-exchange.
@@ -45,7 +48,10 @@ impl fmt::Display for ControllerError {
             ControllerError::ConnectionClosed { instruction } => {
                 write!(f, "channel closed during `{instruction}`")
             }
-            ControllerError::Transport { instruction, source } => {
+            ControllerError::Transport {
+                instruction,
+                source,
+            } => {
                 write!(f, "`{instruction}`: {source}")
             }
         }
@@ -128,9 +134,9 @@ fn valid_prefix(bytes: &[u8]) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recorder::protocol::MacAddr;
-    use crate::recorder::protocol::instructions::query::Query;
     use crate::devices::transport::fake::{Exhausted, FakeTransport};
+    use crate::protocol::MacAddr;
+    use crate::protocol::instructions::query::Query;
 
     fn controller(transport: FakeTransport, timeout_ms: u64) -> Controller {
         Controller::new(Box::new(transport), Duration::from_millis(timeout_ms))

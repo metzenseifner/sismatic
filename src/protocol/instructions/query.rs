@@ -3,11 +3,11 @@ use winnow::token::{literal, one_of, take_while};
 use winnow::{ModalResult, Parser};
 
 // ---- Query (gettable) enum ------------------------------------------------
-use crate::recorder::protocol::control_chars::{CR, RCDR};
-use crate::recorder::protocol::instructions::{Instruction, UnknownInstruction};
-use crate::recorder::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr, normalize};
-use crate::recorder::protocol::states::RecordingState;
-use crate::recorder::protocol::{In, MacAddr, ParseFn, Value, parser_of};
+use crate::protocol::control_chars::RCDR;
+use crate::protocol::instructions::{Instruction, UnknownInstruction};
+use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr, normalize};
+use crate::protocol::states::RecordingState;
+use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
 use std::fmt;
 use std::str::FromStr;
 

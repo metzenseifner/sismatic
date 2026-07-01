@@ -1,5 +1,5 @@
 pub mod devices;
-pub mod recorder;
+pub mod protocol;
 
 #[cfg(feature = "python")]
 mod python_binding;

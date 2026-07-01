@@ -2,7 +2,7 @@
 //!
 //! A [`Transport`] is one open, bidirectional channel to a device: write the
 //! bytes of a request, read the bytes of the reply. It knows nothing about SIS
-//! framing — the [`crate::recorder::protocol`] parsers turn those bytes into
+//! framing — the [`crate::protocol`] parsers turn those bytes into
 //! typed values, and the controller (built on top) drives the write/read loop.
 //!
 //! Keeping the trait this small makes the test double trivial: real SSH is one

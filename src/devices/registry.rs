@@ -68,8 +68,8 @@ mod tests {
 
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::fake::FakeTransport;
-    use crate::recorder::protocol::Value;
-    use crate::recorder::protocol::instructions::query::Query;
+    use crate::protocol::Value;
+    use crate::protocol::instructions::query::Query;
 
     const PORT_REPLY: &str = "BPMAP\r\n22023\r\r";
 

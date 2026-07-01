@@ -1,6 +1,6 @@
 // ---- Register (settable) enum ---------------------------------------------
 
-use crate::recorder::protocol::payload_helpers::is_not_cr;
+use crate::protocol::payload_helpers::is_not_cr;
 use std::{fmt, str::FromStr};
 
 use winnow::{
@@ -8,7 +8,7 @@ use winnow::{
     token::{literal, take_while},
 };
 
-use crate::recorder::protocol::{
+use crate::protocol::{
     In, ParseFn, Value,
     control_chars::{CR, ESC, RCDR, RCDR_LOWER},
     instructions::{Instruction, UnknownInstruction},

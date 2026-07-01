@@ -1,11 +1,6 @@
 use std::fmt;
 
-use winnow::{
-    Parser,
-    token::{literal, one_of},
-};
 
-use crate::recorder::protocol::{In, ParseFn, Value, parser_of};
 
 /// Recording state reported by the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

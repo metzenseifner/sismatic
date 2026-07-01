@@ -20,11 +20,11 @@ use tokio::runtime::Runtime;
 
 use crate::devices::registry::Registry;
 use crate::devices::transport::ssh::RusshConnector;
-use crate::recorder::protocol::Value;
-use crate::recorder::protocol::instructions::Instruction;
-use crate::recorder::protocol::instructions::commands::Command;
-use crate::recorder::protocol::instructions::query::Query;
-use crate::recorder::protocol::instructions::register::Register;
+use crate::protocol::Value;
+use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::commands::Command;
+use crate::protocol::instructions::query::Query;
+use crate::protocol::instructions::register::Register;
 
 /// A pool of Extron devices, addressable from Python by id.
 #[pyclass]
@@ -64,8 +64,15 @@ impl Sis {
 
     /// Write `value` into a metadata register (e.g. `"title"`) on `device`. The
     /// device truncates the value at its own length limit.
-    fn register(&self, py: Python<'_>, device: &str, name: &str, value: &str) -> PyResult<Py<PyAny>> {
-        let register = Register::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    fn register(
+        &self,
+        py: Python<'_>,
+        device: &str,
+        name: &str,
+        value: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let register =
+            Register::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.execute(py, device, register.instruction(value))
     }
 }
@@ -74,7 +81,12 @@ impl Sis {
     /// Look up `device`, run `instruction` to completion on the runtime, and turn
     /// the decoded value into a native Python object. The GIL is released for the
     /// duration of the (blocking) device exchange.
-    fn execute(&self, py: Python<'_>, device: &str, instruction: Instruction) -> PyResult<Py<PyAny>> {
+    fn execute(
+        &self,
+        py: Python<'_>,
+        device: &str,
+        instruction: Instruction,
+    ) -> PyResult<Py<PyAny>> {
         let device = self
             .registry
             .device(device)

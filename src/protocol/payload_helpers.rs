@@ -1,4 +1,4 @@
-use crate::recorder::protocol::control_chars::{CR, ESC, RCDR};
+use crate::protocol::control_chars::{CR, ESC, RCDR};
 // ---- payload helpers ------------------------------------------------------
 pub fn esc_cr(verb: &str) -> String {
     format!("{ESC}{verb}{CR}")

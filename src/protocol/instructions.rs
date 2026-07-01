@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 
-use crate::recorder::protocol::control_chars::swap_non_printable;
-use crate::recorder::protocol::{ParseFn, Step, Value};
+use crate::protocol::control_chars::swap_non_printable;
+use crate::protocol::{ParseFn, Step, Value};
 
 pub mod commands;
 pub mod query;

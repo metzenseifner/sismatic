@@ -16,14 +16,11 @@ pub mod instructions;
 mod payload_helpers;
 mod states;
 
-use crate::recorder::protocol::control_chars::{CR, RCDR, RCDR_LOWER};
 use std::fmt;
 use std::sync::Arc;
-use winnow::error::{ContextError, ErrMode};
-use winnow::token::{literal, one_of, take_while};
-use winnow::{ModalResult, Parser, Partial};
+use winnow::{ModalResult, Partial};
 
-use crate::recorder::protocol::states::RecordingState;
+use crate::protocol::states::RecordingState;
 
 /// A decoded response value. The variant reflects what the field means, so a
 /// caller can pattern-match instead of re-parsing a string.
@@ -149,7 +146,7 @@ fn parser_of<O: 'static>(
 mod tests {
     use std::str::FromStr;
 
-    use crate::recorder::protocol::instructions::{
+    use crate::protocol::instructions::{
         Instruction,
         commands::Command,
         query::Query,
