@@ -159,6 +159,118 @@
             }
           );
 
+          # Source for the wheel: the cargo sources crane already filters,
+          # plus the packaging files maturin reads (pyproject.toml and the
+          # readme/license it points at, which cleanCargoSource drops).
+          pythonSrc = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type)
+              || (
+                let
+                  base = baseNameOf path;
+                in
+                base == "pyproject.toml" || base == "README.md" || base == "LICENSE"
+              );
+          };
+
+          # The Python wheel, built by maturin against the same pinned
+          # toolchain. Hermetic — it links against nixpkgs' Python and glibc —
+          # so it is reproducible but NOT portable to arbitrary machines.
+          # For a distributable wheel use the `build-wheel` app below, which
+          # links against the host libc. This output is for `nix build`-based
+          # dev and reproducibility.
+          wheel = pkgs.stdenv.mkDerivation {
+            pname = "opensis-wheel";
+            inherit (my-crate) version;
+            src = pythonSrc;
+
+            # Vendor the exact locked deps so maturin can build --offline.
+            cargoDeps = pkgs.rustPlatform.importCargoLock {
+              lockFile = ./Cargo.lock;
+            };
+
+            nativeBuildInputs = [
+              pkgs.rustPlatform.cargoSetupHook # unpacks cargoDeps, configures offline
+              (rustToolchain pkgs)
+              pkgs.maturin
+              pkgs.python3
+              # russh -> aws-lc-sys builds AWS-LC from C source.
+              pkgs.cmake
+              pkgs.perl
+            ]
+            ++ commonArgs.nativeBuildInputs;
+
+            buildInputs = commonArgs.buildInputs;
+
+            # cmake is only here for aws-lc-sys's own invocation; there is no
+            # CMakeLists.txt at the root, so skip nix's cmake configure phase.
+            dontUseCmakeConfigure = true;
+
+            buildPhase = ''
+              runHook preBuild
+              maturin build --offline --release --out dist \
+                --features python \
+                --interpreter ${pkgs.python3}/bin/python3
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp dist/*.whl $out/
+              runHook postInstall
+            '';
+          };
+
+          # `nix run .#build-wheel [-- <extra maturin args>]`
+          #
+          # The portable counterpart to the hermetic `wheel` package. It runs
+          # maturin against the *host's* python, so the wheel it drops in
+          # ./dist is distributable. This is an app rather than a package
+          # precisely because it is impure: a sandboxed derivation could only
+          # ever link nixpkgs' glibc.
+          #
+          # On Linux it links through `zig cc` (maturin's --zig) targeting an
+          # old glibc, so the wheel is a PyPI-grade manylinux_2_28 build usable
+          # far beyond the runner's own glibc — no manylinux container needed.
+          # On macOS zig/compatibility don't apply, so it builds natively.
+          #
+          # Same command locally and in CI. The zig-provided C toolchain,
+          # rust toolchain, maturin, cmake (for aws-lc-sys) and perl are all
+          # pinned by the flake.
+          build-wheel = pkgs.writeShellApplication {
+            name = "opensis-build-wheel";
+            runtimeInputs = [
+              (rustToolchain pkgs)
+              pkgs.maturin
+              pkgs.python3
+              pkgs.cmake
+              pkgs.perl
+            ]
+            ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.zig ];
+            text =
+              if pkgs.stdenv.isLinux then
+                ''
+                  exec maturin build --release --features python --out dist \
+                    --zig --compatibility manylinux_2_28 "$@"
+                ''
+              else
+                ''
+                  exec maturin build --release --features python --out dist "$@"
+                '';
+          };
+
+          # `nix run .#build-sdist` — the source distribution for the release.
+          build-sdist = pkgs.writeShellApplication {
+            name = "opensis-build-sdist";
+            runtimeInputs = [ pkgs.maturin ];
+            text = ''
+              exec maturin sdist --out dist "$@"
+            '';
+          };
+
           # Named binding (not just an output attr) so the devShell can
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
@@ -235,14 +347,31 @@
         {
           inherit checks;
 
-          packages.default = my-crate;
+          packages = {
+            default = my-crate;
+            # `nix build .#wheel` -> result/opensis-*.whl
+            inherit wheel;
+          };
 
           # Plain app definition (flake-utils.mkApp without flake-utils).
           # lib.getExe resolves the binary; set meta.mainProgram on the
           # package if the binary name differs from the crate name.
-          apps.default = {
-            type = "app";
-            program = pkgs.lib.getExe my-crate;
+          apps = {
+            default = {
+              type = "app";
+              program = pkgs.lib.getExe my-crate;
+            };
+            # Pipeline steps, callable identically here and in CI:
+            #   nix run .#build-wheel
+            #   nix run .#build-sdist
+            build-wheel = {
+              type = "app";
+              program = pkgs.lib.getExe build-wheel;
+            };
+            build-sdist = {
+              type = "app";
+              program = pkgs.lib.getExe build-sdist;
+            };
           };
 
           # `nix develop`: inherits every dependency the checks need,
@@ -272,6 +401,13 @@
                 # only picked up by cargo-expand via the +nightly proxy.
                 pkgs.cargo-expand
                 (pkgs.rust-bin.selectLatestNightlyWith (t: t.minimal))
+                # Python packaging: build wheels locally with `maturin build`.
+                # cmake/perl are needed by aws-lc-sys (pulled in via the ssh
+                # feature) whenever the `python` feature is compiled.
+                pkgs.maturin
+                pkgs.python3
+                pkgs.cmake
+                pkgs.perl
                 # zero2prod chapter 3+: database tooling
                 # pkgs.sqlx-cli
                 # pkgs.postgresql

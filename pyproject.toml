@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "opensis"
+# Single source of truth is Cargo.toml; maturin reads it because of `dynamic`.
+dynamic = ["version"]
+description = "Blocking Python facade for driving Extron SIS devices over SSH"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+
+[tool.maturin]
+# pyo3 is an *optional* dep, so maturin's auto-detection (which resolves
+# default features) never sees it and would fall back to cffi. Pin the
+# binding kind explicitly.
+bindings = "pyo3"
+# The extension module lives behind the `python` cargo feature (which also
+# turns on `ssh`); without this maturin builds the crate with pyo3 absent.
+features = ["python"]
+# abi3 wheels only need to be built once per platform.
