@@ -290,10 +290,13 @@
             );
 
             # rustdoc must build cleanly (catches broken intra-doc links).
+            # `testing` is enabled so the cfg-gated `fake` module (linked from
+            # the always-compiled transport/connector module docs) resolves.
             doc = craneLib.cargoDoc (
               commonArgs
               // {
                 inherit cargoArtifacts;
+                cargoExtraArgs = "--features testing";
                 env.RUSTDOCFLAGS = "--deny warnings";
               }
             );
@@ -312,6 +315,10 @@
             # Update with: nix flake update advisory-db
             audit = craneLib.cargoAudit {
               inherit src advisory-db;
+              # RUSTSEC-2023-0071 (rsa Marvin timing side-channel) has no fixed
+              # release; russh >=0.60.3 requires rsa 0.10.0-rc, and the bump is
+              # needed for RUSTSEC-2026-0154. Re-evaluate when rsa ships a fix.
+              cargoAuditExtraArgs = "--ignore yanked --ignore RUSTSEC-2023-0071";
             };
 
             # License / ban / source policy via cargo-deny.

@@ -6,10 +6,12 @@
 //! response is present — so the transport can feed it bytes as they arrive and
 //! stop as soon as the message is complete.
 //!
-//! The built-in catalog is expressed as the [`Query`], [`Register`], and
-//! [`Command`] enums. The protocol stays open: build an [`Instruction`] with
-//! [`Instruction::custom`] (supplying your own parser) to add instructions the
-//! catalog does not cover.
+//! The built-in catalog is expressed as the [`Query`](instructions::query::Query),
+//! [`Register`](instructions::register::Register), and
+//! [`Command`](instructions::commands::Command) enums. The protocol stays open:
+//! build an [`Instruction`](instructions::Instruction) with
+//! [`Instruction::custom`](instructions::Instruction::custom) (supplying your own
+//! parser) to add instructions the catalog does not cover.
 
 mod control_chars;
 pub mod instructions;

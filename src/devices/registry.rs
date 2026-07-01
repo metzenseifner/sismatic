@@ -92,7 +92,7 @@ host = "10.9.40.12"
 
     fn registry_over(reply_count: usize) -> Registry {
         let connector = Arc::new(CountingConnector::new(move || {
-            FakeTransport::with_reads(std::iter::repeat(PORT_REPLY).take(reply_count))
+            FakeTransport::with_reads(std::iter::repeat_n(PORT_REPLY, reply_count))
         }));
         Registry::from_configs(config::parse(EXAMPLE).unwrap(), connector)
     }

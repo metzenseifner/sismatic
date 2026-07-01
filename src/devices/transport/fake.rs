@@ -84,7 +84,10 @@ impl Default for FakeTransport {
 #[async_trait]
 impl Transport for FakeTransport {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        self.written.lock().expect("written lock").extend_from_slice(bytes);
+        self.written
+            .lock()
+            .expect("written lock")
+            .extend_from_slice(bytes);
         Ok(())
     }
 
@@ -170,6 +173,9 @@ mod tests {
         let mut t = FakeTransport::new().on_exhausted(Exhausted::Stall);
         let mut buf = [0u8; 8];
         let timed_out = tokio::time::timeout(Duration::from_millis(20), t.read(&mut buf)).await;
-        assert!(timed_out.is_err(), "stalled read should never resolve on its own");
+        assert!(
+            timed_out.is_err(),
+            "stalled read should never resolve on its own"
+        );
     }
 }

@@ -53,9 +53,7 @@ impl Instruction {
         terminator: String,
     ) -> Self {
         Instruction::custom(name, payload, move |buf| {
-            if !terminator.is_empty() && buf.contains(&terminator) {
-                Step::Done(Value::Text(buf.to_string()))
-            } else if terminator.is_empty() {
+            if terminator.is_empty() || buf.contains(&terminator) {
                 Step::Done(Value::Text(buf.to_string()))
             } else {
                 Step::NeedMore

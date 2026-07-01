@@ -71,7 +71,10 @@ impl fmt::Display for ConfigError {
             ConfigError::Toml(e) => write!(f, "parsing devices file: {e}"),
             ConfigError::DuplicateId(id) => write!(f, "duplicate device id `{id}`"),
             ConfigError::MissingField { device, field } => {
-                write!(f, "device `{device}` is missing `{field}` (set it on the device or in [defaults])")
+                write!(
+                    f,
+                    "device `{device}` is missing `{field}` (set it on the device or in [defaults])"
+                )
             }
         }
     }
@@ -106,10 +109,26 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
     let id = device.id;
 
     let port = require(&id, "port", device.port.or(defaults.port))?;
-    let username = require(&id, "username", device.username.or_else(|| defaults.username.clone()))?;
-    let password = require(&id, "password", device.password.or_else(|| defaults.password.clone()))?;
-    let connect_secs = require(&id, "connect_secs", device.connect_secs.or(defaults.connect_secs))?;
-    let command_secs = require(&id, "command_secs", device.command_secs.or(defaults.command_secs))?;
+    let username = require(
+        &id,
+        "username",
+        device.username.or_else(|| defaults.username.clone()),
+    )?;
+    let password = require(
+        &id,
+        "password",
+        device.password.or_else(|| defaults.password.clone()),
+    )?;
+    let connect_secs = require(
+        &id,
+        "connect_secs",
+        device.connect_secs.or(defaults.connect_secs),
+    )?;
+    let command_secs = require(
+        &id,
+        "command_secs",
+        device.command_secs.or(defaults.command_secs),
+    )?;
 
     Ok(DeviceConfig {
         host: device.host,
@@ -304,7 +323,10 @@ host = "10.0.0.1"
 id = "dup"
 host = "10.0.0.2"
 "#;
-        assert_eq!(parse(text).unwrap_err(), ConfigError::DuplicateId("dup".into()));
+        assert_eq!(
+            parse(text).unwrap_err(),
+            ConfigError::DuplicateId("dup".into())
+        );
     }
 
     #[test]
@@ -345,7 +367,8 @@ command_secs = 3
 
     #[test]
     fn load_reads_from_disk() {
-        let path = std::env::temp_dir().join(format!("opensis-devices-{}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("opensis-devices-{}.toml", std::process::id()));
         std::fs::write(&path, USER_EXAMPLE).unwrap();
         let devices = load(&path).unwrap();
         std::fs::remove_file(&path).ok();

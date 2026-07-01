@@ -30,7 +30,10 @@ struct ClientHandler;
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
@@ -62,19 +65,28 @@ impl Connector for RusshConnector {
     async fn connect(&self, config: &DeviceConfig) -> Result<Box<dyn Transport>, ConnectError> {
         let ssh_config = Arc::new(Config::default());
 
-        let mut session = client::connect(ssh_config, (config.host.as_str(), config.port), ClientHandler)
-            .await
-            .map_err(connect_error)?;
+        let mut session = client::connect(
+            ssh_config,
+            (config.host.as_str(), config.port),
+            ClientHandler,
+        )
+        .await
+        .map_err(connect_error)?;
 
         let auth = session
             .authenticate_password(config.username.as_str(), config.password.as_str())
             .await
             .map_err(connect_error)?;
         if !auth.success() {
-            return Err(ConnectError::Failed("password authentication rejected".into()));
+            return Err(ConnectError::Failed(
+                "password authentication rejected".into(),
+            ));
         }
 
-        let channel = session.channel_open_session().await.map_err(connect_error)?;
+        let channel = session
+            .channel_open_session()
+            .await
+            .map_err(connect_error)?;
         channel.request_shell(true).await.map_err(connect_error)?;
 
         Ok(Box::new(RusshTransport {

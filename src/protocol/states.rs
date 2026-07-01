@@ -1,7 +1,5 @@
 use std::fmt;
 
-
-
 /// Recording state reported by the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingState {
