@@ -1,2 +1,5 @@
 /target
 .direnv
+result
+result-*
+dist
