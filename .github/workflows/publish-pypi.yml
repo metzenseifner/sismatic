@@ -1,34 +1,21 @@
 name: Publish to PyPI
 
-# Dedicated publisher. It has no build logic of its own: it runs only after the
-# "Build & Release" pipeline finishes, and only when that run both succeeded and
-# was a v* tag build (i.e. checks passed and the wheels + sdist exist). It then
-# reuses the artifacts that run produced and uploads them to PyPI.
+# Reusable module of the Build & Release pipeline — not a standalone workflow.
+# The pipeline calls it (uses: ./.github/workflows/publish-pypi.yml) as a final
+# job on v* tags, after checks + the wheel/sdist builds have passed. It carries
+# no build logic: it just gathers the distributions from the same run and ships
+# them.
 #
 # Auth is PyPI Trusted Publishing (OIDC), so there is no API token to manage:
 # configure sismatic's trusted publisher on PyPI to point at this repo, this
 # workflow file (publish-pypi.yml), and the `pypi` environment below.
 
 on:
-  workflow_run:
-    workflows: ["Build & Release"]
-    types: [completed]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: publish-pypi-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: false
+  workflow_call:
 
 jobs:
   publish:
     name: Upload to PyPI
-    # head_branch is the tag name for tag-triggered runs, so this gates on a
-    # successful v* tag build only — PR and branch runs never reach here.
-    if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -38,11 +25,11 @@ jobs:
       # Required for Trusted Publishing (OIDC token exchange with PyPI).
       id-token: write
     steps:
+      # Wheels + sdist were uploaded earlier in this same run, so no run-id is
+      # needed — download-artifact pulls them straight from the current run.
       - name: Download pipeline artifacts
         uses: actions/download-artifact@v4
         with:
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ github.token }}
           path: artifacts
 
       # Gather only the Python distributions. The pipeline also uploads a crate
