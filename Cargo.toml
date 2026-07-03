@@ -1,6 +1,6 @@
 [package]
 name = "sismatic"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Blocking Python facade for driving Extron SIS devices over SSH"
 license = "ECL-2.0"
