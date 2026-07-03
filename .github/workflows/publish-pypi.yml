@@ -1,0 +1,62 @@
+name: Publish to PyPI
+
+# Dedicated publisher. It has no build logic of its own: it runs only after the
+# "Build & Release" pipeline finishes, and only when that run both succeeded and
+# was a v* tag build (i.e. checks passed and the wheels + sdist exist). It then
+# reuses the artifacts that run produced and uploads them to PyPI.
+#
+# Auth is PyPI Trusted Publishing (OIDC), so there is no API token to manage:
+# configure sismatic's trusted publisher on PyPI to point at this repo, this
+# workflow file (publish-pypi.yml), and the `pypi` environment below.
+
+on:
+  workflow_run:
+    workflows: ["Build & Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pypi-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Upload to PyPI
+    # head_branch is the tag name for tag-triggered runs, so this gates on a
+    # successful v* tag build only — PR and branch runs never reach here.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sismatic/
+    permissions:
+      # Required for Trusted Publishing (OIDC token exchange with PyPI).
+      id-token: write
+    steps:
+      - name: Download pipeline artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      # Gather only the Python distributions. The pipeline also uploads a crate
+      # tarball (sismatic-crate-*.tar.gz), which is not a PyPI artifact.
+      - name: Collect wheels + sdist
+        run: |
+          mkdir -p dist
+          find artifacts \( -name '*.whl' -o -name '*.tar.gz' \) \
+            -not -name '*crate*' -exec cp -n {} dist/ \;
+          echo "Files to publish:"
+          ls -l dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          print-hash: true
