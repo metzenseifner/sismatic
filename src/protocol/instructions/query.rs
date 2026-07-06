@@ -4,78 +4,43 @@ use winnow::{ModalResult, Parser};
 
 // ---- Query (gettable) enum ------------------------------------------------
 use crate::protocol::control_chars::RCDR;
-use crate::protocol::instructions::{Instruction, UnknownInstruction};
-use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr, normalize};
+use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::catalog::instruction_catalog;
+use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
 use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
-use std::fmt;
-use std::str::FromStr;
 
-macro_rules! query_enum {
-    ($($variant:ident => $name:literal),+ $(,)?) => {
-        /// A built-in field that can be queried.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum Query {
-            $($variant),+
-        }
-
-        impl Query {
-            /// Every built-in query, in catalog order.
-            pub const ALL: &'static [Query] = &[$(Query::$variant),+];
-
-            /// The canonical uppercase name (e.g. `RUNNING_STATE`).
-            pub fn name(self) -> &'static str {
-                match self { $(Query::$variant => $name),+ }
-            }
-        }
-
-        impl FromStr for Query {
-            type Err = UnknownInstruction;
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                let norm = normalize(s);
-                match norm.as_str() {
-                    $($name => Ok(Query::$variant),)+
-                    _ => Err(UnknownInstruction(s.to_string())),
-                }
-            }
-        }
-    };
-}
-
-query_enum! {
-    Firmware => "FIRMWARE",
-    RunningState => "RUNNING_STATE",
-    UnitName => "UNIT_NAME",
-    TelnetPort => "TELNET_PORT",
-    SshPort => "SSH_PORT",
-    HttpPort => "HTTP_PORT",
-    SnmpPort => "SNMP_PORT",
-    HttpsPort => "HTTPS_PORT",
-    SnmpUnitLocation => "SNMP_UNIT_LOCATION",
-    SnmpUnitContact => "SNMP_UNIT_CONTACT",
-    SnmpPrivateCommunityString => "SNMP_PRIVATE_COMMUNITY_STRING",
-    SnmpPublicCommunityString => "SNMP_PUBLIC_COMMUNITY_STRING",
-    SnmpState => "SNMP_STATE",
-    DhcpMode => "DHCP_MODE",
-    Timezone => "TIMEZONE",
-    MacAddress => "MAC_ADDRESS",
-    PortTimeout => "PORT_TIMEOUT",
-    GlobalPortTimeout => "GLOBAL_PORT_TIMEOUT",
-    ModelName => "MODEL_NAME",
-    ModelDescription => "MODEL_DESCRIPTION",
-    ActiveAlarms => "ACTIVE_ALARMS",
-    PartNumber => "PART_NUMBER",
-    Coverage => "COVERAGE",
-    Presenter => "PRESENTER",
-    Relation => "RELATION",
-    Source => "SOURCE",
-    Subject => "SUBJECT",
-    Title => "TITLE",
-}
-
-impl fmt::Display for Query {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+instruction_catalog! {
+    /// A built-in field that can be queried.
+    pub enum Query {
+        Firmware { name: "FIRMWARE", aliases: [], doc: "Firmware/version string, e.g. 2.11." },
+        RunningState { name: "RUNNING_STATE", aliases: [], doc: "Current recording state (stopped, started, or paused)." },
+        UnitName { name: "UNIT_NAME", aliases: [], doc: "Configured unit name." },
+        TelnetPort { name: "TELNET_PORT", aliases: [], doc: "Telnet service port." },
+        SshPort { name: "SSH_PORT", aliases: [], doc: "SSH service port." },
+        HttpPort { name: "HTTP_PORT", aliases: [], doc: "HTTP service port." },
+        SnmpPort { name: "SNMP_PORT", aliases: [], doc: "SNMP service port." },
+        HttpsPort { name: "HTTPS_PORT", aliases: [], doc: "HTTPS service port." },
+        SnmpUnitLocation { name: "SNMP_UNIT_LOCATION", aliases: [], doc: "SNMP unit location string." },
+        SnmpUnitContact { name: "SNMP_UNIT_CONTACT", aliases: [], doc: "SNMP unit contact string." },
+        SnmpPrivateCommunityString { name: "SNMP_PRIVATE_COMMUNITY_STRING", aliases: [], doc: "SNMP private community string." },
+        SnmpPublicCommunityString { name: "SNMP_PUBLIC_COMMUNITY_STRING", aliases: [], doc: "SNMP public community string." },
+        SnmpState { name: "SNMP_STATE", aliases: [], doc: "Whether SNMP is enabled." },
+        DhcpMode { name: "DHCP_MODE", aliases: [], doc: "Whether DHCP is enabled." },
+        Timezone { name: "TIMEZONE", aliases: [], doc: "Configured timezone." },
+        MacAddress { name: "MAC_ADDRESS", aliases: [], doc: "Hardware MAC address." },
+        PortTimeout { name: "PORT_TIMEOUT", aliases: [], doc: "Per-port timeout." },
+        GlobalPortTimeout { name: "GLOBAL_PORT_TIMEOUT", aliases: [], doc: "Global port timeout." },
+        ModelName { name: "MODEL_NAME", aliases: [], doc: "Device model name." },
+        ModelDescription { name: "MODEL_DESCRIPTION", aliases: [], doc: "Device model description." },
+        ActiveAlarms { name: "ACTIVE_ALARMS", aliases: [], doc: "Active alarms." },
+        PartNumber { name: "PART_NUMBER", aliases: [], doc: "Device part number." },
+        Coverage { name: "COVERAGE", aliases: [], doc: "Dublin Core 'coverage' metadata register (read)." },
+        Presenter { name: "PRESENTER", aliases: [], doc: "Presenter metadata register (read)." },
+        Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation' metadata register (read)." },
+        Source { name: "SOURCE", aliases: [], doc: "Dublin Core 'source' metadata register (read)." },
+        Subject { name: "SUBJECT", aliases: [], doc: "Dublin Core 'subject' metadata register (read)." },
+        Title { name: "TITLE", aliases: [], doc: "Recording title metadata register (read)." },
     }
 }
 

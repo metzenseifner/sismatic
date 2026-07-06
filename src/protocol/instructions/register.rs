@@ -1,65 +1,46 @@
 // ---- Register (settable) enum ---------------------------------------------
 
 use crate::protocol::payload_helpers::is_not_cr;
-use std::{fmt, str::FromStr};
 
 use winnow::{
     Parser,
     token::{literal, take_while},
 };
 
+use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::{
     In, ParseFn, Value,
     control_chars::{CR, ESC, RCDR, RCDR_LOWER},
-    instructions::{Instruction, UnknownInstruction},
     parser_of,
-    payload_helpers::{normalize, shorten},
+    payload_helpers::shorten,
 };
 
 //
 // ---- Register / token constants from the SIS protocol ---------------------
 
-/// A built-in metadata register that can be written to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Register {
-    Contributor,
-    Course,
-    Coverage,
-    Creator,
-    Description,
-    Format,
-    Language,
-    Presenter,
-    Publisher,
-    Relation,
-    Rights,
-    Source,
-    Subject,
-    SystemName,
-    Title,
-    Type,
+instruction_catalog! {
+    /// A built-in metadata register that can be written to.
+    pub enum Register {
+        Contributor { name: "CONTRIBUTOR", aliases: [], doc: "Dublin Core 'contributor'." },
+        Course { name: "COURSE", aliases: [], doc: "Course name." },
+        Coverage { name: "COVERAGE", aliases: [], doc: "Dublin Core 'coverage'." },
+        Description { name: "DESCRIPTION", aliases: [], doc: "Dublin Core 'description'." },
+        Format { name: "FORMAT", aliases: [], doc: "Dublin Core 'format'." },
+        Language { name: "LANGUAGE", aliases: [], doc: "Dublin Core 'language'." },
+        Presenter { name: "PRESENTER", aliases: [], doc: "Presenter name." },
+        Publisher { name: "PUBLISHER", aliases: [], doc: "Dublin Core 'publisher'." },
+        Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation'." },
+        Rights { name: "RIGHTS", aliases: [], doc: "Dublin Core 'rights'." },
+        Source { name: "SOURCE", aliases: [], doc: "Dublin Core 'source'." },
+        Subject { name: "SUBJECT", aliases: [], doc: "Dublin Core 'subject'." },
+        SystemName { name: "SYSTEMNAME", aliases: [], doc: "System name." },
+        Title { name: "TITLE", aliases: [], doc: "Recording title." },
+        Type { name: "TYPE", aliases: [], doc: "Dublin Core 'type'." },
+    }
 }
 
 impl Register {
-    pub const ALL: &'static [Register] = &[
-        Register::Contributor,
-        Register::Course,
-        Register::Coverage,
-        Register::Creator,
-        Register::Description,
-        Register::Format,
-        Register::Language,
-        Register::Presenter,
-        Register::Publisher,
-        Register::Relation,
-        Register::Rights,
-        Register::Source,
-        Register::Subject,
-        Register::SystemName,
-        Register::Title,
-        Register::Type,
-    ];
-
     pub fn index(self) -> u8 {
         match self {
             Register::Contributor => 0,
@@ -79,12 +60,7 @@ impl Register {
             Register::Type => 14,
             Register::SystemName => 15,
             Register::Course => 16,
-            _ => unimplemented!("confirm index"),
         }
-    }
-
-    fn name(self) -> String {
-        format!("{self:?}").to_uppercase()
     }
 
     /// `M`-prefixed register address, derived from [`index`].
@@ -102,37 +78,6 @@ impl Register {
             name: self.name().to_string(),
             payload,
             parser: settable_echo(&reg),
-        }
-    }
-}
-
-impl fmt::Display for Register {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.name())
-    }
-}
-
-impl FromStr for Register {
-    type Err = UnknownInstruction;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match normalize(s).as_str() {
-            "CONTRIBUTOR" => Ok(Self::Contributor),
-            "COURSE" => Ok(Self::Course),
-            "COVERAGE" => Ok(Self::Coverage),
-            "CREATOR" => Ok(Self::Creator),
-            "DESCRIPTION" => Ok(Self::Description),
-            "FORMAT" => Ok(Self::Format),
-            "LANGUAGE" => Ok(Self::Language),
-            "PRESENTER" => Ok(Self::Presenter),
-            "PUBLISHER" => Ok(Self::Publisher),
-            "RELATION" => Ok(Self::Relation),
-            "RIGHTS" => Ok(Self::Rights),
-            "SOURCE" => Ok(Self::Source),
-            "SUBJECT" => Ok(Self::Subject),
-            "SYSTEMNAME" => Ok(Self::SystemName),
-            "TITLE" => Ok(Self::Title),
-            "TYPE" => Ok(Self::Type),
-            _ => Err(UnknownInstruction(s.to_string())),
         }
     }
 }

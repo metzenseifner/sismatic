@@ -122,7 +122,17 @@
           # Editing README.md etc. won't trigger rebuilds. If your build needs
           # extra files (sql migrations, protobufs, ...), switch to
           # craneLib's fileset helpers and include them explicitly.
-          src = craneLib.cleanCargoSource ./.;
+          #
+          # python/ is kept in addition to the cargo sources: the stub freshness
+          # test in src/stub.rs pulls python/sismatic/__init__.pyi in via
+          # include_str!, so the file must be present whenever the crate's tests
+          # are compiled (clippy, nextest), not only when the wheel is built.
+          src = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type) || (lib.hasInfix "/python/" path);
+          };
 
           # Arguments shared by every crane invocation below.
           commonArgs = {
@@ -161,12 +171,15 @@
 
           # Source for the wheel: the cargo sources crane already filters,
           # plus the packaging files maturin reads (pyproject.toml and the
-          # readme/license it points at, which cleanCargoSource drops).
+          # readme/license it points at, which cleanCargoSource drops) and the
+          # hand-authored Python layer under python/ (py.typed + __init__.pyi
+          # stub) that `python-source` in pyproject.toml pulls into the wheel.
           pythonSrc = lib.cleanSourceWith {
             src = ./.;
             filter =
               path: type:
               (craneLib.filterCargoSources path type)
+              || (lib.hasInfix "/python/" path)
               || (
                 let
                   base = baseNameOf path;

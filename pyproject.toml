@@ -25,4 +25,9 @@ bindings = "pyo3"
 # The extension module lives behind the `python` cargo feature (which also
 # turns on `ssh`); without this maturin builds the crate with pyo3 absent.
 features = ["python"]
+# Ship a hand-authored Python layer alongside the compiled module: the PEP 561
+# `py.typed` marker and `__init__.pyi` type stub (generated from the Rust
+# instruction catalogs by `cargo run --bin gen_stub`). maturin drops the
+# compiled extension into this package as `sismatic/sismatic.abi3.so`.
+python-source = "python"
 # abi3 wheels only need to be built once per platform.
