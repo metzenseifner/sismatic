@@ -6,6 +6,10 @@
 //! wraps the channel's byte stream so the layers above are unaware they are
 //! talking to real hardware rather than [`super::fake::FakeTransport`].
 //!
+//! Authentication tries plain `password` first, then falls back to
+//! `keyboard-interactive` — Extron SIS devices offer only the latter, prompting
+//! for the password over an info request rather than accepting it directly.
+//!
 //! Two deliberate simplifications, both candidates for hardening later:
 //! - the server's host key is accepted unconditionally (no trust-on-first-use);
 //! - an interactive shell is requested, which is how Extron SIS devices expose
@@ -15,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use russh::ChannelStream;
-use russh::client::{self, Config, Handle, Msg};
+use russh::client::{self, Config, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::ssh_key::PublicKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -73,15 +77,7 @@ impl Connector for RusshConnector {
         .await
         .map_err(connect_error)?;
 
-        let auth = session
-            .authenticate_password(config.username.as_str(), config.password.as_str())
-            .await
-            .map_err(connect_error)?;
-        if !auth.success() {
-            return Err(ConnectError::Failed(
-                "password authentication rejected".into(),
-            ));
-        }
+        authenticate(&mut session, config).await?;
 
         let channel = session
             .channel_open_session()
@@ -93,6 +89,49 @@ impl Connector for RusshConnector {
             _session: session,
             stream: channel.into_stream(),
         }))
+    }
+}
+
+/// Authenticate the session with the device's password. Tries plain `password`
+/// auth first; if the server does not accept it (Extron SIS devices offer only
+/// `keyboard-interactive`), retries over keyboard-interactive, answering every
+/// prompt the server sends with the same password.
+async fn authenticate(
+    session: &mut Handle<ClientHandler>,
+    config: &DeviceConfig,
+) -> Result<(), ConnectError> {
+    let username = config.username.as_str();
+    let password = config.password.as_str();
+
+    if session
+        .authenticate_password(username, password)
+        .await
+        .map_err(connect_error)?
+        .success()
+    {
+        return Ok(());
+    }
+
+    let mut response = session
+        .authenticate_keyboard_interactive_start(username, None)
+        .await
+        .map_err(connect_error)?;
+    loop {
+        match response {
+            KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            KeyboardInteractiveAuthResponse::Failure { .. } => {
+                return Err(ConnectError::Failed(
+                    "password authentication rejected".into(),
+                ));
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                let answers = prompts.iter().map(|_| password.to_owned()).collect();
+                response = session
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await
+                    .map_err(connect_error)?;
+            }
+        }
     }
 }
 

@@ -115,6 +115,11 @@ fn value_into_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
 /// The `sismatic` Python extension module.
 #[pymodule]
 fn sismatic(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Bridge Rust's `log` output (russh's SSH handshake and auth negotiation)
+    // into Python's `logging`; callers see it with
+    // `logging.basicConfig(level=logging.DEBUG)`. Ignore the error if a logger
+    // is somehow already installed for this process.
+    let _ = pyo3_log::init();
     m.add_class::<Sismatic>()?;
     Ok(())
 }

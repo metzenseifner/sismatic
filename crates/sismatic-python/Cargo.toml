@@ -19,10 +19,13 @@ sismatic-core = { workspace = true }
 # `abi3-py38` builds against CPython's stable ABI, so one wheel covers 3.8+
 # instead of one wheel per interpreter version.
 pyo3 = { workspace = true, optional = true }
+# Routes russh's `log` output (SSH handshake + auth negotiation) to Python's
+# `logging` so connection failures can be debugged from the Python side.
+pyo3-log = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 
 [features]
 # The blocking Python facade. It drives real hardware, so it pulls in core's
 # `ssh` transport and a tokio runtime to block on. `dep:pyo3` gates the compiled
 # extension module; without this feature the crate is just the pure stub layer.
-python = ["dep:pyo3", "dep:tokio", "sismatic-core/ssh"]
+python = ["dep:pyo3", "dep:pyo3-log", "dep:tokio", "sismatic-core/ssh"]
