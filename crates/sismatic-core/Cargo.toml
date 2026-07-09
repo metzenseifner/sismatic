@@ -1,0 +1,22 @@
+[package]
+name = "sismatic-core"
+description = "SIS protocol model and SSH device layer for Extron devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dashmap.workspace = true
+russh = { workspace = true, optional = true }
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+toml.workspace = true
+winnow.workspace = true
+
+[features]
+# Real SSH transport (russh). Heavy native dep, so the pure layers and
+# `cargo test` stay light unless this is enabled.
+ssh = ["dep:russh", "tokio/net", "tokio/io-util", "tokio/rt-multi-thread"]
+# Exposes FakeTransport (and other test doubles) to out-of-crate integration tests.
+testing = []

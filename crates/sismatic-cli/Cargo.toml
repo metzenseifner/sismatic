@@ -1,0 +1,16 @@
+[package]
+name = "sismatic-cli"
+description = "Command-line interface for driving Extron SIS devices over SSH"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sismatic"
+path = "src/main.rs"
+
+[dependencies]
+sismatic-core = { workspace = true, features = ["ssh"] }
+anyhow.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

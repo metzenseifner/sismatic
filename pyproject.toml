@@ -18,16 +18,23 @@ classifiers = [
 ]
 
 [tool.maturin]
+# The Rust extension lives in a workspace member, not at the repo root. This
+# packaging manifest stays at the root (so it can point `readme`/`license` at
+# the root files) and directs maturin at the crate that produces the module.
+manifest-path = "crates/sismatic-python/Cargo.toml"
 # pyo3 is an *optional* dep, so maturin's auto-detection (which resolves
 # default features) never sees it and would fall back to cffi. Pin the
 # binding kind explicitly.
 bindings = "pyo3"
+# The compiled module is named `sismatic` (the python crate sets `[lib] name`),
+# matching the package directory under `python-source`.
+module-name = "sismatic"
 # The extension module lives behind the `python` cargo feature (which also
 # turns on `ssh`); without this maturin builds the crate with pyo3 absent.
 features = ["python"]
 # Ship a hand-authored Python layer alongside the compiled module: the PEP 561
 # `py.typed` marker and `__init__.pyi` type stub (generated from the Rust
-# instruction catalogs by `cargo run --bin gen_stub`). maturin drops the
-# compiled extension into this package as `sismatic/sismatic.abi3.so`.
-python-source = "python"
-# abi3 wheels only need to be built once per platform.
+# instruction catalogs by `cargo run -p sismatic-python --bin gen_stub`).
+# maturin drops the compiled extension into this package as
+# `sismatic/sismatic.abi3.so`.
+python-source = "crates/sismatic-python/python"

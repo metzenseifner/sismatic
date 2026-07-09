@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
-use sismatic::devices::config;
-use sismatic::devices::registry::Registry;
-use sismatic::devices::transport::ssh::RusshConnector;
-use sismatic::recorder::protocol::Value;
-use sismatic::recorder::protocol::instructions::query::Query;
+use sismatic_core::devices::config;
+use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::transport::ssh::RusshConnector;
+use sismatic_core::protocol::Value;
+use sismatic_core::protocol::instructions::query::Query;
 
 /// Returns the device credentials, or `None` if the test should be skipped.
 fn device_from_env() -> Option<(String, String, String)> {

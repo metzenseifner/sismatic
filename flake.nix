@@ -134,15 +134,33 @@
               (craneLib.filterCargoSources path type) || (lib.hasInfix "/python/" path);
           };
 
+          # Version is shared by every workspace member (workspace.package),
+          # so read it once from the root manifest.
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
           # Arguments shared by every crane invocation below.
           commonArgs = {
-            inherit src;
+            inherit src version;
+            # Virtual workspace: there is no root package to name the
+            # derivations, so give crane a workspace-wide pname. Individual
+            # crate builds below override it.
+            pname = "sismatic-workspace";
             strictDeps = true;
 
             # Build-time tools (compilers, codegen, pkg-config) go here.
+            # russh -> aws-lc-sys builds AWS-LC from C source. The CLI and web
+            # front-ends always enable core's `ssh` feature, and cargo unifies
+            # features across the workspace, so every build here (deps, clippy,
+            # nextest, the binaries) compiles that C source and needs cmake +
+            # perl -- not just the wheel.
             nativeBuildInputs = [
-              # pkgs.pkg-config
+              pkgs.cmake
+              pkgs.perl
             ];
+            # aws-lc-sys drives its own cmake invocation from build.rs; crane's
+            # cmake setup hook would otherwise try (and fail) to configure at
+            # the workspace root, which has no CMakeLists.txt.
+            dontUseCmakeConfigure = true;
 
             # Libraries you link against go here.
             buildInputs = [
@@ -158,14 +176,32 @@
           # every check below and across CI runs.
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-          # The crate itself, built on top of the cached dependency layer.
-          my-crate = craneLib.buildPackage (
-            commonArgs
+          # Arguments shared by the individual workspace-member builds, all on
+          # top of the cached dependency layer.
+          individualCrateArgs = commonArgs // {
+            inherit cargoArtifacts;
+            # Tests run in the dedicated nextest check below; don't run them a
+            # second time per crate.
+            doCheck = false;
+          };
+
+          # The CLI front-end binary (`sismatic`).
+          cli = craneLib.buildPackage (
+            individualCrateArgs
             // {
-              inherit cargoArtifacts;
-              # Tests run in the dedicated nextest check below;
-              # don't run them a second time here.
-              doCheck = false;
+              pname = "sismatic-cli";
+              cargoExtraArgs = "-p sismatic-cli";
+              meta.mainProgram = "sismatic";
+            }
+          );
+
+          # The HTTP server binary (`sismatic-web`).
+          web = craneLib.buildPackage (
+            individualCrateArgs
+            // {
+              pname = "sismatic-web";
+              cargoExtraArgs = "-p sismatic-web";
+              meta.mainProgram = "sismatic-web";
             }
           );
 
@@ -196,7 +232,7 @@
           # dev and reproducibility.
           wheel = pkgs.stdenv.mkDerivation {
             pname = "sismatic-wheel";
-            inherit (my-crate) version;
+            inherit version;
             src = pythonSrc;
 
             # Vendor the exact locked deps so maturin can build --offline.
@@ -209,10 +245,8 @@
               (rustToolchain pkgs)
               pkgs.maturin
               pkgs.python3
-              # russh -> aws-lc-sys builds AWS-LC from C source.
-              pkgs.cmake
-              pkgs.perl
             ]
+            # cmake + perl (for aws-lc-sys) come in via commonArgs.
             ++ commonArgs.nativeBuildInputs;
 
             buildInputs = commonArgs.buildInputs;
@@ -288,8 +322,8 @@
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
           checks = {
-            # The package building at all is itself a check.
-            inherit my-crate;
+            # The member binaries building at all is itself a check.
+            inherit cli web;
 
             # Clippy as a separate derivation: CI blocks on lints, but
             # downstream consumers can still build the package without
@@ -309,7 +343,10 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
-                cargoExtraArgs = "--features testing";
+                # `--features` is not allowed at a virtual-workspace root, so
+                # scope the docs to core, the crate whose module docs link the
+                # `testing`-gated `fake` module.
+                cargoExtraArgs = "-p sismatic-core --features testing";
                 env.RUSTDOCFLAGS = "--deny warnings";
               }
             );
@@ -368,7 +405,9 @@
           inherit checks;
 
           packages = {
-            default = my-crate;
+            default = cli;
+            # `nix build .#cli` / `.#web` -> the front-end binaries.
+            inherit cli web;
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
           };
@@ -379,7 +418,12 @@
           apps = {
             default = {
               type = "app";
-              program = pkgs.lib.getExe my-crate;
+              program = pkgs.lib.getExe cli;
+            };
+            # `nix run .#web` starts the HTTP server.
+            web = {
+              type = "app";
+              program = pkgs.lib.getExe web;
             };
             # Pipeline steps, callable identically here and in CI:
             #   nix run .#build-wheel

@@ -91,6 +91,12 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "ECL-2.0",
   "Unicode-3.0",
+  # OSI-approved, FSF-libre permissive licenses, as permissive as MIT. They
+  # arrive unavoidably through the russh crypto stack (curve25519-dalek,
+  # ed25519-dalek, subtle, untrusted, aws-lc-*) and axum's router (matchit),
+  # both of which the CLI and web front-ends always link.
+  "BSD-3-Clause",
+  "ISC",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
@@ -103,6 +109,11 @@ exceptions = [
   # Each entry is the crate and version constraint, and its specific allow
   # list
   #{ allow = ["Zlib"], crate = "adler32" },
+  #
+  # aws-lc-sys (pulled in transitively by russh) vendors BoringSSL/AWS-LC C
+  # sources under a license soup that includes MIT-0. Keep that rare license
+  # scoped to just this crate rather than adding it to the global allow list.
+  { allow = ["MIT-0"], crate = "aws-lc-sys" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

@@ -18,13 +18,13 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::devices::registry::Registry;
-use crate::devices::transport::ssh::RusshConnector;
-use crate::protocol::Value;
-use crate::protocol::instructions::Instruction;
-use crate::protocol::instructions::commands::Command;
-use crate::protocol::instructions::query::Query;
-use crate::protocol::instructions::register::Register;
+use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::transport::ssh::RusshConnector;
+use sismatic_core::protocol::Value;
+use sismatic_core::protocol::instructions::Instruction;
+use sismatic_core::protocol::instructions::commands::Command;
+use sismatic_core::protocol::instructions::query::Query;
+use sismatic_core::protocol::instructions::register::Register;
 
 /// A pool of Extron devices, addressable from Python by id.
 #[pyclass(name = "Sis")]
