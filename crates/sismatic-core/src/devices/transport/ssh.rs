@@ -22,6 +22,8 @@ use russh::ChannelStream;
 use russh::client::{self, Config, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::ssh_key::PublicKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, instrument};
+use uuid::Uuid;
 
 use crate::devices::config::DeviceConfig;
 use crate::devices::connector::{ConnectError, Connector};
@@ -47,17 +49,21 @@ impl client::Handler for ClientHandler {
 pub struct RusshTransport {
     _session: Handle<ClientHandler>,
     stream: ChannelStream<Msg>,
+    span: tracing::Span,
 }
 
 #[async_trait]
 impl Transport for RusshTransport {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        debug!(parent: &self.span, data = %bytes.escape_ascii(), "TX");
         self.stream.write_all(bytes).await.map_err(io_error)?;
         self.stream.flush().await.map_err(io_error)
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.stream.read(buf).await.map_err(io_error)
+        let n = self.stream.read(buf).await.map_err(io_error)?;
+        debug!(parent: &self.span, len = n, data = %buf[..n].escape_ascii(), "RX");
+        Ok(n)
     }
 }
 
@@ -66,6 +72,16 @@ pub struct RusshConnector;
 
 #[async_trait]
 impl Connector for RusshConnector {
+    #[instrument(
+    name = "Connecting to get an SSH transport",
+    skip_all,
+    fields(
+        connection_id = %Uuid::new_v4(),
+        id = %config.id,
+        host = %config.host,
+        port = config.port
+        ),
+    )]
     async fn connect(&self, config: &DeviceConfig) -> Result<Box<dyn Transport>, ConnectError> {
         let ssh_config = Arc::new(Config::default());
 
@@ -88,6 +104,7 @@ impl Connector for RusshConnector {
         Ok(Box::new(RusshTransport {
             _session: session,
             stream: channel.into_stream(),
+            span: tracing::Span::current(),
         }))
     }
 }

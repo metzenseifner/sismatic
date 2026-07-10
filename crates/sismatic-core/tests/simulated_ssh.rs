@@ -25,6 +25,10 @@ use sismatic_core::devices::device::Device;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::query::Query;
+use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Registry};
 
 /// A throwaway ed25519 host key generated once for this test. It authenticates
 /// nothing real, so committing it is harmless — the client accepts any host key
@@ -71,9 +75,29 @@ impl SimulatedSmp {
     }
 }
 
+use std::sync::Once;
+static INIT: Once = Once::new();
+fn init_tracing() {
+    INIT.call_once(|| {
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        let formatting_layer = BunyanFormattingLayer::new(
+            "sismatic-core".into(),
+            //tracing_subscriber::fmt::TestWriter::default, // see gotcha #2
+            std::io::stdout,
+        );
+        Registry::default()
+            .with(env_filter)
+            .with(JsonStorageLayer)
+            .with(formatting_layer)
+            .init();
+    });
+}
+
 /// Bind a real SSH server that accepts only keyboard-interactive auth on a
 /// random loopback port. Returns once it is listening.
 async fn spawn_smp() -> SimulatedSmp {
+    init_tracing();
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind loopback");

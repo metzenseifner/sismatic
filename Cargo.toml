@@ -40,3 +40,12 @@ serde_json = "1.0"
 tokio = { version = "1" }
 toml = "0.8"
 winnow = "1.0.3"
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", features = [
+  "registry",
+  "env-filter",
+] }
+tracing-bunyan-formatter = "0.3.10"
+tracing-log = "0.2.0"
+secrecy = { version = "0.10.3", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
