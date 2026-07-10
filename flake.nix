@@ -12,48 +12,6 @@
     Chapter 1 of the book additionally recommends cargo-watch for the inner dev
     loop, and the Docker chapter introduces cargo-chef for dependency layer
     caching.
-
-    # Divergences in this flake
-    - Test runner. The gist uses plain cargo test; you have nextest.
-      Functionally equivalent for the book's purposes and generally considered an
-      upgrade, but if you want a literal match, swap cargoNextest for
-      craneLib.cargoTest. I'd keep nextest.
-    - The big one: the book's integration tests won't run in the Nix sandbox
-      as-is. This doesn't bite in chapter 1, but from chapter 3 onward,
-      zero2prod's tests spin up the app and talk to a live Postgres (launched via
-      scripts/init_db.sh in Docker). The Nix build sandbox has no network and no
-      running services, so the moment you write those tests, your nextest check
-      will start failing — not because the code is wrong, but because the
-      database isn't there. You have three realistic options: run integration
-      tests outside Nix in the devShell (book-style, simplest — keep the Nix
-      check limited to unit tests via nextest filter expressions); start an
-      ephemeral Postgres inside the check derivation (pkgs.postgresql, initdb +
-      pg_ctl against a Unix socket in a preCheck hook — fully hermetic, very
-      Nix-idiomatic, some setup work); or a NixOS VM test for the full
-      integration suite (the heavyweight, most rigorous option). Worth deciding
-      before you hit chapter 3 rather than when CI suddenly goes red.
-    - Note the coverage check, like tarpaulin itself, is Linux-only — on
-      Darwin systems it simply doesn't appear in checks, which is the correct
-      behavior (the book's coverage job likewise runs only on a Linux runner). If
-      you'd rather have coverage on macOS too, craneLib.cargoLlvmCov is the
-      cross-platform alternative.
-
-    ## Extra Notes from AI
-    - The dependency-caching match is almost poetic. cargo-chef — the tool the
-      book's Docker chapter uses to build dependencies as a separate cached layer
-      — was written by Palmieri for the book. Crane's buildDepsOnly is exactly
-      that idea, natively in Nix. You're not approximating his recommendation;
-      you're using the Nix-native implementation of it. Relatedly, your
-      derivation-level caching subsumes what rust-cache does in his Actions jobs.
-    - The audit freshness model differs in a way worth acting on. His audit
-      runs on a daily cron precisely so newly published advisories flag existing
-      code. Your advisory-db is a pinned input — it only knows about advisories
-      as of your last nix flake update advisory-db. To match the book's intent,
-      add a small scheduled CI job that updates that one input and runs the audit
-      check (and ideally opens a PR with the lockfile bump). Without it, your
-      audit check is technically present but silently goes stale.
-    - Coverage is the one genuinely missing check. Crane has a helper for
-      exactly this. Let me add it, plus the chapter-1 dev-loop tooling:
   '';
 
   inputs = {
@@ -129,9 +87,7 @@
           # are compiled (clippy, nextest), not only when the wheel is built.
           src = lib.cleanSourceWith {
             src = ./.;
-            filter =
-              path: type:
-              (craneLib.filterCargoSources path type) || (lib.hasInfix "/python/" path);
+            filter = path: type: (craneLib.filterCargoSources path type) || (lib.hasInfix "/python/" path);
           };
 
           # Version is shared by every workspace member (workspace.package),
@@ -390,7 +346,7 @@
               }
             );
           }
-          # Code coverage (zero2prod's `cargo tarpaulin` job).
+          # Code coverage
           # Tarpaulin only works on Linux, hence the gate.
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             coverage = craneLib.cargoTarpaulin (
@@ -441,7 +397,7 @@
           # `nix develop`: inherits every dependency the checks need,
           # plus the pinned toolchain (cargo, rustc, clippy, rustfmt).
           #
-          # Fast linking (zero2prod ch1):
+          # Fast linking:
           # - Linux x86_64: nothing to configure. rustc >= 1.90 links with
           #   its bundled rust-lld by default; the book's clang+lld
           #   .cargo/config.toml dance predates this. (aarch64-linux still
@@ -458,7 +414,7 @@
                 #------------------------------------------------------------------------------#
                 pkgs.cargo-nextest
                 pkgs.cargo-deny
-                # zero2prod chapter 1: inner development loop
+                # inner development loop
                 pkgs.cargo-watch # or pkgs.bacon (maintained successor)
                 # `cargo expand` needs a nightly rustc for --pretty=expanded;
                 # the pinned stable toolchain stays the default, nightly is

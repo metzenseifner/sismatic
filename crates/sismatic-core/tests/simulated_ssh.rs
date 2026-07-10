@@ -1,0 +1,188 @@
+//! Integration test against a *real* SSH server that behaves like an Extron
+//! SMP: it offers only `keyboard-interactive` authentication, never `password`.
+//! This exercises [`RusshConnector`]'s auth fallback end to end over a genuine
+//! russh handshake rather than a mock.
+//!
+//! The setup [`spawn_smp`] binds a russh server
+//! on a random loopback port and returns its port plus the credentials it will
+//! accept, so each test dials it exactly the way production dials a device. The
+//! whole file is gated on the `ssh` feature, matching [`real_ssh`](super).
+#![cfg(feature = "ssh")]
+
+use std::borrow::Cow;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use russh::keys::PrivateKey;
+use russh::server::{self, Auth, Handler, Msg, Server, Session};
+use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use tokio::net::TcpListener;
+
+use sismatic_core::devices::config::DeviceConfig;
+use sismatic_core::devices::connector::{ConnectError, Connector};
+use sismatic_core::devices::transport::ssh::RusshConnector;
+
+/// A throwaway ed25519 host key generated once for this test. It authenticates
+/// nothing real, so committing it is harmless — the client accepts any host key
+/// anyway (see `ClientHandler` in the ssh transport).
+const HOST_KEY: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAYfora4TPkBvMx2eF/FwcBKEaoVuEYk1F3JnzDZyAeGAAAAJgKyK15Csit
+eQAAAAtzc2gtZWQyNTUxOQAAACAYfora4TPkBvMx2eF/FwcBKEaoVuEYk1F3JnzDZyAeGA
+AAAECscSo1FYZdIrWMUboREni6VNWV929M6YrBMsb9x57WxBh+itrhM+QG8zHZ4X8XBwEo
+RqhW4RiTUXcmfMNnIB4YAAAAFXNpbS1zbXAtdGVzdC1ob3N0LWtleQ==
+-----END OPENSSH PRIVATE KEY-----
+"#;
+
+const USERNAME: &str = "admin";
+const PASSWORD: &str = "extron";
+
+/// A running simulated SMP. Holds the server task so it stays alive for the test
+/// and aborts it on drop, so no accept loop leaks between tests.
+struct SimulatedSmp {
+    port: u16,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SimulatedSmp {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl SimulatedSmp {
+    /// A device config pointed at this server, authenticating with `password`.
+    fn device_config(&self, password: &str) -> DeviceConfig {
+        DeviceConfig {
+            id: "sim".into(),
+            host: "127.0.0.1".into(),
+            port: self.port,
+            username: USERNAME.into(),
+            password: password.into(),
+            connect_timeout: Duration::from_secs(5),
+            command_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Bind a real SSH server that accepts only keyboard-interactive auth on a
+/// random loopback port. Returns once it is listening.
+async fn spawn_smp() -> SimulatedSmp {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind loopback");
+    let port = listener.local_addr().expect("local addr").port();
+
+    // Advertise only keyboard-interactive, like an Extron SMP.
+    let mut methods = MethodSet::empty();
+    methods.push(MethodKind::KeyboardInteractive);
+
+    let config = Arc::new(server::Config {
+        methods,
+        // Default is a 1s constant-time rejection delay; shorten it so the
+        // password->keyboard-interactive fallback isn't paced by a full second.
+        auth_rejection_time: Duration::from_millis(1),
+        auth_rejection_time_initial: Some(Duration::from_millis(1)),
+        keys: vec![PrivateKey::from_openssh(HOST_KEY).expect("valid host key")],
+        ..Default::default()
+    });
+
+    let mut smp = SmpServer;
+    let server = tokio::spawn(async move {
+        let _ = smp.run_on_socket(config, &listener).await;
+    });
+
+    SimulatedSmp { port, server }
+}
+
+/// The server side: one [`SmpHandler`] per connection.
+struct SmpServer;
+
+impl Server for SmpServer {
+    type Handler = SmpHandler;
+
+    fn new_client(&mut self, _peer: Option<SocketAddr>) -> SmpHandler {
+        SmpHandler
+    }
+}
+
+/// Reproduces the SMP auth handshake: `password` is never accepted, and
+/// `keyboard-interactive` sends one "Password:" prompt whose answer must match
+/// the configured credential.
+struct SmpHandler;
+
+impl Handler for SmpHandler {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        // The device does not offer password auth at all.
+        Ok(Auth::reject())
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        match response {
+            // First round: challenge the client for its password.
+            None => Ok(Auth::Partial {
+                name: Cow::Borrowed("Extron SMP"),
+                instructions: Cow::Borrowed(""),
+                prompts: Cow::Owned(vec![(Cow::Borrowed("Password: "), false)]),
+            }),
+            // Second round: accept iff the single answer matches.
+            Some(mut answers) => {
+                let ok = user == USERNAME && answers.next().as_deref() == Some(PASSWORD.as_bytes());
+                if ok {
+                    Ok(Auth::Accept)
+                } else {
+                    Ok(Auth::reject())
+                }
+            }
+        }
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn keyboard_interactive_auth_succeeds() {
+    let smp = spawn_smp().await;
+
+    RusshConnector
+        .connect(&smp.device_config(PASSWORD))
+        .await
+        .expect("keyboard-interactive auth should succeed");
+}
+
+#[tokio::test]
+async fn wrong_password_is_rejected() {
+    let smp = spawn_smp().await;
+
+    match RusshConnector
+        .connect(&smp.device_config("not-the-password"))
+        .await
+    {
+        Err(ConnectError::Failed(_)) => {}
+        Err(other) => panic!("expected an auth failure, got {other:?}"),
+        Ok(_) => panic!("expected an auth failure, but the connection succeeded"),
+    }
+}

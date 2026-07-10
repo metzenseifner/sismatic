@@ -1,6 +1,6 @@
 [toolchain]
 # >= 1.90 matters: rustc uses its bundled rust-lld by default on
-# x86_64-unknown-linux-gnu since 1.90, which covers zero2prod's
-# "fast linking on Linux" advice with zero configuration.
+# x86_64-unknown-linux-gnu since 1.90
+# to enable "fast linking on Linux" with zero configuration.
 channel = "1.92.0"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
