@@ -21,7 +21,10 @@ use tokio::net::TcpListener;
 
 use sismatic_core::devices::config::DeviceConfig;
 use sismatic_core::devices::connector::{ConnectError, Connector};
+use sismatic_core::devices::device::Device;
 use sismatic_core::devices::transport::ssh::RusshConnector;
+use sismatic_core::protocol::Value;
+use sismatic_core::protocol::instructions::query::Query;
 
 /// A throwaway ed25519 host key generated once for this test. It authenticates
 /// nothing real, so committing it is harmless — the client accepts any host key
@@ -37,6 +40,8 @@ RqhW4RiTUXcmfMNnIB4YAAAAFXNpbS1zbXAtdGVzdC1ob3N0LWtleQ==
 
 const USERNAME: &str = "admin";
 const PASSWORD: &str = "extron";
+/// The unit name the simulated SMP reports for a `unit-name` query.
+const UNIT_NAME: &str = "Main Hall SMP";
 
 /// A running simulated SMP. Holds the server task so it stays alive for the test
 /// and aborts it on drop, so no accept loop leaks between tests.
@@ -161,6 +166,36 @@ impl Handler for SmpHandler {
         session.channel_success(channel)?;
         Ok(())
     }
+
+    /// The SIS command interface: each request the client writes is answered
+    /// with the device's framed reply. Requests the simulator does not model are
+    /// ignored, which surfaces as a command timeout on the client side.
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(reply) = self.reply_to(data) {
+            session.data(channel, reply.into_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+impl SmpHandler {
+    /// Map a SIS request payload to the SMP's framed reply, deriving the request
+    /// bytes from the real instruction so the simulator can't drift from the
+    /// protocol. Extend this match to model more queries.
+    ///
+    /// Assumes each request arrives as a single write, which holds over loopback.
+    fn reply_to(&self, request: &[u8]) -> Option<String> {
+        // `unit-name`: ESC "CN" CR  ->  "CN" CR LF <name> CR CR
+        if request == Query::UnitName.instruction().payload.as_bytes() {
+            return Some(format!("CN\r\n{UNIT_NAME}\r\r"));
+        }
+        None
+    }
 }
 
 #[tokio::test]
@@ -171,6 +206,21 @@ async fn keyboard_interactive_auth_succeeds() {
         .connect(&smp.device_config(PASSWORD))
         .await
         .expect("keyboard-interactive auth should succeed");
+}
+
+#[tokio::test]
+async fn unit_name_query_round_trips() {
+    let smp = spawn_smp().await;
+    // Drive the query through the same Device stack production uses, so the whole
+    // path — RusshConnector, Controller, framed_text parser — runs over real SSH.
+    let device = Device::new(smp.device_config(PASSWORD), Arc::new(RusshConnector));
+
+    let value = device
+        .run(&Query::UnitName.instruction())
+        .await
+        .expect("unit-name query should succeed");
+
+    assert_eq!(value, Value::Text(UNIT_NAME.into()));
 }
 
 #[tokio::test]
