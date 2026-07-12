@@ -47,6 +47,17 @@ const PASSWORD: &str = "extron";
 /// The unit name the simulated SMP reports for a `unit-name` query.
 const UNIT_NAME: &str = "Main Hall SMP";
 
+/// Which SSH stream the simulated SMP answers on. Real Extron devices reply on
+/// the extended-data (stderr) stream; most other devices use normal data.
+#[derive(Clone, Copy)]
+enum ReplyStream {
+    /// Normal channel data (`SSH_MSG_CHANNEL_DATA`, stdout).
+    Stdout,
+    /// Extended data (`SSH_MSG_CHANNEL_EXTENDED_DATA`, stderr) — how a real
+    /// Extron SMP answers, which regressed when the transport read only stdout.
+    Stderr,
+}
+
 /// A running simulated SMP. Holds the server task so it stays alive for the test
 /// and aborts it on drop, so no accept loop leaks between tests.
 struct SimulatedSmp {
@@ -95,8 +106,9 @@ fn init_tracing() {
 }
 
 /// Bind a real SSH server that accepts only keyboard-interactive auth on a
-/// random loopback port. Returns once it is listening.
-async fn spawn_smp() -> SimulatedSmp {
+/// random loopback port, answering queries on the given stream. Returns once it
+/// is listening.
+async fn spawn_smp(reply: ReplyStream) -> SimulatedSmp {
     init_tracing();
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -117,7 +129,7 @@ async fn spawn_smp() -> SimulatedSmp {
         ..Default::default()
     });
 
-    let mut smp = SmpServer;
+    let mut smp = SmpServer { reply };
     let server = tokio::spawn(async move {
         let _ = smp.run_on_socket(config, &listener).await;
     });
@@ -126,20 +138,24 @@ async fn spawn_smp() -> SimulatedSmp {
 }
 
 /// The server side: one [`SmpHandler`] per connection.
-struct SmpServer;
+struct SmpServer {
+    reply: ReplyStream,
+}
 
 impl Server for SmpServer {
     type Handler = SmpHandler;
 
     fn new_client(&mut self, _peer: Option<SocketAddr>) -> SmpHandler {
-        SmpHandler
+        SmpHandler { reply: self.reply }
     }
 }
 
 /// Reproduces the SMP auth handshake: `password` is never accepted, and
 /// `keyboard-interactive` sends one "Password:" prompt whose answer must match
 /// the configured credential.
-struct SmpHandler;
+struct SmpHandler {
+    reply: ReplyStream,
+}
 
 impl Handler for SmpHandler {
     type Error = russh::Error;
@@ -201,7 +217,11 @@ impl Handler for SmpHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         if let Some(reply) = self.reply_to(data) {
-            session.data(channel, reply.into_bytes())?;
+            match self.reply {
+                ReplyStream::Stdout => session.data(channel, reply.into_bytes())?,
+                // ext == 1 is stderr; this is the path a real Extron SMP uses.
+                ReplyStream::Stderr => session.extended_data(channel, 1, reply.into_bytes())?,
+            }
         }
         Ok(())
     }
@@ -224,7 +244,7 @@ impl SmpHandler {
 
 #[tokio::test]
 async fn keyboard_interactive_auth_succeeds() {
-    let smp = spawn_smp().await;
+    let smp = spawn_smp(ReplyStream::Stdout).await;
 
     RusshConnector
         .connect(&smp.device_config(PASSWORD))
@@ -234,7 +254,7 @@ async fn keyboard_interactive_auth_succeeds() {
 
 #[tokio::test]
 async fn unit_name_query_round_trips() {
-    let smp = spawn_smp().await;
+    let smp = spawn_smp(ReplyStream::Stdout).await;
     // Drive the query through the same Device stack production uses, so the whole
     // path — RusshConnector, Controller, framed_text parser — runs over real SSH.
     let device = Device::new(smp.device_config(PASSWORD), Arc::new(RusshConnector));
@@ -248,8 +268,24 @@ async fn unit_name_query_round_trips() {
 }
 
 #[tokio::test]
+async fn unit_name_query_over_stderr_round_trips() {
+    // Regression: real Extron SMP devices reply on the SSH extended-data
+    // (stderr) stream. The transport must read stderr as well as stdout, or the
+    // query times out (see the `into_stream` note in the ssh transport).
+    let smp = spawn_smp(ReplyStream::Stderr).await;
+    let device = Device::new(smp.device_config(PASSWORD), Arc::new(RusshConnector));
+
+    let value = device
+        .run(&Query::UnitName.instruction())
+        .await
+        .expect("unit-name query should succeed when the device replies on stderr");
+
+    assert_eq!(value, Value::Text(UNIT_NAME.into()));
+}
+
+#[tokio::test]
 async fn wrong_password_is_rejected() {
-    let smp = spawn_smp().await;
+    let smp = spawn_smp(ReplyStream::Stdout).await;
 
     match RusshConnector
         .connect(&smp.device_config("not-the-password"))

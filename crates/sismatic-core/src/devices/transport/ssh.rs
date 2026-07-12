@@ -3,8 +3,10 @@
 //! [`RusshConnector`] dials a device, authenticates with a password, opens a
 //! session channel, and requests an interactive shell — the SIS command
 //! interface then flows over that channel as raw bytes. [`RusshTransport`]
-//! wraps the channel's byte stream so the layers above are unaware they are
-//! talking to real hardware rather than [`super::fake::FakeTransport`].
+//! reads that channel — merging both the normal (stdout) and extended-data
+//! (stderr) streams, since Extron SMP devices reply on stderr — so the layers
+//! above are unaware they are talking to real hardware rather than
+//! [`super::fake::FakeTransport`].
 //!
 //! Authentication tries plain `password` first, then falls back to
 //! `keyboard-interactive` — Extron SIS devices offer only the latter, prompting
@@ -18,10 +20,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use russh::ChannelStream;
 use russh::client::{self, Config, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::ssh_key::PublicKey;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use russh::{Channel, ChannelMsg};
 use tracing::{debug, instrument};
 use uuid::Uuid;
 
@@ -48,7 +49,9 @@ impl client::Handler for ClientHandler {
 /// stays alive for as long as the transport does.
 pub struct RusshTransport {
     _session: Handle<ClientHandler>,
-    stream: ChannelStream<Msg>,
+    channel: Channel<Msg>,
+    /// Bytes from a channel message that did not fit the previous `read` buffer.
+    pending: Vec<u8>,
     span: tracing::Span,
 }
 
@@ -56,12 +59,37 @@ pub struct RusshTransport {
 impl Transport for RusshTransport {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         debug!(parent: &self.span, data = %bytes.escape_ascii(), "TX");
-        self.stream.write_all(bytes).await.map_err(io_error)?;
-        self.stream.flush().await.map_err(io_error)
+        self.channel.data(bytes).await.map_err(io_error)
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        let n = self.stream.read(buf).await.map_err(io_error)?;
+        // Refill from the channel only when the previous message has been fully
+        // drained into earlier `read` calls.
+        if self.pending.is_empty() {
+            loop {
+                match self.channel.wait().await {
+                    // Extron SMP devices send their SIS replies on the
+                    // extended-data (stderr) stream, so accept both Data and
+                    // ExtendedData — see the `into_stream` note in `connect`.
+                    Some(ChannelMsg::Data { data })
+                    | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        self.pending.extend_from_slice(&data);
+                        break;
+                    }
+                    // The peer closed the channel: report EOF.
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => return Ok(0),
+                    // Window adjusts, requests, successes, ...: keep waiting.
+                    Some(_) => continue,
+                }
+            }
+        }
+
+        let n = self.pending.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
         debug!(parent: &self.span, len = n, data = %buf[..n].escape_ascii(), "RX");
         Ok(n)
     }
@@ -103,7 +131,16 @@ impl Connector for RusshConnector {
 
         Ok(Box::new(RusshTransport {
             _session: session,
-            stream: channel.into_stream(),
+            // Deliberately *not* channel.into_stream(): it builds its reader
+            // with "ext: None", so it only reads ChannelMsg::Data, not
+            // ExtendedData. Extron SMP devices answer SIS queries on the
+            // extended-data (stderr) stream, so into_stream() dropped every
+            // reply and each query timed out. Matching block that discards
+            // ExtendedData while ext == None:
+            // https://github.com/Eugeny/russh/blob/c4be19f1915c8682f4615c3fd50008512b474491/russh/src/channels/io/rx.rs#L79
+            // Instead we drive channel.wait() in `read` and accept both streams.
+            channel,
+            pending: Vec::new(),
             span: tracing::Span::current(),
         }))
     }
@@ -152,7 +189,7 @@ async fn authenticate(
     }
 }
 
-fn io_error(e: std::io::Error) -> TransportError {
+fn io_error(e: impl std::fmt::Display) -> TransportError {
     TransportError::Io(e.to_string())
 }
 
