@@ -33,12 +33,21 @@ QueryName = Literal[
     "model_description",
     "active_alarms",
     "part_number",
+    "contributor",
+    "course",
     "coverage",
+    "date",
+    "description",
+    "format",
+    "identifier",
     "presenter",
     "relation",
+    "rights",
     "source",
     "subject",
+    "systemname",
     "title",
+    "type",
 ]
 
 CommandName = Literal[

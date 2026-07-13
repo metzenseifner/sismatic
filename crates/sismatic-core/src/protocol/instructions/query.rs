@@ -36,12 +36,21 @@ instruction_catalog! {
         ModelDescription { name: "MODEL_DESCRIPTION", aliases: [], doc: "Device model description." },
         ActiveAlarms { name: "ACTIVE_ALARMS", aliases: [], doc: "Active alarms." },
         PartNumber { name: "PART_NUMBER", aliases: [], doc: "Device part number." },
+        Contributor { name: "CONTRIBUTOR", aliases:[], doc:"Dublin Core Contributor (read)"},
+        Course {name:"COURSE", aliases:[], doc:"Course"},
         Coverage { name: "COVERAGE", aliases: [], doc: "Dublin Core 'coverage' metadata register (read)." },
+        Date { name: "DATE", aliases: [], doc: "Dublin Core Date (read-only) (read)"},
+        Description { name:"DESCRIPTION", aliases:[], doc: "Dublin Core Description (read)"},
+        Format {name: "FORMAT", aliases: [], doc:"Dublin Core Format (read)"},
+        Identifier {name:"IDENTIFIER", aliases:[], doc: "Dublin Core Identifier (read)"},
         Presenter { name: "PRESENTER", aliases: [], doc: "Presenter metadata register (read)." },
         Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation' metadata register (read)." },
+        Rights {name: "RIGHTS", aliases:[], doc: "Dublin Core Rights (read)"},
         Source { name: "SOURCE", aliases: [], doc: "Dublin Core 'source' metadata register (read)." },
         Subject { name: "SUBJECT", aliases: [], doc: "Dublin Core 'subject' metadata register (read)." },
+        SystemName {name:"SYSTEMNAME", aliases:[], doc: "System Name"},
         Title { name: "TITLE", aliases: [], doc: "Recording title metadata register (read)." },
+        Type {name: "TYPE", aliases:[], doc: "Dublin Core Type (read)"},
     }
 }
 
@@ -50,7 +59,7 @@ impl Query {
     pub fn instruction(self) -> Instruction {
         use Query::*;
         let (payload, parser): (String, ParseFn) = match self {
-            Firmware => ("Q".into(), prefixed("Q", is_version, "\r", Value::Version)),
+            Firmware => ("Q".into(), plain_text()),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),
             TelnetPort => (esc_cr("MT"), plain_port()),
@@ -72,12 +81,21 @@ impl Query {
             ModelDescription => ("2I".into(), plain_text()), // TODO Device name (63 characters, max); must comply with internet host name
             ActiveAlarms => ("39I".into(), active_alarms()),
             PartNumber => ("N".into(), plain_text()), // TODO parser specifically for 60-1324-01\r\n
-            Coverage => (esc_rcdr("M1"), register_query("M1")),
-            Presenter => (esc_rcdr("M2"), register_query("M2")),
-            Relation => (esc_rcdr("M9"), register_query("M9")),
-            Source => (esc_rcdr("M11"), register_query("M11")),
-            Subject => (esc_rcdr("M12"), register_query("M12")),
-            Title => (esc_rcdr("M13"), register_query("M13")),
+            Contributor => (esc_rcdr("M0"), plain_text()),
+            Course => (esc_rcdr("M16"), plain_text()),
+            Coverage => (esc_rcdr("M1"), plain_text()),
+            Date => (esc_rcdr("M3"), plain_text()),
+            Description => (esc_rcdr("M4"), plain_text()),
+            Format => (esc_rcdr("M5"), plain_text()),
+            Identifier => (esc_rcdr("M6"), plain_text()),
+            Presenter => (esc_rcdr("M2"), plain_text()),
+            Relation => (esc_rcdr("M9"), plain_text()),
+            Rights => (esc_rcdr("M10"), plain_text()),
+            Source => (esc_rcdr("M11"), plain_text()),
+            Subject => (esc_rcdr("M12"), plain_text()),
+            SystemName => (esc_rcdr("M15"), plain_text()),
+            Title => (esc_rcdr("M13"), plain_text()),
+            Type => (esc_rcdr("M14"), plain_text()),
         };
         Instruction {
             name: self.name().to_string(),
@@ -86,6 +104,17 @@ impl Query {
         }
     }
 }
+
+/// Parse version string into a Value::Version
+//fn parse_version() -> ParseFn {
+//    parser_of(
+//        |i: &mut In| {
+//            literal("\r\n").parse_next(i)?;
+//            Ok(version.to_string())
+//        },
+//        Value::Version,
+//    )
+//}
 
 /// Active-alarm list: `<name:NAME,level:LEVEL>` records joined by `*` and
 /// terminated by CR LF, decoded to `(name, level)` pairs. Example:
@@ -110,21 +139,6 @@ fn alarm_entry(i: &mut In) -> ModalResult<(String, String)> {
     let level: &str = take_while(0.., |c: char| c != '>').parse_next(i)?;
     literal(">").parse_next(i)?;
     Ok((name.to_string(), level.to_string()))
-}
-
-/// Read-back of a Dublin-Core metadata register: `<reg>RCDR CR LF <value?> CR CR`.
-fn register_query(reg: &str) -> ParseFn {
-    let head = format!("{reg}{RCDR}");
-    parser_of(
-        move |i: &mut In| {
-            literal(head.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
-            let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
-            Ok(v.to_string())
-        },
-        Value::Text,
-    )
 }
 
 /// `YRCDR CR LF (0|1|2) CR CR` decoded to [`RecordingState`].
@@ -154,12 +168,12 @@ fn parse_state() -> ParseFn {
 //    )
 //}
 
-/// `xx-xx-xx-xx-xx-xx CR CR`.
+/// `xx-xx-xx-xx-xx-xx CR LF`.
 fn mac_address() -> ParseFn {
     parser_of(
         move |i: &mut In| {
             let mac = parse_mac(i)?;
-            literal("\r\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             Ok(mac)
         },
         Value::Mac,

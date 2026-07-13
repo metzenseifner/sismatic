@@ -157,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn tolerates_a_reply_arriving_one_byte_at_a_time() {
         let instr = Query::MacAddress.instruction();
-        let reply = "CH\r\n00-05-A6-1B-2C-3D\r\r";
+        let reply = "00-05-A6-1B-2C-3D\r\n";
         let fake = FakeTransport::with_reads(reply.chars().map(|c| c.to_string()));
         let mut ctrl = controller(fake, 500);
 
