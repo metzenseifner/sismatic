@@ -20,6 +20,7 @@ mod states;
 
 use std::fmt;
 use std::sync::Arc;
+use winnow::error::ErrMode;
 use winnow::{ModalResult, Partial};
 
 use crate::protocol::states::RecordingState;
@@ -136,8 +137,16 @@ type In<'a> = Partial<&'a str>;
 fn search<O>(buf: &str, core: &(impl Fn(&mut In) -> ModalResult<O> + ?Sized)) -> Step<O> {
     for (i, _) in buf.char_indices() {
         let mut input = Partial::new(&buf[i..]);
-        if let Ok(value) = core(&mut input) {
-            return Step::Done(value);
+        match core(&mut input) {
+            Ok(value) => return Step::Done(value),
+            // A committed (`Cut`) error means this offset matched the reply's
+            // shape but the value itself was invalid (e.g. digits that overflow
+            // the target integer). Sliding to a later offset would only match a
+            // shorter, truncated token and report a wrong value, so stop here
+            // and ask for more bytes instead. `Backtrack`/`Incomplete` keep
+            // scanning — that is how a leading request echo gets skipped.
+            Err(ErrMode::Cut(_)) => return Step::NeedMore,
+            Err(_) => {}
         }
     }
     Step::NeedMore
@@ -200,6 +209,15 @@ mod tests {
     fn parses_telnet_port_bare_with_leading_zeros() {
         let instr = Query::TelnetPort.instruction();
         assert_eq!(drive(&instr, "00023\r\n"), Step::Done(Value::Port(23)));
+    }
+
+    #[test]
+    fn out_of_range_port_does_not_silently_truncate() {
+        // `99999` overflows u16. The offset search must not slide forward and
+        // decode the truncated `9999` — the u16 conversion emits `Cut`, which
+        // stops the search, so this reports NeedMore rather than Port(9999).
+        let instr = Query::TelnetPort.instruction();
+        assert_eq!(drive(&instr, "99999\r\n"), Step::NeedMore);
     }
 
     #[test]

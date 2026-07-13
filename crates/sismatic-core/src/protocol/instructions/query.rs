@@ -4,7 +4,6 @@ use winnow::token::{literal, one_of, take_while};
 use winnow::{ModalResult, Parser};
 
 // ---- Query (gettable) enum ------------------------------------------------
-use crate::protocol::control_chars::RCDR;
 use crate::protocol::instructions::Instruction;
 use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
@@ -230,7 +229,7 @@ fn plain_port() -> ParseFn {
         |i: &mut In| {
             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
             literal("\r\n").parse_next(i)?;
-            d.parse::<u16>().or_else(|_| backtrack())
+            d.parse::<u16>().or_else(|_| cut())
         },
         Value::Port,
     )
@@ -241,7 +240,7 @@ fn plain_number() -> ParseFn {
         |i: &mut In| {
             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
             literal("\r\n").parse_next(i)?;
-            d.parse::<u32>().or_else(|_| backtrack())
+            d.parse::<u32>().or_else(|_| cut())
         },
         Value::Number,
     )
@@ -306,6 +305,15 @@ fn boolean_flag() -> ParseFn {
 
 fn backtrack<O>() -> ModalResult<O> {
     Err(ErrMode::Backtrack(ContextError::new()))
+}
+
+/// A *committed* failure: the reply matched this parser's shape but carried an
+/// invalid value (e.g. digits that overflow the target integer). Unlike
+/// [`backtrack`], this returns `ErrMode::Cut`, which stops the offset `search`
+/// in `protocol.rs` from sliding forward and matching a shorter, truncated
+/// token — otherwise `99999\r\n` would silently decode to `9999`.
+fn cut<O>() -> ModalResult<O> {
+    Err(ErrMode::Cut(ContextError::new()))
 }
 
 // // character-class predicates for winnow's `take_while`
