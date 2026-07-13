@@ -264,7 +264,7 @@ mod tests {
         let instr = Register::Title.instruction("Hello");
         assert!(instr.payload.contains("M13*Hello"));
         assert_eq!(
-            drive(&instr, "M13*HelloRCDR\r\nRcdrM13*Hello\r\r"),
+            drive(&instr, "RcdrM13*Hello\r\n"),
             Step::Done(Value::Text("Hello".into()))
         );
     }
@@ -273,7 +273,7 @@ mod tests {
     fn parses_command_ack() {
         let instr = Command::Start.instruction();
         assert_eq!(
-            drive(&instr, "Y1RCDR\r\nRcdrY1\r\r"),
+            drive(&instr, "RcdrY1\r\n"),
             Step::Done(Value::Ack("RcdrY1".into()))
         );
     }
