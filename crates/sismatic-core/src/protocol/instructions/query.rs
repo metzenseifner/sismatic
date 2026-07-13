@@ -51,7 +51,7 @@ impl Query {
         let (payload, parser): (String, ParseFn) = match self {
             Firmware => ("Q".into(), prefixed("Q", is_version, "\r", Value::Version)),
             RunningState => (esc_rcdr("Y"), parse_state()),
-            UnitName => (esc_cr("CN"), framed_text("CN")),
+            UnitName => (esc_cr("CN"), plain_text()),
             TelnetPort => (esc_cr("MT"), framed_port("MT")),
             SshPort => (esc_cr("BPMAP"), framed_port("BPMAP")),
             HttpPort => (esc_cr("MH"), framed_port("MH")),
@@ -154,6 +154,21 @@ fn parse_mac(i: &mut In) -> ModalResult<MacAddr> {
         *byte = u8::from_str_radix(h, 16).or_else(|_| backtrack())?;
     }
     Ok(MacAddr(bytes))
+}
+
+/// `<value> CR LF` — the SMP's plain, untagged reply in its default verbose
+/// mode. Unlike [`framed_text`] there is no verb tag and the terminator is a
+/// single CR LF, so the caller must ensure the login banner has been drained
+/// first (see the ssh transport) or a banner line would parse as the value.
+fn plain_text() -> ParseFn {
+    parser_of(
+        move |i: &mut In| {
+            let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
+            Ok(v.to_string())
+        },
+        Value::Text,
+    )
 }
 
 /// `<verb> CR LF <value> CR CR`, value = text up to CR.

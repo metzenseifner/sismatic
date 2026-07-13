@@ -204,6 +204,12 @@ impl Handler for SmpHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
+        // Mimic the SMP login banner (copyright + date) it prints the instant
+        // the shell opens, on the extended-data (stderr) stream like the real
+        // device. The client must drain this before its first query, or a
+        // banner line would be parsed as the (untagged) reply.
+        let banner = "\r\n(c) Copyright 2014-2023, Extron Electronics, SMP 351, V3.06, 60-1324-01\r\nMon, 13 Jul 2026 08:16:21\r\n";
+        session.extended_data(channel, 1, banner.as_bytes().to_vec())?;
         Ok(())
     }
 
@@ -234,9 +240,10 @@ impl SmpHandler {
     ///
     /// Assumes each request arrives as a single write, which holds over loopback.
     fn reply_to(&self, request: &[u8]) -> Option<String> {
-        // `unit-name`: ESC "CN" CR  ->  "CN" CR LF <name> CR CR
+        // `unit-name`: ESC "CN" CR  ->  <name> CR LF  (plain, untagged reply
+        // in the device's default verbose mode).
         if request == Query::UnitName.instruction().payload.as_bytes() {
-            return Some(format!("CN\r\n{UNIT_NAME}\r\r"));
+            return Some(format!("{UNIT_NAME}\r\n"));
         }
         None
     }

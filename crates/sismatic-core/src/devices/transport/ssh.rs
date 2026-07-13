@@ -18,6 +18,7 @@
 //!   their command prompt over SSH.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use russh::client::{self, Config, Handle, KeyboardInteractiveAuthResponse, Msg};
@@ -123,11 +124,19 @@ impl Connector for RusshConnector {
 
         authenticate(&mut session, config).await?;
 
-        let channel = session
+        let mut channel = session
             .channel_open_session()
             .await
             .map_err(connect_error)?;
         channel.request_shell(true).await.map_err(connect_error)?;
+
+        // The SMP prints a two-line login banner (copyright + date) the moment
+        // the shell opens, on the same stream it later uses for replies. In the
+        // device's default verbose mode a query answer carries no tag (e.g.
+        // unit-name reads back a bare `<name>\r\n`), so a banner line left in the
+        // buffer is indistinguishable from an answer. Drain it here, before any
+        // command is sent, so the first reply parses cleanly.
+        drain_login_banner(&mut channel).await;
 
         Ok(Box::new(RusshTransport {
             _session: session,
@@ -185,6 +194,22 @@ async fn authenticate(
                     .await
                     .map_err(connect_error)?;
             }
+        }
+    }
+}
+
+/// Consume whatever the device volunteers right after the shell opens — its
+/// login banner — by reading the channel until it stays quiet for `SETTLE`.
+/// Runs before any command is written, so it can only swallow the banner, never
+/// a reply. See the call site in [`connect`] for why this matters.
+async fn drain_login_banner(channel: &mut Channel<Msg>) {
+    const SETTLE: Duration = Duration::from_millis(500);
+    while let Ok(msg) = tokio::time::timeout(SETTLE, channel.wait()).await {
+        match msg {
+            // Channel gone: nothing left to drain.
+            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+            // Banner bytes, window adjusts, successes, ...: keep draining.
+            Some(_) => continue,
         }
     }
 }
