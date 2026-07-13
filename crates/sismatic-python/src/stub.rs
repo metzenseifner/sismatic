@@ -98,6 +98,13 @@ class Sis:
     def register(self, device: str, name: RegisterName, value: str) -> str:
         \"\"\"Write `value` into a metadata register (e.g. \\\"title\\\") on a device.\"\"\"
         ...
+
+    def close(self) -> None:
+        \"\"\"Close all SSH connections and shut the session down. Idempotent.\"\"\"
+        ...
+
+    def __enter__(self) -> \"Sis\": ...
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool: ...
 ";
 
 #[cfg(test)]

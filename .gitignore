@@ -4,3 +4,16 @@ result
 result-*
 dist
 .claude
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Compiled extension module, built by maturin into the source package
+# (crates/sismatic-python/python/sismatic/sismatic.abi3.so).
+*.so

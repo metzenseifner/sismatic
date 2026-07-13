@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sismatic-core = { workspace = true }
-# `abi3-py38` builds against CPython's stable ABI, so one wheel covers 3.8+
+# `abi3-py39` builds against CPython's stable ABI, so one wheel covers 3.9+
 # instead of one wheel per interpreter version.
 pyo3 = { workspace = true, optional = true }
 # Routes russh's `log` output (SSH handshake + auth negotiation) to Python's

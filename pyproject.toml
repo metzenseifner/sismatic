@@ -9,7 +9,7 @@ dynamic = ["version"]
 description = "Blocking Python facade for driving Extron SIS devices over SSH"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 classifiers = [
   "Programming Language :: Rust",
   "Programming Language :: Python :: Implementation :: CPython",
