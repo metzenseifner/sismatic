@@ -70,8 +70,15 @@ impl Register {
 
     /// Build the wire instruction that writes `value` into this register. The
     /// value is truncated to [`MAX_VALUE_LEN`] characters, matching the device.
+    #[tracing::instrument(
+        name = "Building the wire instruction for writing value into register",
+        level = "debug"
+    )]
     pub fn instruction(self, value: &str) -> Instruction {
         let reg = self.reg();
+        if value.len() > MAX_VALUE_LEN {
+            tracing::warn!("Value exceeded 127 characters and will be curtailed to 127.")
+        }
         let value = shorten(value, MAX_VALUE_LEN);
         let payload = format!("{ESC}{reg}*{value}{RCDR}{CR}");
         Instruction {
@@ -92,7 +99,7 @@ fn settable_echo(reg: &str) -> ParseFn {
         move |i: &mut In| {
             literal(head.as_str()).parse_next(i)?;
             let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
-            literal("\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             Ok(v.to_string())
         },
         Value::Text,
