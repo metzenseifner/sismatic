@@ -33,6 +33,21 @@ struct Sismatic {
     registry: Registry,
 }
 
+/// One active alarm, exposed to Python with `.name` and `.level` attributes.
+#[pyclass(name = "Alarm", frozen, get_all)]
+#[derive(Clone)]
+struct Alarm {
+    name: String,
+    level: String,
+}
+
+#[pymethods]
+impl Alarm {
+    fn __repr__(&self) -> String {
+        format!("Alarm(name={:?}, level={:?})", self.name, self.level)
+    }
+}
+
 #[pymethods]
 impl Sismatic {
     /// Build a session from a `devices.toml`, opening no connections yet (each
@@ -101,13 +116,19 @@ impl Sismatic {
 }
 
 /// Map a decoded [`Value`] onto the natural Python type: ports/numbers become
-/// `int`, flags become `bool`, and everything else falls back to its string
-/// rendering (text, version, ack token, MAC address, recording state).
+/// `int`, flags become `bool`, active alarms become a `list[Alarm]`, and
+/// everything else falls back to its string rendering (text, version, ack
+/// token, MAC address, recording state).
 fn value_into_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
     match value {
         Value::Port(p) => p.into_py_any(py),
         Value::Number(n) => n.into_py_any(py),
         Value::Flag(b) => b.into_py_any(py),
+        Value::Alarms(a) => a
+            .into_iter()
+            .map(|(name, level)| Alarm { name, level })
+            .collect::<Vec<_>>()
+            .into_py_any(py),
         other => other.to_string().into_py_any(py),
     }
 }
@@ -121,5 +142,6 @@ fn sismatic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // is somehow already installed for this process.
     let _ = pyo3_log::init();
     m.add_class::<Sismatic>()?;
+    m.add_class::<Alarm>()?;
     Ok(())
 }

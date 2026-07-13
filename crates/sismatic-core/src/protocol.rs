@@ -44,6 +44,8 @@ pub enum Value {
     Ack(String),
     /// The state of the recording.
     State(RecordingState),
+    /// Active alarms as `(name, level)` pairs.
+    Alarms(Vec<(String, String)>),
 }
 
 impl fmt::Display for Value {
@@ -55,6 +57,14 @@ impl fmt::Display for Value {
             Value::Flag(b) => f.write_str(if *b { "1" } else { "0" }),
             Value::State(s) => write!(f, "{s}"),
             Value::Mac(m) => write!(f, "{m}"),
+            Value::Alarms(a) => {
+                let joined = a
+                    .iter()
+                    .map(|(n, l)| format!("{n}:{l}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                f.write_str(&joined)
+            }
         }
     }
 }
@@ -160,8 +170,8 @@ mod tests {
     /// Drive a parser the way the transport does: one byte at a time.
     fn drive(instr: &Instruction, response: &str) -> Step<Value> {
         let mut buf = String::new();
-        for ch in response.chars() {
-            buf.push(ch);
+        for c in response.chars() {
+            buf.push(c);
             if let Step::Done(v) = instr.parse_step(&buf) {
                 return Step::Done(v);
             }
@@ -173,7 +183,7 @@ mod tests {
     fn parses_running_state() {
         let instr = Query::RunningState.instruction();
         // Includes a leading echo to prove the search skips it.
-        let resp = "\u{1b}YRCDR\rYRCDR\r\n1\r\r";
+        let resp = "1\r\n";
         assert_eq!(
             drive(&instr, resp),
             Step::Done(Value::State(RecordingState::Started))
@@ -183,16 +193,33 @@ mod tests {
     #[test]
     fn parses_port_as_u16() {
         let instr = Query::SshPort.instruction();
+        assert_eq!(drive(&instr, "22023\r\n"), Step::Done(Value::Port(22023)));
+    }
+
+    #[test]
+    fn parses_telnet_port_bare_with_leading_zeros() {
+        let instr = Query::TelnetPort.instruction();
+        assert_eq!(drive(&instr, "00023\r\n"), Step::Done(Value::Port(23)));
+    }
+
+    #[test]
+    fn parses_active_alarms_list() {
+        let instr = Query::ActiveAlarms.instruction();
+        let resp = "<name:virtual_input,level:critical>*<name:video_loss,level:critical>*<name:publish_failure,level:warning>\r\n";
         assert_eq!(
-            drive(&instr, "BPMAP\r\n22023\r\r"),
-            Step::Done(Value::Port(22023))
+            drive(&instr, resp),
+            Step::Done(Value::Alarms(vec![
+                ("virtual_input".to_string(), "critical".to_string()),
+                ("video_loss".to_string(), "critical".to_string()),
+                ("publish_failure".to_string(), "warning".to_string()),
+            ]))
         );
     }
 
     #[test]
     fn parses_flag() {
         let instr = Query::DhcpMode.instruction();
-        assert_eq!(drive(&instr, "DH\r\n1\r\r"), Step::Done(Value::Flag(true)));
+        assert_eq!(drive(&instr, "1\r\n"), Step::Done(Value::Flag(true)));
     }
 
     #[test]

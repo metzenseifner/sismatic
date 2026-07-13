@@ -67,6 +67,14 @@ fn literal_alias<'a>(name: &str, values: impl Iterator<Item = &'a &'a str>) -> S
 /// The `Sis` class surface. Fixed shape (only the `Literal` unions above change
 /// with the catalog), so it is a constant rather than generated.
 const CLASS: &str = "\
+class Alarm:
+    \"\"\"One active alarm reported by a device.\"\"\"
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def level(self) -> str: ...
+
 class Sis:
     \"\"\"A pool of Extron devices, addressable from Python by id.\"\"\"
 
@@ -79,7 +87,7 @@ class Sis:
         \"\"\"The ids of every configured device.\"\"\"
         ...
 
-    def query(self, device: str, name: QueryName) -> int | bool | str:
+    def query(self, device: str, name: QueryName) -> int | bool | str | list[Alarm]:
         \"\"\"Read a built-in field (e.g. \\\"firmware\\\", \\\"ssh_port\\\") from a device.\"\"\"
         ...
 

@@ -1,3 +1,4 @@
+use winnow::combinator::separated;
 use winnow::error::{ContextError, ErrMode};
 use winnow::token::{literal, one_of, take_while};
 use winnow::{ModalResult, Parser};
@@ -29,8 +30,8 @@ instruction_catalog! {
         DhcpMode { name: "DHCP_MODE", aliases: [], doc: "Whether DHCP is enabled." },
         Timezone { name: "TIMEZONE", aliases: [], doc: "Configured timezone." },
         MacAddress { name: "MAC_ADDRESS", aliases: [], doc: "Hardware MAC address." },
-        PortTimeout { name: "PORT_TIMEOUT", aliases: [], doc: "Per-port timeout." },
-        GlobalPortTimeout { name: "GLOBAL_PORT_TIMEOUT", aliases: [], doc: "Global port timeout." },
+        PortTimeout { name: "PORT_TIMEOUT", aliases: [], doc: "Per-port timeout in tens of seconds; 30 tens of seconds=300 seconds." },
+        GlobalPortTimeout { name: "GLOBAL_PORT_TIMEOUT", aliases: [], doc: "Global port timeout in tens of seconds; 30 tens of seconds=300 seconds." },
         ModelName { name: "MODEL_NAME", aliases: [], doc: "Device model name." },
         ModelDescription { name: "MODEL_DESCRIPTION", aliases: [], doc: "Device model description." },
         ActiveAlarms { name: "ACTIVE_ALARMS", aliases: [], doc: "Active alarms." },
@@ -52,40 +53,25 @@ impl Query {
             Firmware => ("Q".into(), prefixed("Q", is_version, "\r", Value::Version)),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),
-            TelnetPort => (esc_cr("MT"), framed_port("MT")),
-            SshPort => (esc_cr("BPMAP"), framed_port("BPMAP")),
-            HttpPort => (esc_cr("MH"), framed_port("MH")),
-            SnmpPort => (esc_cr("APMAP"), framed_port("APMAP")),
-            HttpsPort => (esc_cr("SPMAP"), framed_port("SPMAP")),
-            SnmpUnitLocation => (esc_cr("LSNMP"), framed_text("LSNMP")),
-            SnmpUnitContact => (esc_cr("CSNMP"), {
-                let verb = "CSNMP".to_string();
-                parser_of(
-                    move |i: &mut In| {
-                        literal(verb.as_str()).parse_next(i)?;
-                        literal("\r\n").parse_next(i)?;
-                        let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
-                        literal("\r\r").parse_next(i)?;
-                        Ok(v.to_string())
-                    },
-                    Value::Text,
-                )
-            }),
-            SnmpPrivateCommunityString => (esc_cr("XSNMP"), framed_text("XSNMP")),
-            SnmpPublicCommunityString => (esc_cr("PSNMP"), framed_text("PSNMP")),
-            SnmpState => (esc_cr("ESNMP"), framed_flag("ESNMP")),
-            DhcpMode => (esc_cr("DH"), framed_flag("DH")),
-            Timezone => (esc_cr("TZON"), framed_text("TZON")),
-            MacAddress => (esc_cr("CH"), framed_mac("CH")),
-            PortTimeout => (esc_cr("0TC"), framed_number("0TC")),
-            GlobalPortTimeout => (esc_cr("1TC"), framed_number("1TC")),
-            ModelName => ("1I".into(), prefixed("1I", is_not_cr, "\r\r", Value::Text)),
-            ModelDescription => ("2I".into(), prefixed("2I", is_not_cr, "\r\r", Value::Text)),
-            ActiveAlarms => (
-                "39I".into(),
-                prefixed("39I", is_not_cr, "\r\r", Value::Text),
-            ),
-            PartNumber => ("N".into(), prefixed("N", is_part, "\r\r", Value::Text)),
+            TelnetPort => (esc_cr("MT"), plain_port()),
+            SshPort => (esc_cr("BPMAP"), plain_port()),
+            HttpPort => (esc_cr("MH"), plain_port()),
+            SnmpPort => (esc_cr("APMAP"), plain_port()),
+            HttpsPort => (esc_cr("SPMAP"), plain_port()),
+            SnmpUnitLocation => (esc_cr("LSNMP"), plain_text()), // TODO: limit to 64 chars
+            SnmpUnitContact => (esc_cr("CSNMP"), plain_text()),  // TODO limit to 64 chars
+            SnmpPrivateCommunityString => (esc_cr("XSNMP"), plain_text()), // TODO limit to 64 chars
+            SnmpPublicCommunityString => (esc_cr("PSNMP"), plain_text()), // TODO limit to 64 chars
+            SnmpState => (esc_cr("ESNMP"), boolean_flag()),
+            DhcpMode => (esc_cr("DH"), boolean_flag()),
+            Timezone => (esc_cr("TZON"), plain_text()),
+            MacAddress => (esc_cr("CH"), mac_address()),
+            PortTimeout => (esc_cr("0TC"), plain_number()),
+            GlobalPortTimeout => (esc_cr("1TC"), plain_number()),
+            ModelName => ("1I".into(), plain_text()),
+            ModelDescription => ("2I".into(), plain_text()), // TODO Device name (63 characters, max); must comply with internet host name
+            ActiveAlarms => ("39I".into(), active_alarms()),
+            PartNumber => ("N".into(), plain_text()), // TODO parser specifically for 60-1324-01\r\n
             Coverage => (esc_rcdr("M1"), register_query("M1")),
             Presenter => (esc_rcdr("M2"), register_query("M2")),
             Relation => (esc_rcdr("M9"), register_query("M9")),
@@ -99,6 +85,31 @@ impl Query {
             parser,
         }
     }
+}
+
+/// Active-alarm list: `<name:NAME,level:LEVEL>` records joined by `*` and
+/// terminated by CR LF, decoded to `(name, level)` pairs. Example:
+/// `<name:video_loss,level:critical>*<name:publish_failure,level:warning>\r\n`.
+/// An empty list (bare CR LF) yields no pairs.
+fn active_alarms() -> ParseFn {
+    parser_of(
+        |i: &mut In| {
+            let alarms: Vec<(String, String)> = separated(0.., alarm_entry, '*').parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
+            Ok(alarms)
+        },
+        Value::Alarms,
+    )
+}
+
+/// One `<name:NAME,level:LEVEL>` alarm record.
+fn alarm_entry(i: &mut In) -> ModalResult<(String, String)> {
+    literal("<name:").parse_next(i)?;
+    let name: &str = take_while(0.., |c: char| c != ',' && c != '>').parse_next(i)?;
+    literal(",level:").parse_next(i)?;
+    let level: &str = take_while(0.., |c: char| c != '>').parse_next(i)?;
+    literal(">").parse_next(i)?;
+    Ok((name.to_string(), level.to_string()))
 }
 
 /// Read-back of a Dublin-Core metadata register: `<reg>RCDR CR LF <value?> CR CR`.
@@ -120,22 +131,33 @@ fn register_query(reg: &str) -> ParseFn {
 fn parse_state() -> ParseFn {
     parser_of(
         move |i: &mut In| {
-            literal("YRCDR\r\n").parse_next(i)?;
             let d = one_of(['0', '1', '2']).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             Ok(RecordingState::from_code(d as i32 - '0' as i32))
         },
         Value::State,
     )
 }
 
-/// `CH CR LF <xx-xx-xx-xx-xx-xx> CR CR`.
-fn framed_mac(verb: &str) -> ParseFn {
-    let verb = verb.to_string();
+///// `CH CR LF <xx-xx-xx-xx-xx-xx> CR CR`.
+//fn framed_mac(verb: &str) -> ParseFn {
+//    let verb = verb.to_string();
+//    parser_of(
+//        move |i: &mut In| {
+//            literal(verb.as_str()).parse_next(i)?;
+//            literal("\r\n").parse_next(i)?;
+//            let mac = parse_mac(i)?;
+//            literal("\r\r").parse_next(i)?;
+//            Ok(mac)
+//        },
+//        Value::Mac,
+//    )
+//}
+
+/// `xx-xx-xx-xx-xx-xx CR CR`.
+fn mac_address() -> ParseFn {
     parser_of(
         move |i: &mut In| {
-            literal(verb.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
             let mac = parse_mac(i)?;
             literal("\r\r").parse_next(i)?;
             Ok(mac)
@@ -171,65 +193,102 @@ fn plain_text() -> ParseFn {
     )
 }
 
-/// `<verb> CR LF <value> CR CR`, value = text up to CR.
-fn framed_text(verb: &str) -> ParseFn {
-    let verb = verb.to_string();
-    parser_of(
-        move |i: &mut In| {
-            literal(verb.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
-            let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
-            Ok(v.to_string())
-        },
-        Value::Text,
-    )
-}
+// /// `<verb> CR LF <value> CR CR`, value = text up to CR.
+// fn framed_text(verb: &str) -> ParseFn {
+//     let verb = verb.to_string();
+//     parser_of(
+//         move |i: &mut In| {
+//             literal(verb.as_str()).parse_next(i)?;
+//             literal("\r\n").parse_next(i)?;
+//             let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
+//             literal("\r\r").parse_next(i)?;
+//             Ok(v.to_string())
+//         },
+//         Value::Text,
+//     )
+// }
 
-/// `<verb> CR LF <digits> CR CR` as a `u16` port.
-fn framed_port(verb: &str) -> ParseFn {
-    let verb = verb.to_string();
+/// `<digits> CR LF` as a `u16` port, e.g. `00023\r\n` → 23. The SMP's telnet
+/// port reply is bare digits with no verb tag, so leading zeros are stripped by
+/// the numeric parse.
+fn plain_port() -> ParseFn {
     parser_of(
-        move |i: &mut In| {
-            literal(verb.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
+        |i: &mut In| {
             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             d.parse::<u16>().or_else(|_| backtrack())
         },
         Value::Port,
     )
 }
 
-/// `<verb> CR LF <digits> CR CR` as a `u32` number.
-fn framed_number(verb: &str) -> ParseFn {
-    let verb = verb.to_string();
+fn plain_number() -> ParseFn {
     parser_of(
-        move |i: &mut In| {
-            literal(verb.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
+        |i: &mut In| {
             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             d.parse::<u32>().or_else(|_| backtrack())
         },
         Value::Number,
     )
 }
 
-/// `<verb> CR LF (0|1) CR CR` as a boolean flag.
-fn framed_flag(verb: &str) -> ParseFn {
-    let verb = verb.to_string();
+// /// `<verb> CR LF <digits> CR CR` as a `u16` port.
+// fn framed_port(verb: &str) -> ParseFn {
+//     let verb = verb.to_string();
+//     parser_of(
+//         move |i: &mut In| {
+//             literal(verb.as_str()).parse_next(i)?;
+//             literal("\r\n").parse_next(i)?;
+//             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
+//             literal("\r\r").parse_next(i)?;
+//             d.parse::<u16>().or_else(|_| backtrack())
+//         },
+//         Value::Port,
+//     )
+// }
+
+// /// `<verb> CR LF <digits> CR CR` as a `u32` number.
+// fn framed_number(verb: &str) -> ParseFn {
+//     let verb = verb.to_string();
+//     parser_of(
+//         move |i: &mut In| {
+//             literal(verb.as_str()).parse_next(i)?;
+//             literal("\r\n").parse_next(i)?;
+//             let d: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
+//             literal("\r\r").parse_next(i)?;
+//             d.parse::<u32>().or_else(|_| backtrack())
+//         },
+//         Value::Number,
+//     )
+// }
+
+/// `(0|1) CR LF` as a boolean flag.
+fn boolean_flag() -> ParseFn {
     parser_of(
         move |i: &mut In| {
-            literal(verb.as_str()).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
             let b = one_of(['0', '1']).parse_next(i)?;
-            literal("\r\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             Ok(b == '1')
         },
         Value::Flag,
     )
 }
+
+// /// `<verb> CR LF (0|1) CR CR` as a boolean flag.
+// fn framed_flag(verb: &str) -> ParseFn {
+//     let verb = verb.to_string();
+//     parser_of(
+//         move |i: &mut In| {
+//             literal(verb.as_str()).parse_next(i)?;
+//             literal("\r\n").parse_next(i)?;
+//             let b = one_of(['0', '1']).parse_next(i)?;
+//             literal("\r\r").parse_next(i)?;
+//             Ok(b == '1')
+//         },
+//         Value::Flag,
+//     )
+// }
 
 fn backtrack<O>() -> ModalResult<O> {
     Err(ErrMode::Backtrack(ContextError::new()))
@@ -240,9 +299,9 @@ fn is_version(c: char) -> bool {
     c.is_ascii_digit() || c == '.'
 }
 
-fn is_part(c: char) -> bool {
-    c.is_ascii_digit() || c == '-'
-}
+// fn is_part(c: char) -> bool {
+//     c.is_ascii_digit() || c == '-'
+// }
 
 /// `<prefix> <value: pred*> <terminator>` where the value class is `pred`.
 fn prefixed(

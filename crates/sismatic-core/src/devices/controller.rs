@@ -145,7 +145,7 @@ mod tests {
     #[tokio::test]
     async fn runs_instruction_and_writes_payload() {
         let instr = Query::SshPort.instruction();
-        let fake = FakeTransport::with_reads(["BPMAP\r\n22023\r\r"]);
+        let fake = FakeTransport::with_reads(["22023\r\n"]);
         let writes = fake.writes();
         let mut ctrl = controller(fake, 500);
 

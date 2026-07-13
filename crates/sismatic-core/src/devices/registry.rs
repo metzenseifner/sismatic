@@ -71,7 +71,7 @@ mod tests {
     use crate::protocol::Value;
     use crate::protocol::instructions::query::Query;
 
-    const PORT_REPLY: &str = "BPMAP\r\n22023\r\r";
+    const PORT_REPLY: &str = "22023\r\n";
 
     const EXAMPLE: &str = r#"
 [defaults]

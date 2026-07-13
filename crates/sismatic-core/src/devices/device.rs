@@ -127,7 +127,7 @@ mod tests {
     use crate::devices::transport::fake::FakeTransport;
     use crate::protocol::instructions::query::Query;
 
-    const PORT_REPLY: &str = "BPMAP\r\n22023\r\r";
+    const PORT_REPLY: &str = "22023\r\n";
 
     fn config(connect_ms: u64) -> DeviceConfig {
         DeviceConfig {
