@@ -42,7 +42,7 @@ instruction_catalog! {
         Date { name: "DATE", aliases: [], doc: "Dublin Core Date (read-only) (read)"},
         Description { name:"DESCRIPTION", aliases:[], doc: "Dublin Core Description (read)"},
         Format {name: "FORMAT", aliases: [], doc:"Dublin Core Format (read)"},
-        Identifier {name:"IDENTIFIER", aliases:[], doc: "Dublin Core Identifier (read)"},
+        Identifier {name:"IDENTIFIER", aliases:[], doc: "Dublin Core Identifier (read-only) (read)"},
         Presenter { name: "PRESENTER", aliases: [], doc: "Presenter metadata register (read)." },
         Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation' metadata register (read)." },
         Rights {name: "RIGHTS", aliases:[], doc: "Dublin Core Rights (read)"},
@@ -317,22 +317,22 @@ fn is_version(c: char) -> bool {
 //     c.is_ascii_digit() || c == '-'
 // }
 
-/// `<prefix> <value: pred*> <terminator>` where the value class is `pred`.
-fn prefixed(
-    prefix: &str,
-    pred: fn(char) -> bool,
-    terminator: &str,
-    wrap: fn(String) -> Value,
-) -> ParseFn {
-    let prefix = prefix.to_string();
-    let terminator = terminator.to_string();
-    parser_of(
-        move |i: &mut In| {
-            literal(prefix.as_str()).parse_next(i)?;
-            let v: &str = take_while(1.., pred).parse_next(i)?;
-            literal(terminator.as_str()).parse_next(i)?;
-            Ok(v.to_string())
-        },
-        wrap,
-    )
-}
+// /// `<prefix> <value: pred*> <terminator>` where the value class is `pred`.
+// fn prefixed(
+//     prefix: &str,
+//     pred: fn(char) -> bool,
+//     terminator: &str,
+//     wrap: fn(String) -> Value,
+// ) -> ParseFn {
+//     let prefix = prefix.to_string();
+//     let terminator = terminator.to_string();
+//     parser_of(
+//         move |i: &mut In| {
+//             literal(prefix.as_str()).parse_next(i)?;
+//             let v: &str = take_while(1.., pred).parse_next(i)?;
+//             literal(terminator.as_str()).parse_next(i)?;
+//             Ok(v.to_string())
+//         },
+//         wrap,
+//     )
+// }

@@ -42,7 +42,7 @@ fn command_echo(verb: &str) -> ParseFn {
     parser_of(
         move |i: &mut In| {
             literal(token.as_str()).parse_next(i)?;
-            literal("\r").parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
             Ok(token.clone())
         },
         Value::Ack,
