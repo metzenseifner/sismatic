@@ -50,6 +50,14 @@ impl Registry {
         self.devices.iter().map(|d| d.key().clone()).collect()
     }
 
+    /// A handle to every device, in no particular order. Used to drive
+    /// cross-device work such as the eager-connect [`Keepalive`] supervisor.
+    ///
+    /// [`Keepalive`]: super::keepalive::Keepalive
+    pub fn devices(&self) -> Vec<Arc<Device>> {
+        self.devices.iter().map(|d| Arc::clone(d.value())).collect()
+    }
+
     /// How many devices are registered.
     pub fn len(&self) -> usize {
         self.devices.len()

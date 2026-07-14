@@ -138,6 +138,8 @@ mod tests {
             password: "extron".into(),
             connect_timeout: Duration::from_millis(connect_ms),
             command_timeout: Duration::from_millis(500),
+            eager: false,
+            keepalive: None,
         }
     }
 
