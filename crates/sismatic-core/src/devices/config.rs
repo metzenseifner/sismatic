@@ -11,7 +11,7 @@
 //! connect_secs = 5
 //! command_secs = 3
 //! eager = true       # connect to every device at startup and keep it warm
-//! keepalive_secs = 120  # re-issue `Q` this often; 0 disables the keepalive
+//! sis_keepalive_secs = 120  # re-issue `Q` this often; 0 disables the SIS keepalive
 //!
 //! [[device]]
 //! id = "atrium-101"
@@ -40,10 +40,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-/// The keepalive interval applied when `eager` is on but `keepalive_secs` is
+/// The SIS keepalive interval applied when `eager` is on but `sis_keepalive_secs` is
 /// left unset. Comfortably under the SMP's default 5-minute idle disconnect, with
 /// room for one failed round-trip to self-heal before the window closes.
-const DEFAULT_KEEPALIVE_SECS: u64 = 120;
+const DEFAULT_SIS_KEEPALIVE_SECS: u64 = 120;
 
 /// A fully-resolved device: every field has a concrete value, with defaults
 /// already folded in. This is what the registry consumes to open a connection.
@@ -57,17 +57,17 @@ pub struct DeviceConfig {
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
     /// Open this device's connection at startup and keep it warm, rather than
-    /// waiting for the first command. The keep-warm loop is [`keepalive`].
+    /// waiting for the first command. The keep-warm loop is [`sis_keepalive`].
     ///
-    /// [`keepalive`]: DeviceConfig::keepalive
+    /// [`sis_keepalive`]: DeviceConfig::sis_keepalive
     pub eager: bool,
     /// How often to re-issue the `Q` query to reset the SMP's idle-disconnect
-    /// timer while eager. `None` means never (a bare `keepalive_secs = 0`), so an
+    /// timer while eager. `None` means never (a bare `sis_keepalive_secs = 0`), so an
     /// eager connection is warmed once and then left to self-heal. Ignored unless
     /// [`eager`] is set.
     ///
     /// [`eager`]: DeviceConfig::eager
-    pub keepalive: Option<Duration>,
+    pub sis_keepalive: Option<Duration>,
 }
 
 /// Why a `devices.toml` could not be turned into [`DeviceConfig`]s.
@@ -149,14 +149,14 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         device.command_secs.or(defaults.command_secs),
     )?;
 
-    // `eager` and `keepalive_secs` are optional everywhere: a device that sets
+    // `eager` and `sis_keepalive_secs` are optional everywhere: a device that sets
     // neither behaves exactly as before (lazy connect, no keep-warm loop).
     let eager = device.eager.or(defaults.eager).unwrap_or(false);
-    let keepalive_secs = device
-        .keepalive_secs
-        .or(defaults.keepalive_secs)
-        .unwrap_or(DEFAULT_KEEPALIVE_SECS);
-    let keepalive = (keepalive_secs > 0).then(|| Duration::from_secs(keepalive_secs));
+    let sis_keepalive_secs = device
+        .sis_keepalive_secs
+        .or(defaults.sis_keepalive_secs)
+        .unwrap_or(DEFAULT_SIS_KEEPALIVE_SECS);
+    let sis_keepalive = (sis_keepalive_secs > 0).then(|| Duration::from_secs(sis_keepalive_secs));
 
     Ok(DeviceConfig {
         host: device.host,
@@ -166,7 +166,7 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         connect_timeout: Duration::from_secs(connect_secs),
         command_timeout: Duration::from_secs(command_secs),
         eager,
-        keepalive,
+        sis_keepalive,
         id,
     })
 }
@@ -200,7 +200,7 @@ struct Defaults {
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
-    keepalive_secs: Option<u64>,
+    sis_keepalive_secs: Option<u64>,
 }
 
 /// A device as written: `id` and `host` are required, the rest may inherit.
@@ -215,7 +215,7 @@ struct RawDevice {
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
-    keepalive_secs: Option<u64>,
+    sis_keepalive_secs: Option<u64>,
 }
 
 #[cfg(test)]
@@ -400,16 +400,16 @@ command_secs = 3
     }
 
     #[test]
-    fn eager_defaults_off_with_a_standard_keepalive_interval() {
+    fn eager_defaults_off_with_a_standard_sis_keepalive_interval() {
         // A device that mentions neither field is unchanged: lazy, and its
-        // (irrelevant-while-lazy) keepalive falls back to the built-in default.
+        // (irrelevant-while-lazy) SIS keepalive falls back to the built-in default.
         let atrium = &parse(USER_EXAMPLE).unwrap()[0];
         assert!(!atrium.eager);
-        assert_eq!(atrium.keepalive, Some(Duration::from_secs(120)));
+        assert_eq!(atrium.sis_keepalive, Some(Duration::from_secs(120)));
     }
 
     #[test]
-    fn eager_and_keepalive_inherit_from_defaults() {
+    fn eager_and_sis_keepalive_inherit_from_defaults() {
         let text = r#"
 [defaults]
 port = 22023
@@ -418,7 +418,7 @@ password = "extron"
 connect_secs = 5
 command_secs = 3
 eager = true
-keepalive_secs = 90
+sis_keepalive_secs = 90
 
 [[device]]
 id = "warm"
@@ -426,11 +426,11 @@ host = "10.0.0.5"
 "#;
         let warm = &parse(text).unwrap()[0];
         assert!(warm.eager);
-        assert_eq!(warm.keepalive, Some(Duration::from_secs(90)));
+        assert_eq!(warm.sis_keepalive, Some(Duration::from_secs(90)));
     }
 
     #[test]
-    fn keepalive_secs_zero_disables_the_keepalive() {
+    fn sis_keepalive_secs_zero_disables_the_sis_keepalive() {
         let text = r#"
 [defaults]
 port = 22023
@@ -439,7 +439,7 @@ password = "extron"
 connect_secs = 5
 command_secs = 3
 eager = true
-keepalive_secs = 0
+sis_keepalive_secs = 0
 
 [[device]]
 id = "warm-once"
@@ -447,11 +447,11 @@ host = "10.0.0.5"
 "#;
         let device = &parse(text).unwrap()[0];
         assert!(device.eager);
-        assert_eq!(device.keepalive, None);
+        assert_eq!(device.sis_keepalive, None);
     }
 
     #[test]
-    fn a_device_overrides_eager_and_keepalive_from_defaults() {
+    fn a_device_overrides_eager_and_sis_keepalive_from_defaults() {
         let text = r#"
 [defaults]
 port = 22023
@@ -460,7 +460,7 @@ password = "extron"
 connect_secs = 5
 command_secs = 3
 eager = true
-keepalive_secs = 120
+sis_keepalive_secs = 120
 
 [[device]]
 id = "lazy-one"
@@ -470,14 +470,14 @@ eager = false
 [[device]]
 id = "slow-poll"
 host = "10.0.0.6"
-keepalive_secs = 30
+sis_keepalive_secs = 30
 "#;
         let devices = parse(text).unwrap();
         let lazy = get(&devices, "lazy-one");
         assert!(!lazy.eager);
         let slow = get(&devices, "slow-poll");
         assert!(slow.eager);
-        assert_eq!(slow.keepalive, Some(Duration::from_secs(30)));
+        assert_eq!(slow.sis_keepalive, Some(Duration::from_secs(30)));
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl SimulatedSmp {
             connect_timeout: Duration::from_secs(5),
             command_timeout: Duration::from_secs(5),
             eager: false,
-            keepalive: None,
+            sis_keepalive: None,
         }
     }
 }

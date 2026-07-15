@@ -19,8 +19,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 
-use sismatic_core::devices::keepalive::Keepalive;
 use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::Instruction;
@@ -37,7 +37,7 @@ use sismatic_core::protocol::instructions::register::Register;
 /// pyo3-log into the finalizing interpreter segfaults the process.
 ///
 /// Declaration order is load-bearing for the default (no-`close`) drop path:
-/// `keepalive` is listed first so its background tasks are aborted before the
+/// `sis_keepalive` is listed first so its background tasks are aborted before the
 /// `registry` drops, and `registry` before `runtime`, so the SSH connections
 /// close while the reactor is still running instead of after it is gone.
 ///
@@ -46,7 +46,7 @@ use sismatic_core::protocol::instructions::register::Register;
 /// `close` — tear down before finalization without pinning the session alive.
 #[pyclass(name = "Sis", weakref)]
 struct Sismatic {
-    keepalive: Option<Keepalive>,
+    sis_keepalive: Option<SisKeepalive>,
     registry: Option<Registry>,
     runtime: Option<Runtime>,
 }
@@ -70,17 +70,17 @@ impl Alarm {
 impl Sismatic {
     /// Build a session from a `devices.toml`. Devices are connected lazily on
     /// their first command by default; any device marked `eager` in the config
-    /// is connected at once and kept warm by a background keepalive.
+    /// is connected at once and kept warm by a background SIS keepalive.
     #[staticmethod]
     fn from_toml(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
         let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let registry = Registry::load(path, Arc::new(RusshConnector))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let keepalive = Keepalive::spawn(runtime.handle(), registry.devices());
+        let sis_keepalive = SisKeepalive::spawn(runtime.handle(), registry.devices());
         let session = Py::new(
             py,
             Self {
-                keepalive: Some(keepalive),
+                sis_keepalive: Some(sis_keepalive),
                 registry: Some(registry),
                 runtime: Some(runtime),
             },
@@ -100,25 +100,25 @@ impl Sismatic {
     /// they wind down. Idempotent: a second call (or a call after a `with`
     /// block) is a no-op, and any method used afterwards raises `RuntimeError`.
     fn close(&mut self, py: Python<'_>) {
-        let keepalive = self.keepalive.take();
+        let sis_keepalive = self.sis_keepalive.take();
         let registry = self.registry.take();
         let runtime = self.runtime.take();
         py.detach(move || match runtime {
             Some(runtime) => {
-                // Abort the keepalive tasks and drop the connections inside the
+                // Abort the SIS keepalive tasks and drop the connections inside the
                 // runtime context so russh's Drop impls can reach the
                 // still-running session tasks, then give those tasks (and the
-                // aborted keepalives, which still hold a device handle each) a
+                // aborted SIS keepalives, which still hold a device handle each) a
                 // bounded moment to close cleanly.
                 {
                     let _enter = runtime.enter();
-                    drop(keepalive);
+                    drop(sis_keepalive);
                     drop(registry);
                 }
                 runtime.shutdown_timeout(Duration::from_secs(5));
             }
             None => {
-                drop(keepalive);
+                drop(sis_keepalive);
                 drop(registry);
             }
         });

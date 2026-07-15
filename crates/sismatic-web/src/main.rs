@@ -22,8 +22,8 @@ use axum::{
 };
 use serde_json::json;
 
-use sismatic_core::devices::keepalive::Keepalive;
 use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::Instruction;
@@ -43,8 +43,9 @@ async fn main() -> Result<()> {
 
     // Eagerly connect and keep warm any device the config marks `eager`. The
     // guard lives until `main` returns (i.e. for the server's lifetime); on
-    // shutdown its Drop aborts the keepalive tasks.
-    let _keepalive = Keepalive::spawn(&tokio::runtime::Handle::current(), registry.devices());
+    // shutdown its Drop aborts the SIS keepalive tasks.
+    let _sis_keepalive =
+        SisKeepalive::spawn(&tokio::runtime::Handle::current(), registry.devices());
 
     let state: AppState = Arc::new(registry);
 

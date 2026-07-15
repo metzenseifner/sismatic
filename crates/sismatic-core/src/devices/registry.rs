@@ -51,9 +51,9 @@ impl Registry {
     }
 
     /// A handle to every device, in no particular order. Used to drive
-    /// cross-device work such as the eager-connect [`Keepalive`] supervisor.
+    /// cross-device work such as the eager-connect [`SisKeepalive`] supervisor.
     ///
-    /// [`Keepalive`]: super::keepalive::Keepalive
+    /// [`SisKeepalive`]: super::sis_keepalive::SisKeepalive
     pub fn devices(&self) -> Vec<Arc<Device>> {
         self.devices.iter().map(|d| Arc::clone(d.value())).collect()
     }
