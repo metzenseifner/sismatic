@@ -43,3 +43,21 @@ password = "extron"
 connect_secs = 10   # override default connect timeout
 command_secs = 8    # override default command timeout
 ```
+
+# Warm versus Cold Connections
+
+The premise is that the SSH handshakes are expensive, so having a "warm" or
+preestablished connection is important for runtime responsiveness. Device
+connections are lazy by default, which means that connection is delayed and
+first established when first instruction is sent. After a connection is
+established, the SSH layer will automatically keep the connection alive until
+the device itself terminates the connection due to inactivity (no instructions
+sent for some interval). The default interval is 5 minutes on some devices
+after which the connection will go "cold" again and be reestablished upon the
+next command. If desired, it is possible to eagerly open connections to devices
+by settings the `eager` configuration option. This will enable maximum
+performance at runtime because it will cause connections to devices to open up
+front i.e. pay the cost of the full SSH handshake at startup. To keep the
+connections "warm", there is the `sis_keepalive_secs` setting, which sets an
+interval in which a benign instruction is sent to the device to reset the
+device's inactivity timer periodically.
