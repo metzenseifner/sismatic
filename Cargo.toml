@@ -4,12 +4,12 @@ members = [
   "crates/sismatic-core",
   "crates/sismatic-python",
   "crates/sismatic-cli",
-  "crates/sismatic-web",
+  "crates/sismatic-web/backend",
 ]
 
 # Shared across every member so a version/edition/license bump happens once.
 [workspace.package]
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 license = "ECL-2.0"
 
