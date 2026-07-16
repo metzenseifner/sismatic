@@ -10,7 +10,7 @@ name = "sismatic-web"
 path = "src/main.rs"
 
 [dependencies]
-sismatic-core = { workspace = true, features = ["ssh"] }
+sismatic-core = { workspace = true, features = ["ssh", "toml", "json", "yaml"] }
 anyhow.workspace = true
 axum.workspace = true
 serde_json.workspace = true

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 
+use sismatic_core::devices::config;
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
@@ -54,8 +55,10 @@ enum Action {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let registry = Registry::load(&cli.config, Arc::new(RusshConnector))
-        .with_context(|| format!("loading {}", cli.config.display()))?;
+    let registry = Registry::from_configs(
+        config::load(&cli.config).with_context(|| format!("loading {}", cli.config.display()))?,
+        Arc::new(RusshConnector),
+    );
 
     match cli.action {
         Action::Ids => {

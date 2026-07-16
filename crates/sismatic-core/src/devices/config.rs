@@ -28,13 +28,18 @@
 //! command_secs = 10
 //! ```
 //!
-//! Resolution is a pure function of the file's text: [`parse`] turns a string
-//! into fully-resolved [`DeviceConfig`]s, and [`load`] is the thin wrapper that
-//! reads the file first. `id` and `host` are the only fields a device must
-//! state itself; every other field may come from the device or the defaults.
+//! Resolution is format-agnostic: [`resolve_config`] turns an already-parsed
+//! [`RawConfig`] into fully-resolved [`DeviceConfig`]s and is the only step this
+//! crate guarantees in every build. Turning file *text* into a `RawConfig` is
+//! delegated to a serde deserializer chosen by the caller; enabling the `toml`,
+//! `json`, or `yaml` feature adds a ready-made loader (`from_toml_str` and
+//! friends, plus an extension-dispatching `load`). `id` and `host` are the only
+//! fields a device must state itself; every other field may come from the device
+//! or the defaults.
 
 use std::collections::HashSet;
 use std::fmt;
+#[cfg(any(feature = "toml", feature = "yaml", feature = "json"))]
 use std::path::Path;
 use std::time::Duration;
 
@@ -73,10 +78,13 @@ pub struct DeviceConfig {
 /// Why a `devices.toml` could not be turned into [`DeviceConfig`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    /// The file could not be read from disk (only produced by [`load`]).
+    /// The file could not be read from disk (produced by the file loader).
     Io(String),
-    /// The text was not valid TOML, or a required `id`/`host` was absent.
-    Toml(String),
+    /// The text did not deserialize into a [`RawConfig`], or a required
+    /// `id`/`host` was absent.
+    Parse(String),
+    /// The file extension has no compiled-in deserializer.
+    UnsupportedFormat(String),
     /// Two devices share the same `id`, so one would shadow the other.
     DuplicateId(String),
     /// A field was set neither on the device nor in `[defaults]`.
@@ -87,7 +95,10 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::Io(e) => write!(f, "reading devices file: {e}"),
-            ConfigError::Toml(e) => write!(f, "parsing devices file: {e}"),
+            ConfigError::Parse(e) => write!(f, "parsing devices file: {e}"),
+            ConfigError::UnsupportedFormat(ext) => {
+                write!(f, "unsupported config file extension `{ext}`")
+            }
             ConfigError::DuplicateId(id) => write!(f, "duplicate device id `{id}`"),
             ConfigError::MissingField { device, field } => {
                 write!(
@@ -101,17 +112,55 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Read `path` and resolve every device defined in it.
+/// Read `path`, pick a deserializer from its extension, and resolve every device
+/// defined in it. Only the file read is impure; everything after is a pure
+/// function of the bytes. Available whenever at least one format feature
+/// (`toml`, `json`, `yaml`) is enabled.
+#[cfg(any(feature = "toml", feature = "yaml", feature = "json"))]
 pub fn load(path: impl AsRef<Path>) -> Result<Vec<DeviceConfig>, ConfigError> {
+    let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
-    parse(&text)
+    match path.extension().and_then(|e| e.to_str()) {
+        #[cfg(feature = "toml")]
+        Some("toml") => from_toml_str(&text),
+        #[cfg(feature = "yaml")]
+        Some("yaml") | Some("yml") => from_yaml_str(&text),
+        #[cfg(feature = "json")]
+        Some("json") => from_json_str(&text),
+        other => Err(ConfigError::UnsupportedFormat(
+            other.unwrap_or("").to_string(),
+        )),
+    }
 }
 
-/// Resolve every device from the text of a `devices.toml`. Pure: the same input
-/// always yields the same output and nothing is read from the environment.
-pub fn parse(text: &str) -> Result<Vec<DeviceConfig>, ConfigError> {
-    let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError::Toml(e.to_string()))?;
+/// Deserialize TOML text into a [`RawConfig`], then [`resolve_config`].
+#[cfg(feature = "toml")]
+pub fn from_toml_str(text: &str) -> Result<Vec<DeviceConfig>, ConfigError> {
+    let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    resolve_config(raw)
+}
 
+/// Deserialize JSON text into a [`RawConfig`], then [`resolve_config`].
+#[cfg(feature = "json")]
+pub fn from_json_str(text: &str) -> Result<Vec<DeviceConfig>, ConfigError> {
+    let raw: RawConfig =
+        serde_json::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    resolve_config(raw)
+}
+
+/// Deserialize YAML text into a [`RawConfig`], then [`resolve_config`].
+#[cfg(feature = "yaml")]
+pub fn from_yaml_str(text: &str) -> Result<Vec<DeviceConfig>, ConfigError> {
+    let raw: RawConfig =
+        serde_saphyr::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    resolve_config(raw)
+}
+
+/// Format-agnostic entry point: consume an already-parsed [`RawConfig`] and
+/// resolve it into validated [`DeviceConfig`]s. Pure and total — the same input
+/// always yields the same output, it never panics, and it reads nothing from the
+/// environment. Callers who bring their own deserializer target this directly.
+pub fn resolve_config(raw: RawConfig) -> Result<Vec<DeviceConfig>, ConfigError> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::with_capacity(raw.devices.len());
     for device in raw.devices {
@@ -183,7 +232,7 @@ fn require<T>(device: &str, field: &'static str, value: Option<T>) -> Result<T, 
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawConfig {
+pub struct RawConfig {
     #[serde(default)]
     defaults: Defaults,
     #[serde(default, rename = "device")]
@@ -218,7 +267,7 @@ struct RawDevice {
     sis_keepalive_secs: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "toml"))]
 mod tests {
     use super::*;
 
@@ -249,7 +298,7 @@ command_secs = 10
 
     #[test]
     fn resolves_example_with_inheritance_and_overrides() {
-        let devices = parse(USER_EXAMPLE).unwrap();
+        let devices = from_toml_str(USER_EXAMPLE).unwrap();
         assert_eq!(devices.len(), 2);
 
         // Order is preserved from the file.
@@ -285,7 +334,7 @@ username = "admin"
 password = "extron"
 port = 22
 "#;
-        assert_eq!(parse(text).unwrap()[0].port, 22);
+        assert_eq!(from_toml_str(text).unwrap()[0].port, 22);
     }
 
     #[test]
@@ -302,7 +351,7 @@ command_secs = 3
 id = "bare"
 host = "10.0.0.5"
 "#;
-        let bare = &parse(text).unwrap()[0];
+        let bare = &from_toml_str(text).unwrap()[0];
         assert_eq!(bare.username, "admin");
         assert_eq!(bare.password, "extron");
     }
@@ -322,7 +371,7 @@ id = "no-pass"
 host = "10.0.0.5"
 "#;
         assert_eq!(
-            parse(text).unwrap_err(),
+            from_toml_str(text).unwrap_err(),
             ConfigError::MissingField {
                 device: "no-pass".into(),
                 field: "password",
@@ -336,7 +385,10 @@ host = "10.0.0.5"
 [[device]]
 id = "no-host"
 "#;
-        assert!(matches!(parse(text).unwrap_err(), ConfigError::Toml(_)));
+        assert!(matches!(
+            from_toml_str(text).unwrap_err(),
+            ConfigError::Parse(_)
+        ));
     }
 
     #[test]
@@ -358,7 +410,7 @@ id = "dup"
 host = "10.0.0.2"
 "#;
         assert_eq!(
-            parse(text).unwrap_err(),
+            from_toml_str(text).unwrap_err(),
             ConfigError::DuplicateId("dup".into())
         );
     }
@@ -376,12 +428,15 @@ connect_secs = 5
 command_secs = 3
 hostname = "oops"
 "#;
-        assert!(matches!(parse(text).unwrap_err(), ConfigError::Toml(_)));
+        assert!(matches!(
+            from_toml_str(text).unwrap_err(),
+            ConfigError::Parse(_)
+        ));
     }
 
     #[test]
     fn empty_config_yields_no_devices() {
-        assert_eq!(parse("").unwrap(), Vec::new());
+        assert_eq!(from_toml_str("").unwrap(), Vec::new());
     }
 
     #[test]
@@ -396,14 +451,14 @@ password = "extron"
 connect_secs = 5
 command_secs = 3
 "#;
-        assert_eq!(parse(text).unwrap().len(), 1);
+        assert_eq!(from_toml_str(text).unwrap().len(), 1);
     }
 
     #[test]
     fn eager_defaults_off_with_a_standard_sis_keepalive_interval() {
         // A device that mentions neither field is unchanged: lazy, and its
         // (irrelevant-while-lazy) SIS keepalive falls back to the built-in default.
-        let atrium = &parse(USER_EXAMPLE).unwrap()[0];
+        let atrium = &from_toml_str(USER_EXAMPLE).unwrap()[0];
         assert!(!atrium.eager);
         assert_eq!(atrium.sis_keepalive, Some(Duration::from_secs(120)));
     }
@@ -424,7 +479,7 @@ sis_keepalive_secs = 90
 id = "warm"
 host = "10.0.0.5"
 "#;
-        let warm = &parse(text).unwrap()[0];
+        let warm = &from_toml_str(text).unwrap()[0];
         assert!(warm.eager);
         assert_eq!(warm.sis_keepalive, Some(Duration::from_secs(90)));
     }
@@ -445,7 +500,7 @@ sis_keepalive_secs = 0
 id = "warm-once"
 host = "10.0.0.5"
 "#;
-        let device = &parse(text).unwrap()[0];
+        let device = &from_toml_str(text).unwrap()[0];
         assert!(device.eager);
         assert_eq!(device.sis_keepalive, None);
     }
@@ -472,7 +527,7 @@ id = "slow-poll"
 host = "10.0.0.6"
 sis_keepalive_secs = 30
 "#;
-        let devices = parse(text).unwrap();
+        let devices = from_toml_str(text).unwrap();
         let lazy = get(&devices, "lazy-one");
         assert!(!lazy.eager);
         let slow = get(&devices, "slow-poll");
@@ -488,5 +543,136 @@ sis_keepalive_secs = 30
         let devices = load(&path).unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(devices.len(), 2);
+    }
+
+    #[test]
+    fn load_rejects_an_extension_without_a_deserializer() {
+        let path = std::env::temp_dir().join(format!("sismatic-x-{}.ini", std::process::id()));
+        std::fs::write(&path, "irrelevant").unwrap();
+        let err = load(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(err, ConfigError::UnsupportedFormat("ini".into()));
+    }
+}
+
+/// The resolution core carries no format feature, so it is tested by building a
+/// [`RawConfig`] directly — no TOML/YAML/JSON, no filesystem.
+#[cfg(test)]
+mod resolve_config_tests {
+    use super::*;
+
+    #[test]
+    fn folds_defaults_and_resolves_directly() {
+        let raw = RawConfig {
+            defaults: Defaults {
+                port: Some(22023),
+                username: Some("admin".into()),
+                password: Some("extron".into()),
+                connect_secs: Some(5),
+                command_secs: Some(3),
+                eager: None,
+                sis_keepalive_secs: None,
+            },
+            devices: vec![RawDevice {
+                id: "bare".into(),
+                host: "10.0.0.5".into(),
+                port: None,
+                username: None,
+                password: None,
+                connect_secs: None,
+                command_secs: None,
+                eager: None,
+                sis_keepalive_secs: None,
+            }],
+        };
+        let resolved = resolve_config(raw).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].port, 22023);
+        assert_eq!(resolved[0].username, "admin");
+        assert_eq!(resolved[0].connect_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn duplicate_ids_are_rejected_without_a_format() {
+        let raw = RawConfig {
+            defaults: Defaults::default(),
+            devices: vec![
+                RawDevice {
+                    id: "dup".into(),
+                    host: "10.0.0.1".into(),
+                    port: Some(22023),
+                    username: Some("admin".into()),
+                    password: Some("extron".into()),
+                    connect_secs: Some(5),
+                    command_secs: Some(3),
+                    eager: None,
+                    sis_keepalive_secs: None,
+                },
+                RawDevice {
+                    id: "dup".into(),
+                    host: "10.0.0.2".into(),
+                    port: Some(22023),
+                    username: Some("admin".into()),
+                    password: Some("extron".into()),
+                    connect_secs: Some(5),
+                    command_secs: Some(3),
+                    eager: None,
+                    sis_keepalive_secs: None,
+                },
+            ],
+        };
+        assert_eq!(
+            resolve_config(raw).unwrap_err(),
+            ConfigError::DuplicateId("dup".into())
+        );
+    }
+}
+
+/// The same logical document in JSON resolves to the same devices as its TOML
+/// twin, because both feed one `serde::Deserialize` — see the design note
+/// `docs/format-agnostic-config-opt-in-features.md`, Deep dive A.
+#[cfg(all(test, feature = "json"))]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn json_document_resolves() {
+        let text = r#"
+        {
+          "defaults": { "port": 22023, "username": "admin", "password": "extron",
+                        "connect_secs": 5, "command_secs": 3 },
+          "device": [ { "id": "a", "host": "10.0.0.1" } ]
+        }"#;
+        let devices = from_json_str(text).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "a");
+        assert_eq!(devices[0].port, 22023);
+        assert_eq!(devices[0].username, "admin");
+    }
+}
+
+/// The YAML twin resolves identically, exercising the `serde-saphyr` deserializer.
+#[cfg(all(test, feature = "yaml"))]
+mod yaml_tests {
+    use super::*;
+
+    #[test]
+    fn yaml_document_resolves() {
+        let text = "
+defaults:
+  port: 22023
+  username: admin
+  password: extron
+  connect_secs: 5
+  command_secs: 3
+device:
+  - id: a
+    host: \"10.0.0.1\"
+";
+        let devices = from_yaml_str(text).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "a");
+        assert_eq!(devices[0].port, 22023);
+        assert_eq!(devices[0].username, "admin");
     }
 }

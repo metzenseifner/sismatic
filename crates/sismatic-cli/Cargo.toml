@@ -10,7 +10,7 @@ name = "sismatic"
 path = "src/main.rs"
 
 [dependencies]
-sismatic-core = { workspace = true, features = ["ssh"] }
+sismatic-core = { workspace = true, features = ["ssh", "toml", "json", "yaml"] }
 anyhow.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

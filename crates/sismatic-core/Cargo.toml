@@ -11,7 +11,11 @@ dashmap.workspace = true
 russh = { workspace = true, optional = true }
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
-toml.workspace = true
+# Config-file deserializers, each optional and gated by a same-named feature
+# below. The library is format-agnostic by default; a consumer opts into one.
+toml = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde-saphyr = { workspace = true, optional = true }
 winnow.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -22,6 +26,12 @@ uuid.workspace = true
 ssh = ["dep:russh", "tokio/net", "tokio/io-util", "tokio/rt-multi-thread"]
 # Exposes FakeTransport (and other test doubles) to out-of-crate integration tests.
 testing = []
+# Opt-in config-file formats. Enable one (or more) for a ready-made loader
+# (`config::from_toml_str` and friends, plus extension-dispatching `config::load`);
+# enable none to keep the crate format-free and call `resolve_config` yourself.
+toml = ["dep:toml"]
+json = ["dep:serde_json"]
+yaml = ["dep:serde-saphyr"]
 
 [dev-dependencies]
 tracing-bunyan-formatter.workspace = true

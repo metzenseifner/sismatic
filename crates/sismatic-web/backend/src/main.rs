@@ -38,8 +38,11 @@ async fn main() -> Result<()> {
     let config = std::env::var("SISMATIC_CONFIG").unwrap_or_else(|_| "devices.toml".into());
     let addr = std::env::var("SISMATIC_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
 
-    let registry = Registry::load(&config, Arc::new(RusshConnector))
-        .with_context(|| format!("loading {config}"))?;
+    let registry = Registry::from_configs(
+        sismatic_core::devices::config::load(&config)
+            .with_context(|| format!("loading {config}"))?,
+        Arc::new(RusshConnector),
+    );
 
     // Eagerly connect and keep warm any device the config marks `eager`. The
     // guard lives until `main` returns (i.e. for the server's lifetime); on

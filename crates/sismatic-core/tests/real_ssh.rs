@@ -11,8 +11,9 @@
 #![cfg(feature = "ssh")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use sismatic_core::devices::config;
+use sismatic_core::devices::config::DeviceConfig;
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
@@ -34,21 +35,21 @@ async fn queries_firmware_over_real_ssh() {
         return;
     };
 
-    let port = std::env::var("SMP_TEST_PORT").unwrap_or_else(|_| "22023".into());
-    let devices_toml = format!(
-        r#"
-[[device]]
-id = "real"
-host = "{host}"
-port = {port}
-username = "{user}"
-password = "{pass}"
-connect_secs = 10
-command_secs = 5
-"#,
-    );
-
-    let configs = config::parse(&devices_toml).expect("valid generated config");
+    let port: u16 = std::env::var("SMP_TEST_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(22023);
+    let configs = vec![DeviceConfig {
+        id: "real".into(),
+        host,
+        port,
+        username: user,
+        password: pass,
+        connect_timeout: Duration::from_secs(10),
+        command_timeout: Duration::from_secs(5),
+        eager: false,
+        sis_keepalive: None,
+    }];
     let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
     let device = registry.device("real").expect("device present");
 

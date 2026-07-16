@@ -6,12 +6,11 @@
 //! device's one warm connection — the registry is the keep-warm cache, one
 //! entry per device.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::config::{self, ConfigError, DeviceConfig};
+use super::config::DeviceConfig;
 use super::connector::Connector;
 use super::device::Device;
 
@@ -30,14 +29,6 @@ impl Registry {
             devices.insert(id, device);
         }
         Self { devices }
-    }
-
-    /// Read and resolve `path`, then build a registry over `connector`.
-    pub fn load(
-        path: impl AsRef<Path>,
-        connector: Arc<dyn Connector>,
-    ) -> Result<Self, ConfigError> {
-        Ok(Self::from_configs(config::load(path)?, connector))
     }
 
     /// The device with this id, or `None` if it is not in the registry.
@@ -73,6 +64,7 @@ impl Registry {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::fake::FakeTransport;
@@ -81,28 +73,30 @@ mod tests {
 
     const PORT_REPLY: &str = "22023\r\n";
 
-    const EXAMPLE: &str = r#"
-[defaults]
-port = 22023
-username = "admin"
-password = "extron"
-connect_secs = 5
-command_secs = 3
-
-[[device]]
-id = "atrium-101"
-host = "10.0.0.7"
-
-[[device]]
-id = "annex-far"
-host = "10.9.40.12"
-"#;
+    /// The two-device pool used across these tests, built as domain values so the
+    /// registry tests stay coupled to the registry alone, not to any file format.
+    fn example_configs() -> Vec<DeviceConfig> {
+        [("atrium-101", "10.0.0.7"), ("annex-far", "10.9.40.12")]
+            .into_iter()
+            .map(|(id, host)| DeviceConfig {
+                id: id.into(),
+                host: host.into(),
+                port: 22023,
+                username: "admin".into(),
+                password: "extron".into(),
+                connect_timeout: Duration::from_secs(5),
+                command_timeout: Duration::from_secs(3),
+                eager: false,
+                sis_keepalive: None,
+            })
+            .collect()
+    }
 
     fn registry_over(reply_count: usize) -> Registry {
         let connector = Arc::new(CountingConnector::new(move || {
             FakeTransport::with_reads(std::iter::repeat_n(PORT_REPLY, reply_count))
         }));
-        Registry::from_configs(config::parse(EXAMPLE).unwrap(), connector)
+        Registry::from_configs(example_configs(), connector)
     }
 
     #[test]
@@ -137,7 +131,7 @@ host = "10.9.40.12"
             FakeTransport::with_reads([PORT_REPLY, PORT_REPLY])
         }));
         let opens = connector.opens_handle();
-        let registry = Registry::from_configs(config::parse(EXAMPLE).unwrap(), connector);
+        let registry = Registry::from_configs(example_configs(), connector);
 
         // Two independent lookups of the same id...
         registry
@@ -155,16 +149,5 @@ host = "10.9.40.12"
 
         // ...reuse the same device, and therefore the same connection.
         assert_eq!(opens.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn load_builds_from_a_file() {
-        let path =
-            std::env::temp_dir().join(format!("sismatic-registry-{}.toml", std::process::id()));
-        std::fs::write(&path, EXAMPLE).unwrap();
-        let connector = Arc::new(CountingConnector::new(FakeTransport::new));
-        let registry = Registry::load(&path, connector).unwrap();
-        std::fs::remove_file(&path).ok();
-        assert_eq!(registry.len(), 2);
     }
 }

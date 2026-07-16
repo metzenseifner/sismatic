@@ -74,8 +74,9 @@ impl Sismatic {
     #[staticmethod]
     fn from_toml(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
         let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let registry = Registry::load(path, Arc::new(RusshConnector))
+        let configs = sismatic_core::devices::config::load(path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
         let sis_keepalive = SisKeepalive::spawn(runtime.handle(), registry.devices());
         let session = Py::new(
             py,

@@ -28,4 +28,12 @@ tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 # The blocking Python facade. It drives real hardware, so it pulls in core's
 # `ssh` transport and a tokio runtime to block on. `dep:pyo3` gates the compiled
 # extension module; without this feature the crate is just the pure stub layer.
-python = ["dep:pyo3", "dep:pyo3-log", "dep:tokio", "sismatic-core/ssh"]
+python = [
+  "dep:pyo3",
+  "dep:pyo3-log",
+  "dep:tokio",
+  "sismatic-core/ssh",
+  "sismatic-core/toml",
+  "sismatic-core/json",
+  "sismatic-core/yaml",
+]
