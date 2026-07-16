@@ -1,0 +1,40 @@
+site_name: sismatic
+site_description: Blocking Python facade for driving Extron SIS devices over SSH
+site_url: https://metzenseifner.github.io/sismatic/
+repo_url: https://github.com/metzenseifner/sismatic
+repo_name: metzenseifner/sismatic
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          # griffe loads the `sismatic` package from the SDK crate's Python
+          # layer. There is no Python source for the compiled module — only the
+          # `__init__.pyi` stub — so griffe reads the stub statically and renders
+          # the API from it. No wheel build required to generate docs.
+          paths: [crates/sismatic-python-sdk/python]
+          options:
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - API Reference: reference.md
