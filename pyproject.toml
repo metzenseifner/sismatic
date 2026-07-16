@@ -7,7 +7,10 @@ name = "sismatic"
 # Single source of truth is Cargo.toml; maturin reads it because of `dynamic`.
 dynamic = ["version"]
 description = "Blocking Python facade for driving Extron SIS devices over SSH"
-readme = "README.md"
+# The PyPI long description is the *Python* package's README, not the workspace
+# root one. PyPI serves it as static HTML with no repo behind it, so the SDK
+# README stands alone and uses absolute GitHub URLs for anything it links to.
+readme = "crates/sismatic-python-sdk/README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 classifiers = [
@@ -17,11 +20,18 @@ classifiers = [
   "Operating System :: MacOS",
 ]
 
+# Rendered as reliable sidebar links on the PyPI project page, independent of
+# whether the README's own links resolve there.
+[project.urls]
+Homepage = "https://github.com/metzenseifner/sismatic"
+Repository = "https://github.com/metzenseifner/sismatic"
+Documentation = "https://metzenseifner.github.io/sismatic/"
+
 [tool.maturin]
 # The Rust extension lives in a workspace member, not at the repo root. This
 # packaging manifest stays at the root (so it can point `readme`/`license` at
-# the root files) and directs maturin at the crate that produces the module.
-manifest-path = "crates/sismatic-python/Cargo.toml"
+# repo files) and directs maturin at the crate that produces the module.
+manifest-path = "crates/sismatic-python-sdk/Cargo.toml"
 # pyo3 is an *optional* dep, so maturin's auto-detection (which resolves
 # default features) never sees it and would fall back to cffi. Pin the
 # binding kind explicitly.
@@ -34,7 +44,7 @@ module-name = "sismatic"
 features = ["python"]
 # Ship a hand-authored Python layer alongside the compiled module: the PEP 561
 # `py.typed` marker and `__init__.pyi` type stub (generated from the Rust
-# instruction catalogs by `cargo run -p sismatic-python --bin gen_stub`).
+# instruction catalogs by `cargo run -p sismatic-python-sdk --bin gen_stub`).
 # maturin drops the compiled extension into this package as
 # `sismatic/sismatic.abi3.so`.
-python-source = "crates/sismatic-python/python"
+python-source = "crates/sismatic-python-sdk/python"

@@ -13,10 +13,10 @@ There are several reasons why this library is worthwhile:
 
 ## Crates
 
-- core
-- [python](./crates/sismatic-python/README.md)
-- web
-- cli
+- [core](./crates/sismatic-core)
+- [python](./crates/sismatic-python-sdk/README.md)
+- [web](./crates/sismatic-web)
+- [cli](./crates/sismatic-cli)
 
 ## Configuration Example
 

@@ -9,7 +9,7 @@ members = [
 
 # Shared across every member so a version/edition/license bump happens once.
 [workspace.package]
-version = "0.2.16"
+version = "0.2.17"
 edition = "2024"
 license = "ECL-2.0"
 

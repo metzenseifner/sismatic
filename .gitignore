@@ -3,6 +3,8 @@
 result
 result-*
 dist
+# MkDocs build output (`nix run .#docs`)
+/site
 .claude
 
 # Python
@@ -15,5 +17,5 @@ __pycache__/
 .ruff_cache/
 
 # Compiled extension module, built by maturin into the source package
-# (crates/sismatic-python/python/sismatic/sismatic.abi3.so).
+# (crates/sismatic-python-sdk/python/sismatic/sismatic.abi3.so).
 *.so

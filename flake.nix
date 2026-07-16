@@ -274,6 +274,36 @@
             '';
           };
 
+          # The doc-site toolchain: MkDocs (Material theme) + mkdocstrings'
+          # Python handler. Pinned by the flake like every other tool so the
+          # site builds identically on a laptop and in CI.
+          docsEnv = pkgs.python3.withPackages (ps: [
+            ps.mkdocs
+            ps.mkdocs-material
+            ps.mkdocstrings
+            ps.mkdocstrings-python
+            # mkdocstrings uses it to pretty-print the rendered signatures.
+            ps.black
+          ]);
+
+          # `nix run .#docs` builds the site into ./site; `nix run .#docs -- serve`
+          # serves it with live reload. mkdocstrings/griffe reads the committed
+          # `__init__.pyi` stub statically, so this needs no compiled extension
+          # and stays pure and fast — the stub is the single source of truth,
+          # regenerated from the Rust catalogs by `gen_stub` and freshness-checked
+          # by `cargo test`.
+          docs = pkgs.writeShellApplication {
+            name = "sismatic-docs";
+            runtimeInputs = [ docsEnv ];
+            text = ''
+              if [ "$#" -eq 0 ]; then
+                exec mkdocs build
+              else
+                exec mkdocs "$@"
+              fi
+            '';
+          };
+
           # Named binding (not just an output attr) so the devShell can
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
@@ -392,6 +422,11 @@
               type = "app";
               program = pkgs.lib.getExe build-sdist;
             };
+            # `nix run .#docs [-- serve]` builds/serves the API doc site.
+            docs = {
+              type = "app";
+              program = pkgs.lib.getExe docs;
+            };
           };
 
           # `nix develop`: inherits every dependency the checks need,
@@ -428,6 +463,9 @@
                 pkgs.python3
                 pkgs.cmake
                 pkgs.perl
+                # Doc site: `mkdocs serve` / `mkdocs build` (same toolchain the
+                # `nix run .#docs` app uses).
+                docsEnv
                 # zero2prod chapter 3+: database tooling
                 # pkgs.sqlx-cli
                 # pkgs.postgresql
