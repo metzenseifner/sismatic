@@ -80,7 +80,17 @@ class Sis:
 
     @staticmethod
     def from_toml(path: str) -> \"Sis\":
-        \"\"\"Build a session from a `devices.toml`, opening no connections yet.\"\"\"
+        \"\"\"Deprecated alias for `from_file`, kept for backwards compatibility.\"\"\"
+        ...
+
+    @staticmethod
+    def from_file(path: str) -> \"Sis\":
+        \"\"\"Build a session from a config file (`.toml`, `.json`, `.yaml`/`.yml`), opening no connections yet.\"\"\"
+        ...
+
+    @staticmethod
+    def from_config(config: dict) -> \"Sis\":
+        \"\"\"Build a session from a pre-parsed mapping (defaults table + device list), opening no connections yet.\"\"\"
         ...
 
     def ids(self) -> list[str]:

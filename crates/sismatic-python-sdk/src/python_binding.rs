@@ -17,8 +17,10 @@ use std::time::Duration;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pythonize::depythonize;
 use tokio::runtime::Runtime;
 
+use sismatic_core::devices::config::{DeviceConfig, RawConfig, resolve_config};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
@@ -68,26 +70,38 @@ impl Alarm {
 
 #[pymethods]
 impl Sismatic {
-    /// Build a session from a `devices.toml`. Devices are connected lazily on
-    /// their first command by default; any device marked `eager` in the config
-    /// is connected at once and kept warm by a background SIS keepalive.
+    /// Build a session from a config file. Retained for backwards
+    /// compatibility: it is exactly [`from_file`](Self::from_file) under an older
+    /// name, so it already accepts any supported extension, not just `.toml`.
     #[staticmethod]
     fn from_toml(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
-        let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Self::from_file(py, path)
+    }
+
+    /// Build a session from a config file, choosing the deserializer from the
+    /// extension (`.toml`, `.json`, `.yaml`/`.yml`). Devices are connected lazily
+    /// on their first command by default; any device marked `eager` in the config
+    /// is connected at once and kept warm by a background SIS keepalive.
+    #[staticmethod]
+    fn from_file(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
         let configs = sismatic_core::devices::config::load(path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
-        let sis_keepalive = SisKeepalive::spawn(runtime.handle(), registry.devices());
-        let session = Py::new(
-            py,
-            Self {
-                sis_keepalive: Some(sis_keepalive),
-                registry: Some(registry),
-                runtime: Some(runtime),
-            },
-        )?;
-        register_atexit_close(py, &session)?;
-        Ok(session)
+        Self::build(py, configs)
+    }
+
+    /// Build a session from an already-parsed mapping shaped like the config
+    /// file — a `defaults` table plus a `device` list. Parse the bytes with any
+    /// library you like (INI, XML, a database row, environment variables) and
+    /// hand the resulting `dict` here; it is deserialized into the core's
+    /// `RawConfig` and resolved through the same format-agnostic `resolve_config`
+    /// every file loader ends in. Connection behaviour matches
+    /// [`from_file`](Self::from_file).
+    #[staticmethod]
+    fn from_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
+        let raw: RawConfig =
+            depythonize(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let configs = resolve_config(raw).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Self::build(py, configs)
     }
 
     /// The ids of every configured device.
@@ -171,6 +185,25 @@ impl Sismatic {
 }
 
 impl Sismatic {
+    /// Stand up the tokio runtime, registry, and SIS keepalive around a resolved
+    /// device list, then register the `atexit` teardown. The shared tail of every
+    /// `from_*` constructor.
+    fn build(py: Python<'_>, configs: Vec<DeviceConfig>) -> PyResult<Py<Self>> {
+        let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
+        let sis_keepalive = SisKeepalive::spawn(runtime.handle(), registry.devices());
+        let session = Py::new(
+            py,
+            Self {
+                sis_keepalive: Some(sis_keepalive),
+                registry: Some(registry),
+                runtime: Some(runtime),
+            },
+        )?;
+        register_atexit_close(py, &session)?;
+        Ok(session)
+    }
+
     /// Borrow the registry, or raise if the session has been closed.
     fn registry(&self) -> PyResult<&Registry> {
         self.registry.as_ref().ok_or_else(closed_err)

@@ -22,6 +22,9 @@ pyo3 = { workspace = true, optional = true }
 # Routes russh's `log` output (SSH handshake + auth negotiation) to Python's
 # `logging` so connection failures can be debugged from the Python side.
 pyo3-log = { workspace = true, optional = true }
+# Deserializes an already-parsed Python object into `RawConfig` for
+# `Sis.from_config`, the bring-your-own-parser entry point.
+pythonize = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 
 [features]
@@ -31,6 +34,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 python = [
   "dep:pyo3",
   "dep:pyo3-log",
+  "dep:pythonize",
   "dep:tokio",
   "sismatic-core/ssh",
   "sismatic-core/toml",

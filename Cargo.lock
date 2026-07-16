@@ -1984,6 +1984,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pythonize"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ec376e1216e0c929a74964ce2020012a1a39f32d80e78aa688721219ea7fb89"
+dependencies = [
+ "pyo3",
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2493,7 +2503,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sismatic-cli"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -2503,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-core"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -2522,17 +2532,18 @@ dependencies = [
 
 [[package]]
 name = "sismatic-python-sdk"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "pyo3",
  "pyo3-log",
+ "pythonize",
  "sismatic-core",
  "tokio",
 ]
 
 [[package]]
 name = "sismatic-web"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "anyhow",
  "axum",
