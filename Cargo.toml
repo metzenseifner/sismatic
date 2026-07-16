@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
   "crates/sismatic-core",
-  "crates/sismatic-python",
+  "crates/sismatic-python-sdk",
   "crates/sismatic-cli",
   "crates/sismatic-web/backend",
 ]

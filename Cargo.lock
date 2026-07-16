@@ -2521,7 +2521,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sismatic-python"
+name = "sismatic-python-sdk"
 version = "0.2.15"
 dependencies = [
  "pyo3",

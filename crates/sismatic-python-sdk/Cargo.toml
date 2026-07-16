@@ -1,5 +1,5 @@
 [package]
-name = "sismatic-python"
+name = "sismatic-python-sdk"
 description = "Blocking Python facade for driving Extron SIS devices over SSH"
 version.workspace = true
 edition.workspace = true
