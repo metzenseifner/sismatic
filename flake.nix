@@ -498,6 +498,18 @@
 
                   nix flake check --all-systems # check aforementioned  (or e.g. check for deny.toml by running nix build .#checks.<sys>.deny)
                 EOF
+
+                # Single source of truth for the Python env: nix develop AND
+                # direnv's `use flake` run this hook (print-dev-env ends with
+                # `eval "$shellHook"`), so managing the venv here -- rather than
+                # sourcing one by hand after the shell is up -- keeps its bin dir
+                # inside direnv's captured diff and stops the next prompt from
+                # stripping the flake's /nix/store paths. Anchored to the repo
+                # root so it lands in the same place regardless of cwd.
+                SIS_VENV="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")/sis-venv"
+                [ -d "$SIS_VENV" ] || python3 -m venv "$SIS_VENV"
+                export VIRTUAL_ENV="$SIS_VENV"
+                export PATH="$SIS_VENV/bin:$PATH"
               '';
             }
             // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {

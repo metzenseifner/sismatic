@@ -1,6 +1,6 @@
 from sismatic import Sis
 import logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 devices = {
         "defaults": {
@@ -10,7 +10,7 @@ devices = {
             "sis_keepalive_secs": 120,
             "port": 22023,
             },
-        "device": [
+        "devices": [
             {"id": "Hall A", "host": "https://10.0.150.1"},
             {"id": "Hall B", "host": "https://10.0.150.2"}
             ],

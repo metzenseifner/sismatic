@@ -42,6 +42,8 @@ with Sis.from_file("devices.toml") as sis:
 
 ## Configuration
 
+### from_file
+
 `from_file` picks the deserializer from the extension (`.toml`, `.json`,
 `.yaml`/`.yml`). A config is a `defaults` table plus a list of devices:
 
@@ -68,9 +70,38 @@ connect_secs = 10  # per-device override
 command_secs = 8
 ```
 
+### from_config
+
 Not using a file? `Sis.from_config(mapping)` takes an already-parsed `dict`
-shaped the same way, so you can source config from INI, XML, a database row, or
-environment variables with any parser you like.
+shaped the same way, so you own the parsing. You can have a source config in
+any format like INI, XML, a database row, or environment variables with any
+parser that can produce a dictionary in the expected format.
+
+Minimal Example with a configuration literal (no additonal parsing):
+
+```py
+from sismatic import Sis
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+devices = {
+  "defaults": {
+    "username": "joe",
+    "password": "schmoe",
+    "eager": True,
+    "sis_keepalive_secs": 120,
+    "port": 22023,
+  },
+  "devices": [
+      {"id": "Hall A", "host": "https://10.0.150.1"},
+      {"id": "Hall B", "host": "https://10.0.150.2"},
+  ],
+}
+sis = Sis.from_config(devices)
+print(sis.ids())
+```
+
+### Connections
 
 Connections are lazy by default — the expensive SSH handshake is paid on a
 device's first instruction. Set `eager` to pay it up front, and
