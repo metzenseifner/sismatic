@@ -7,9 +7,9 @@
 //!
 //! ```toml
 //! [defaults]
-//! port = 22023
-//! connect_secs = 5
-//! command_secs = 3
+//! port = 22023       # optional, defaults to 22023
+//! connect_secs = 5   # optional, defaults to 5
+//! command_secs = 3   # optional, defaults to 3
 //! eager = true       # connect to every device at startup and keep it warm
 //! sis_keepalive_secs = 120  # re-issue `Q` this often; 0 disables the SIS keepalive
 //!
@@ -34,8 +34,9 @@
 //! delegated to a serde deserializer chosen by the caller; enabling the `toml`,
 //! `json`, or `yaml` feature adds a ready-made loader (`from_toml_str` and
 //! friends, plus an extension-dispatching `load`). `id` and `host` are the only
-//! fields a device must state itself; every other field may come from the device
-//! or the defaults.
+//! fields a device must state itself, and `username`/`password` must be resolvable
+//! from the device or the defaults; `port`, `connect_secs`, and `command_secs` fall
+//! back to built-in defaults (22023, 5, 3) when set in neither place.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -49,6 +50,15 @@ use serde::Deserialize;
 /// left unset. Comfortably under the SMP's default 5-minute idle disconnect, with
 /// room for one failed round-trip to self-heal before the window closes.
 const DEFAULT_SIS_KEEPALIVE_SECS: u64 = 120;
+
+/// The SMP's SIS-over-SSH port, used when neither the device nor `[defaults]` names one.
+const DEFAULT_PORT: u16 = 22023;
+
+/// Connect timeout applied when neither the device nor `[defaults]` names one.
+const DEFAULT_CONNECT_SECS: u64 = 5;
+
+/// Per-command timeout applied when neither the device nor `[defaults]` names one.
+const DEFAULT_COMMAND_SECS: u64 = 3;
 
 /// A fully-resolved device: every field has a concrete value, with defaults
 /// already folded in. This is what the registry consumes to open a connection.
@@ -176,7 +186,7 @@ pub fn resolve_config(raw: RawConfig) -> Result<Vec<DeviceConfig>, ConfigError> 
 fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, ConfigError> {
     let id = device.id;
 
-    let port = require(&id, "port", device.port.or(defaults.port))?;
+    let port = device.port.or(defaults.port).unwrap_or(DEFAULT_PORT);
     let username = require(
         &id,
         "username",
@@ -187,16 +197,14 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         "password",
         device.password.or_else(|| defaults.password.clone()),
     )?;
-    let connect_secs = require(
-        &id,
-        "connect_secs",
-        device.connect_secs.or(defaults.connect_secs),
-    )?;
-    let command_secs = require(
-        &id,
-        "command_secs",
-        device.command_secs.or(defaults.command_secs),
-    )?;
+    let connect_secs = device
+        .connect_secs
+        .or(defaults.connect_secs)
+        .unwrap_or(DEFAULT_CONNECT_SECS);
+    let command_secs = device
+        .command_secs
+        .or(defaults.command_secs)
+        .unwrap_or(DEFAULT_COMMAND_SECS);
 
     // `eager` and `sis_keepalive_secs` are optional everywhere: a device that sets
     // neither behaves exactly as before (lazy connect, no keep-warm loop).
@@ -235,7 +243,7 @@ fn require<T>(device: &str, field: &'static str, value: Option<T>) -> Result<T, 
 pub struct RawConfig {
     #[serde(default)]
     defaults: Defaults,
-    #[serde(default, rename = "device")]
+    #[serde(default, alias = "device", alias = "devices")]
     devices: Vec<RawDevice>,
 }
 
@@ -452,6 +460,22 @@ connect_secs = 5
 command_secs = 3
 "#;
         assert_eq!(from_toml_str(text).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn port_and_timeouts_fall_back_to_built_in_defaults() {
+        // Neither the device nor a `[defaults]` table names port/connect_secs/command_secs.
+        let text = r#"
+[[device]]
+id = "sparse"
+host = "10.0.0.5"
+username = "admin"
+password = "extron"
+"#;
+        let device = &from_toml_str(text).unwrap()[0];
+        assert_eq!(device.port, 22023);
+        assert_eq!(device.connect_timeout, Duration::from_secs(5));
+        assert_eq!(device.command_timeout, Duration::from_secs(3));
     }
 
     #[test]

@@ -185,7 +185,7 @@ impl Sismatic {
 }
 
 impl Sismatic {
-    /// Stand up the tokio runtime, registry, and SIS keepalive around a resolved
+    /// Construct the tokio runtime, registry, and SIS keepalive around a resolved
     /// device list, then register the `atexit` teardown. The shared tail of every
     /// `from_*` constructor.
     fn build(py: Python<'_>, configs: Vec<DeviceConfig>) -> PyResult<Py<Self>> {
