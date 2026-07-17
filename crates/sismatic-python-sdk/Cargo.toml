@@ -4,6 +4,10 @@ description = "Blocking Python facade for driving Extron SIS devices over SSH"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Never goes to crates.io: it's a pyo3 `cdylib` extension module shipped as a
+# wheel to PyPI. release-plz still versions it (see release-plz.toml) so a
+# facade-only change bumps the shared version PyPI publishes.
+publish = false
 
 [lib]
 # The maturin/pyo3 module must be named `sismatic` (it becomes

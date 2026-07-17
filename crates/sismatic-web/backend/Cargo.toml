@@ -4,6 +4,8 @@ description = "HTTP server exposing Extron SIS device control over SSH"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Application binary, not a library — never published to crates.io.
+publish = false
 
 [[bin]]
 name = "sismatic-web"
