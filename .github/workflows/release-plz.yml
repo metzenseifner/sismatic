@@ -1,0 +1,75 @@
+name: release-plz
+
+# Owns the Cargo half of releasing (see release-plz.toml): opens the version-bump
+# / changelog "release PR", and on its merge publishes sismatic-core to crates.io
+# and pushes a `v{version}` tag. That tag is the handoff to pipeline.yml, which
+# builds the wheels and publishes them to PyPI.
+on:
+  push:
+    branches: [main]
+
+# release-plz needs to open PRs and push commits/tags.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Keeps a single open "release PR" up to date with the pending version bump +
+  # changelog. Nothing is published here.
+  release-plz-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    # Never run two release-PR updates concurrently against the same branch.
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      # Mint a token from the GitHub App (APP_ID / APP_PRIVATE_KEY secrets). Used
+      # instead of the default GITHUB_TOKEN so the release PR — and later the tag
+      # — can trigger pipeline.yml. Must run before checkout, which consumes it.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      # cargo must be on PATH for release-plz to read metadata / publish. core's
+      # default features pull in no native deps, so a plain pinned toolchain is
+      # enough (no Nix needed for this workflow).
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # On merge of the release PR (or any push where Cargo's version is ahead of
+  # crates.io), publishes sismatic-core and pushes the `v{version}` tag.
+  release-plz-release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

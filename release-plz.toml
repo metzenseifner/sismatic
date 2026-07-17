@@ -1,0 +1,55 @@
+# release-plz owns the *Cargo* half of releasing. On a push to main it opens a
+# "release PR" that bumps the shared workspace version and writes CHANGELOGs from
+# conventional commits; when that PR merges it publishes sismatic-core to
+# crates.io and pushes a `v{version}` git tag.
+#
+# The PyPI half is deliberately NOT modeled here, and doesn't need to be. The
+# version has a single source of truth — `[workspace.package] version` in
+# Cargo.toml — which maturin reads via `dynamic = ["version"]` and flake.nix
+# reads at flake.nix:95. So bumping Cargo.toml propagates to the wheel, sdist and
+# Nix outputs for free, and the `v*` tag release-plz pushes is exactly what
+# .github/workflows/pipeline.yml triggers on to build wheels + publish to PyPI.
+#
+# Handoff requires the tag push to trigger CI. Tags pushed with the default
+# GITHUB_TOKEN do NOT start other workflows, so the release-plz workflow uses a
+# PAT / GitHub App token (see .github/workflows/release-plz.yml).
+
+[workspace]
+# Default everything OFF; the crates that should release opt in below. This
+# keeps the CLI/web binaries and the pyo3 cdylib from ever being pushed to
+# crates.io or tagged by accident.
+publish = false
+git_tag_enable = false
+# pipeline.yml is the single owner of the GitHub Release (it attaches the wheels,
+# sdist and crate tarball). release-plz only needs to publish + tag, so it does
+# not create the release itself.
+git_release_enable = false
+# One tag for the whole workspace (`v0.2.17`), not per-crate
+# `sismatic-core-v0.2.17` tags — this is the pattern pipeline.yml matches.
+git_tag_name = "v{{ version }}"
+
+# The only crate published to crates.io, and the one that owns the tag.
+[[package]]
+name = "sismatic-core"
+publish = false
+git_tag_enable = true
+# Lockstep: core and the Python SDK always share one version (the higher of the
+# two computed bumps), so a change to either ships both at the same number.
+version_group = "sismatic"
+
+# The wheel crate. `publish = false` in its Cargo.toml keeps it off crates.io,
+# but it must still be *processed* here so a facade-only change bumps the shared
+# version that PyPI ships. It rides core's tag; it creates none of its own.
+[[package]]
+name = "sismatic-python-sdk"
+version_group = "sismatic"
+
+# Binaries, published to neither registry. Ignore them entirely; they inherit
+# the bumped workspace version passively via `version.workspace = true`.
+[[package]]
+name = "sismatic-cli"
+release = false
+
+[[package]]
+name = "sismatic-web"
+release = false

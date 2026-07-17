@@ -4,6 +4,9 @@ description = "Command-line interface for driving Extron SIS devices over SSH"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Not published to crates.io for now (only sismatic-core is). Flip to `true` if
+# you want `cargo install sismatic-cli`; the binary is named `sismatic`.
+publish = false
 
 [[bin]]
 name = "sismatic"
