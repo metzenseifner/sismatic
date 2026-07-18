@@ -164,7 +164,7 @@ async fn authenticate(
     config: &DeviceConfig,
 ) -> Result<(), ConnectError> {
     let username = config.username.as_str();
-    let password = config.password.as_str();
+    let password = config.password.expose_secret();
 
     if session
         .authenticate_password(username, password)

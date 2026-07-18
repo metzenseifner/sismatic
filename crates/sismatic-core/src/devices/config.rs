@@ -7,9 +7,9 @@
 //!
 //! ```toml
 //! [defaults]
-//! port = 22023
-//! connect_secs = 5
-//! command_secs = 3
+//! port = 22023       # optional, defaults to 22023
+//! connect_secs = 5   # optional, defaults to 5
+//! command_secs = 3   # optional, defaults to 3
 //! eager = true       # connect to every device at startup and keep it warm
 //! sis_keepalive_secs = 120  # re-issue `Q` this often; 0 disables the SIS keepalive
 //!
@@ -34,8 +34,9 @@
 //! delegated to a serde deserializer chosen by the caller; enabling the `toml`,
 //! `json`, or `yaml` feature adds a ready-made loader (`from_toml_str` and
 //! friends, plus an extension-dispatching `load`). `id` and `host` are the only
-//! fields a device must state itself; every other field may come from the device
-//! or the defaults.
+//! fields a device must state itself, and `username`/`password` must be resolvable
+//! from the device or the defaults; `port`, `connect_secs`, and `command_secs` fall
+//! back to built-in defaults (22023, 5, 3) when set in neither place.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -43,12 +44,75 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 /// The SIS keepalive interval applied when `eager` is on but `sis_keepalive_secs` is
 /// left unset. Comfortably under the SMP's default 5-minute idle disconnect, with
 /// room for one failed round-trip to self-heal before the window closes.
 const DEFAULT_SIS_KEEPALIVE_SECS: u64 = 120;
+
+/// The SMP's SIS-over-SSH port, used when neither the device nor `[defaults]` names one.
+const DEFAULT_PORT: u16 = 22023;
+
+/// Connect timeout applied when neither the device nor `[defaults]` names one.
+const DEFAULT_CONNECT_SECS: u64 = 5;
+
+/// Per-command timeout applied when neither the device nor `[defaults]` names one.
+const DEFAULT_COMMAND_SECS: u64 = 3;
+
+/// A device credential held as a [`SecretString`]: redacted in `Debug` output and
+/// zeroized on drop, so a password can't leak into logs or linger in memory.
+///
+/// Wrapping the secret in a newtype (rather than storing a bare `SecretString`)
+/// lets [`DeviceConfig`] keep its derived `PartialEq`/`Eq`. `secrecy` deliberately
+/// withholds equality from `SecretString` to discourage non-constant-time secret
+/// comparisons; we opt back in here for the one place that needs it — asserting on
+/// resolved configs in tests. `#[serde(transparent)]` forwards deserialization
+/// straight to the inner string, so `password = "..."` parses unchanged and no bare
+/// `String` copy of the secret is ever materialized.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Password(SecretString);
+
+impl Password {
+    /// Borrow the plaintext for the one legitimate use: handing it to SSH auth.
+    /// This is the single audit point — grep `expose_secret` to find every read.
+    pub fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl fmt::Debug for Password {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Password([REDACTED])")
+    }
+}
+
+/// Compares the exposed secrets with a plain (non-constant-time) `==` — the very
+/// comparison `secrecy` avoids by withholding `PartialEq`. Acceptable here because
+/// configs are only compared in tests, in memory, between our own values: there is
+/// no attacker-controlled input and no observable timing boundary. Reach for
+/// `subtle::ConstantTimeEq` if a secret ever needs comparing on a live path.
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose_secret() == other.expose_secret()
+    }
+}
+
+impl Eq for Password {}
+
+impl From<String> for Password {
+    fn from(s: String) -> Self {
+        Password(SecretString::from(s))
+    }
+}
+
+impl From<&str> for Password {
+    fn from(s: &str) -> Self {
+        Password(SecretString::from(s))
+    }
+}
 
 /// A fully-resolved device: every field has a concrete value, with defaults
 /// already folded in. This is what the registry consumes to open a connection.
@@ -58,7 +122,7 @@ pub struct DeviceConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,
+    pub password: Password,
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
     /// Open this device's connection at startup and keep it warm, rather than
@@ -176,7 +240,7 @@ pub fn resolve_config(raw: RawConfig) -> Result<Vec<DeviceConfig>, ConfigError> 
 fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, ConfigError> {
     let id = device.id;
 
-    let port = require(&id, "port", device.port.or(defaults.port))?;
+    let port = device.port.or(defaults.port).unwrap_or(DEFAULT_PORT);
     let username = require(
         &id,
         "username",
@@ -187,16 +251,14 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         "password",
         device.password.or_else(|| defaults.password.clone()),
     )?;
-    let connect_secs = require(
-        &id,
-        "connect_secs",
-        device.connect_secs.or(defaults.connect_secs),
-    )?;
-    let command_secs = require(
-        &id,
-        "command_secs",
-        device.command_secs.or(defaults.command_secs),
-    )?;
+    let connect_secs = device
+        .connect_secs
+        .or(defaults.connect_secs)
+        .unwrap_or(DEFAULT_CONNECT_SECS);
+    let command_secs = device
+        .command_secs
+        .or(defaults.command_secs)
+        .unwrap_or(DEFAULT_COMMAND_SECS);
 
     // `eager` and `sis_keepalive_secs` are optional everywhere: a device that sets
     // neither behaves exactly as before (lazy connect, no keep-warm loop).
@@ -235,7 +297,7 @@ fn require<T>(device: &str, field: &'static str, value: Option<T>) -> Result<T, 
 pub struct RawConfig {
     #[serde(default)]
     defaults: Defaults,
-    #[serde(default, rename = "device")]
+    #[serde(default, alias = "device", alias = "devices")]
     devices: Vec<RawDevice>,
 }
 
@@ -245,7 +307,7 @@ pub struct RawConfig {
 struct Defaults {
     port: Option<u16>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Password>,
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
@@ -260,7 +322,7 @@ struct RawDevice {
     host: String,
     port: Option<u16>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Password>,
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
@@ -353,7 +415,7 @@ host = "10.0.0.5"
 "#;
         let bare = &from_toml_str(text).unwrap()[0];
         assert_eq!(bare.username, "admin");
-        assert_eq!(bare.password, "extron");
+        assert_eq!(bare.password.expose_secret(), "extron");
     }
 
     #[test]
@@ -452,6 +514,22 @@ connect_secs = 5
 command_secs = 3
 "#;
         assert_eq!(from_toml_str(text).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn port_and_timeouts_fall_back_to_built_in_defaults() {
+        // Neither the device nor a `[defaults]` table names port/connect_secs/command_secs.
+        let text = r#"
+[[device]]
+id = "sparse"
+host = "10.0.0.5"
+username = "admin"
+password = "extron"
+"#;
+        let device = &from_toml_str(text).unwrap()[0];
+        assert_eq!(device.port, 22023);
+        assert_eq!(device.connect_timeout, Duration::from_secs(5));
+        assert_eq!(device.command_timeout, Duration::from_secs(3));
     }
 
     #[test]

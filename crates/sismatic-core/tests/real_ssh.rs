@@ -44,7 +44,7 @@ async fn queries_firmware_over_real_ssh() {
         host,
         port,
         username: user,
-        password: pass,
+        password: pass.into(),
         connect_timeout: Duration::from_secs(10),
         command_timeout: Duration::from_secs(5),
         eager: false,

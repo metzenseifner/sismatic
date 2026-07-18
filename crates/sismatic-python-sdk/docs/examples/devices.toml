@@ -1,0 +1,15 @@
+[defaults]
+username = "joe"
+password = "schmoe"
+eager = true
+sis_keepalive_secs = 120
+port = 22023
+
+[[device]]
+id = "Hall A"
+
+[[device]]
+id = "Hall B"
+
+[[device]]
+id = "Atrium"
