@@ -44,6 +44,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 /// The SIS keepalive interval applied when `eager` is on but `sis_keepalive_secs` is
@@ -60,6 +61,59 @@ const DEFAULT_CONNECT_SECS: u64 = 5;
 /// Per-command timeout applied when neither the device nor `[defaults]` names one.
 const DEFAULT_COMMAND_SECS: u64 = 3;
 
+/// A device credential held as a [`SecretString`]: redacted in `Debug` output and
+/// zeroized on drop, so a password can't leak into logs or linger in memory.
+///
+/// Wrapping the secret in a newtype (rather than storing a bare `SecretString`)
+/// lets [`DeviceConfig`] keep its derived `PartialEq`/`Eq`. `secrecy` deliberately
+/// withholds equality from `SecretString` to discourage non-constant-time secret
+/// comparisons; we opt back in here for the one place that needs it — asserting on
+/// resolved configs in tests. `#[serde(transparent)]` forwards deserialization
+/// straight to the inner string, so `password = "..."` parses unchanged and no bare
+/// `String` copy of the secret is ever materialized.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Password(SecretString);
+
+impl Password {
+    /// Borrow the plaintext for the one legitimate use: handing it to SSH auth.
+    /// This is the single audit point — grep `expose_secret` to find every read.
+    pub fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl fmt::Debug for Password {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Password([REDACTED])")
+    }
+}
+
+/// Compares the exposed secrets with a plain (non-constant-time) `==` — the very
+/// comparison `secrecy` avoids by withholding `PartialEq`. Acceptable here because
+/// configs are only compared in tests, in memory, between our own values: there is
+/// no attacker-controlled input and no observable timing boundary. Reach for
+/// `subtle::ConstantTimeEq` if a secret ever needs comparing on a live path.
+impl PartialEq for Password {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose_secret() == other.expose_secret()
+    }
+}
+
+impl Eq for Password {}
+
+impl From<String> for Password {
+    fn from(s: String) -> Self {
+        Password(SecretString::from(s))
+    }
+}
+
+impl From<&str> for Password {
+    fn from(s: &str) -> Self {
+        Password(SecretString::from(s))
+    }
+}
+
 /// A fully-resolved device: every field has a concrete value, with defaults
 /// already folded in. This is what the registry consumes to open a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +122,7 @@ pub struct DeviceConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,
+    pub password: Password,
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
     /// Open this device's connection at startup and keep it warm, rather than
@@ -253,7 +307,7 @@ pub struct RawConfig {
 struct Defaults {
     port: Option<u16>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Password>,
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
@@ -268,7 +322,7 @@ struct RawDevice {
     host: String,
     port: Option<u16>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Password>,
     connect_secs: Option<u64>,
     command_secs: Option<u64>,
     eager: Option<bool>,
@@ -361,7 +415,7 @@ host = "10.0.0.5"
 "#;
         let bare = &from_toml_str(text).unwrap()[0];
         assert_eq!(bare.username, "admin");
-        assert_eq!(bare.password, "extron");
+        assert_eq!(bare.password.expose_secret(), "extron");
     }
 
     #[test]

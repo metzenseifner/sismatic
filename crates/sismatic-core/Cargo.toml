@@ -19,6 +19,7 @@ serde-saphyr = { workspace = true, optional = true }
 winnow.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+secrecy = { workspace = true, features = ["serde"] }
 
 [features]
 # Real SSH transport (russh). Heavy native dep, so the pure layers and
