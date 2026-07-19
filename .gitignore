@@ -16,6 +16,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+*.dylib.*
 
 # Compiled extension module, built by maturin into the source package
 # (crates/sismatic-python-sdk/python/sismatic/sismatic.abi3.so).

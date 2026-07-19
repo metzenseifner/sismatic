@@ -1,0 +1,14 @@
+---
+defaults:
+  username: "joe"
+  password: "schmoe"
+  eager: true
+  sis_keepalive_secs: 120
+
+devices:
+  - id: Hall A
+    host: 10.0.150.1
+  - id: Hall B
+    host: 10.0.150.2
+  - id: Hall C
+    host: 10.0.150.3
