@@ -32,7 +32,7 @@ sis.register("atrium-101", "title", "Wk 4")  # write a metadata register
 sis.command("atrium-101", "start")           # run a recorder command
 ```
 
-Use it as a context manager to tear the session down deterministically:
+Use optionally as a context manager to control the teardown of the session deterministically:
 
 ```py
 with Sis.from_file("devices.toml") as sis:
@@ -46,6 +46,8 @@ with Sis.from_file("devices.toml") as sis:
 
 `from_file` picks the deserializer from the extension (`.toml`, `.json`,
 `.yaml`/`.yml`). A config is a `defaults` table plus a list of devices:
+
+TOML:
 
 ```toml
 [defaults]
@@ -68,6 +70,25 @@ username = "admin"
 password = "extron"
 connect_secs = 10  # per-device override
 command_secs = 8
+```
+
+YAML:
+
+```yaml
+---
+defaults:
+  username: "joe"
+  password: "schmoe"
+  eager: true
+  sis_keepalive_secs: 120
+
+devices:
+  - id: Hall A
+    host: 10.0.150.1
+  - id: Hall B
+    host: 10.0.150.2
+  - id: Hall C
+    host: 10.0.150.3
 ```
 
 ### from_config
