@@ -13,3 +13,8 @@ devices:
     host: 10.0.150.2
   - id: Hall C
     host: 10.0.150.3
+
+# Address every hall as one: a command sent to "Halls" reaches each member.
+groups:
+  - id: Halls
+    devices: ["Hall A", "Hall B", "Hall C"]

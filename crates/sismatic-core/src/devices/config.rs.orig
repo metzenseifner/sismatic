@@ -648,8 +648,14 @@ password = "extron"
     #[test]
     fn eager_defaults_off_with_a_standard_sis_keepalive_interval() {
         // A device that mentions neither field is unchanged: lazy, and its
+<<<<<<< HEAD
+        // (irrelevant-while-lazy) SIS keepalive and eager-retry intervals fall back
+        // to the built-in defaults.
+        let atrium = &from_toml_str(USER_EXAMPLE).unwrap()[0];
+=======
         // (irrelevant-while-lazy) SIS keepalive falls back to the built-in default.
         let atrium = &from_toml_str(USER_EXAMPLE).unwrap().devices[0];
+>>>>>>> b79fd32 (feat: device groups)
         assert!(!atrium.eager);
         assert_eq!(atrium.sis_keepalive, Some(Duration::from_secs(120)));
         assert_eq!(atrium.eager_retry, Some(Duration::from_secs(30)));
@@ -676,7 +682,7 @@ id = "overrides"
 host = "10.0.0.6"
 eager_retry_secs = 10
 "#;
-        let devices = from_toml_str(text).unwrap().devices;
+        let devices = from_toml_str(text).unwrap();
         assert_eq!(
             get(&devices, "inherits").eager_retry,
             Some(Duration::from_secs(45))
@@ -703,7 +709,7 @@ eager_retry_secs = 0
 id = "give-up"
 host = "10.0.0.5"
 "#;
-        let device = &from_toml_str(text).unwrap().devices[0];
+        let device = &from_toml_str(text).unwrap()[0];
         assert!(device.eager);
         assert_eq!(device.eager_retry, None);
     }
