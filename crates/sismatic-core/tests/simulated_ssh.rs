@@ -84,6 +84,7 @@ impl SimulatedSmp {
             command_timeout: Duration::from_secs(5),
             eager: false,
             sis_keepalive: None,
+            eager_retry: None,
         }
     }
 }

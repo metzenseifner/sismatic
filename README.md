@@ -27,7 +27,8 @@ port = 22023
 connect_secs = 5
 command_secs = 3
 eager = true # eagerly establish connections to pay the cost of the full SSH handshake up front (default: false; connect upon first instruction)
-sis_keepalive_secs = 120 # interval at which to send a probe instruction to SMPs to keep connection open; SMPs idle timer is set to 5 minutes by default. (default: 120)
+sis_keepalive_secs = 120 # while warm, interval at which to send a probe instruction to SMPs to keep the connection open; SMPs' idle timer is 5 minutes by default. 0 disables. (default: 120)
+eager_retry_secs = 30 # while eager but cold, interval at which to retry connecting to a device that is unreachable or has dropped. 0 disables (give up after the first failed connect). (default: 30)
 
 [[device]]
 id = "atrium-101"
@@ -61,3 +62,11 @@ front i.e. pay the cost of the full SSH handshake at startup. To keep the
 connections "warm", there is the `sis_keepalive_secs` setting, which sets an
 interval in which a benign instruction is sent to the device to reset the
 device's inactivity timer periodically.
+
+`eager` is a standing intent to hold a warm connection, not just a one-time
+connect at startup. A device that is unreachable when the process starts — or
+that drops later — would otherwise stay cold until the next real command. The
+`eager_retry_secs` setting closes that gap: while a device is eager but cold, the
+background task re-attempts the SSH handshake on this interval until the device
+answers again and returns to the warm keepalive cadence. Set it to `0` to restore
+the old behavior of giving up after the first failed connect.

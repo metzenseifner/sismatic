@@ -11,7 +11,8 @@
 //! connect_secs = 5   # optional, defaults to 5
 //! command_secs = 3   # optional, defaults to 3
 //! eager = true       # connect to every device at startup and keep it warm
-//! sis_keepalive_secs = 120  # re-issue `Q` this often; 0 disables the SIS keepalive
+//! sis_keepalive_secs = 120  # re-issue `Q` this often while warm; 0 disables the SIS keepalive
+//! eager_retry_secs = 30     # while eager but cold, retry connecting this often; 0 disables retry
 //!
 //! [[device]]
 //! id = "atrium-101"
@@ -51,6 +52,13 @@ use serde::Deserialize;
 /// left unset. Comfortably under the SMP's default 5-minute idle disconnect, with
 /// room for one failed round-trip to self-heal before the window closes.
 const DEFAULT_SIS_KEEPALIVE_SECS: u64 = 120;
+
+/// The reconnect interval applied when `eager` is on but `eager_retry_secs` is left
+/// unset. This governs the *cold* side of eager: how often to re-attempt the SSH
+/// handshake for a device whose connection could not be established (or has since
+/// dropped). Kept well above `connect_secs` so a genuinely unreachable device is
+/// retried steadily without hammering it.
+const DEFAULT_EAGER_RETRY_SECS: u64 = 30;
 
 /// The SMP's SIS-over-SSH port, used when neither the device nor `[defaults]` names one.
 const DEFAULT_PORT: u16 = 22023;
@@ -131,12 +139,22 @@ pub struct DeviceConfig {
     /// [`sis_keepalive`]: DeviceConfig::sis_keepalive
     pub eager: bool,
     /// How often to re-issue the `Q` query to reset the SMP's idle-disconnect
-    /// timer while eager. `None` means never (a bare `sis_keepalive_secs = 0`), so an
-    /// eager connection is warmed once and then left to self-heal. Ignored unless
-    /// [`eager`] is set.
+    /// timer while eager *and warm*. `None` means never (a bare `sis_keepalive_secs = 0`),
+    /// so an eager connection is warmed once and then left to self-heal. Ignored
+    /// unless [`eager`] is set.
     ///
     /// [`eager`]: DeviceConfig::eager
     pub sis_keepalive: Option<Duration>,
+    /// How often to re-attempt the connection while eager *and cold* — i.e. after an
+    /// eager warm-up (or a later keepalive) failed to reach the device. This is what
+    /// makes `eager` a standing intent to hold a warm connection rather than a
+    /// one-shot connect at startup: a device that is down when the process starts, or
+    /// that drops later, keeps being retried on this interval until it answers again.
+    /// `None` means never (a bare `eager_retry_secs = 0`), restoring the old
+    /// give-up-after-one-failure behavior. Ignored unless [`eager`] is set.
+    ///
+    /// [`eager`]: DeviceConfig::eager
+    pub eager_retry: Option<Duration>,
 }
 
 /// Why a `devices.toml` could not be turned into [`DeviceConfig`]s.
@@ -260,14 +278,19 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         .or(defaults.command_secs)
         .unwrap_or(DEFAULT_COMMAND_SECS);
 
-    // `eager` and `sis_keepalive_secs` are optional everywhere: a device that sets
-    // neither behaves exactly as before (lazy connect, no keep-warm loop).
+    // `eager`, `sis_keepalive_secs`, and `eager_retry_secs` are optional everywhere: a
+    // device that sets none behaves exactly as before (lazy connect, no keep-warm loop).
     let eager = device.eager.or(defaults.eager).unwrap_or(false);
     let sis_keepalive_secs = device
         .sis_keepalive_secs
         .or(defaults.sis_keepalive_secs)
         .unwrap_or(DEFAULT_SIS_KEEPALIVE_SECS);
     let sis_keepalive = (sis_keepalive_secs > 0).then(|| Duration::from_secs(sis_keepalive_secs));
+    let eager_retry_secs = device
+        .eager_retry_secs
+        .or(defaults.eager_retry_secs)
+        .unwrap_or(DEFAULT_EAGER_RETRY_SECS);
+    let eager_retry = (eager_retry_secs > 0).then(|| Duration::from_secs(eager_retry_secs));
 
     Ok(DeviceConfig {
         host: device.host,
@@ -278,6 +301,7 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         command_timeout: Duration::from_secs(command_secs),
         eager,
         sis_keepalive,
+        eager_retry,
         id,
     })
 }
@@ -312,6 +336,7 @@ struct Defaults {
     command_secs: Option<u64>,
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
+    eager_retry_secs: Option<u64>,
 }
 
 /// A device as written: `id` and `host` are required, the rest may inherit.
@@ -327,6 +352,7 @@ struct RawDevice {
     command_secs: Option<u64>,
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
+    eager_retry_secs: Option<u64>,
 }
 
 #[cfg(all(test, feature = "toml"))]
@@ -535,10 +561,65 @@ password = "extron"
     #[test]
     fn eager_defaults_off_with_a_standard_sis_keepalive_interval() {
         // A device that mentions neither field is unchanged: lazy, and its
-        // (irrelevant-while-lazy) SIS keepalive falls back to the built-in default.
+        // (irrelevant-while-lazy) SIS keepalive and eager-retry intervals fall back
+        // to the built-in defaults.
         let atrium = &from_toml_str(USER_EXAMPLE).unwrap()[0];
         assert!(!atrium.eager);
         assert_eq!(atrium.sis_keepalive, Some(Duration::from_secs(120)));
+        assert_eq!(atrium.eager_retry, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn eager_retry_inherits_from_defaults_and_overrides_per_device() {
+        let text = r#"
+[defaults]
+port = 22023
+username = "admin"
+password = "extron"
+connect_secs = 5
+command_secs = 3
+eager = true
+eager_retry_secs = 45
+
+[[device]]
+id = "inherits"
+host = "10.0.0.5"
+
+[[device]]
+id = "overrides"
+host = "10.0.0.6"
+eager_retry_secs = 10
+"#;
+        let devices = from_toml_str(text).unwrap();
+        assert_eq!(
+            get(&devices, "inherits").eager_retry,
+            Some(Duration::from_secs(45))
+        );
+        assert_eq!(
+            get(&devices, "overrides").eager_retry,
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn eager_retry_secs_zero_disables_the_retry() {
+        let text = r#"
+[defaults]
+port = 22023
+username = "admin"
+password = "extron"
+connect_secs = 5
+command_secs = 3
+eager = true
+eager_retry_secs = 0
+
+[[device]]
+id = "give-up"
+host = "10.0.0.5"
+"#;
+        let device = &from_toml_str(text).unwrap()[0];
+        assert!(device.eager);
+        assert_eq!(device.eager_retry, None);
     }
 
     #[test]
@@ -650,6 +731,7 @@ mod resolve_config_tests {
                 command_secs: Some(3),
                 eager: None,
                 sis_keepalive_secs: None,
+                eager_retry_secs: None,
             },
             devices: vec![RawDevice {
                 id: "bare".into(),
@@ -661,6 +743,7 @@ mod resolve_config_tests {
                 command_secs: None,
                 eager: None,
                 sis_keepalive_secs: None,
+                eager_retry_secs: None,
             }],
         };
         let resolved = resolve_config(raw).unwrap();
@@ -685,6 +768,7 @@ mod resolve_config_tests {
                     command_secs: Some(3),
                     eager: None,
                     sis_keepalive_secs: None,
+                    eager_retry_secs: None,
                 },
                 RawDevice {
                     id: "dup".into(),
@@ -696,6 +780,7 @@ mod resolve_config_tests {
                     command_secs: Some(3),
                     eager: None,
                     sis_keepalive_secs: None,
+                    eager_retry_secs: None,
                 },
             ],
         };

@@ -49,6 +49,7 @@ async fn queries_firmware_over_real_ssh() {
         command_timeout: Duration::from_secs(5),
         eager: false,
         sis_keepalive: None,
+        eager_retry: None,
     }];
     let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
     let device = registry.device("real").expect("device present");

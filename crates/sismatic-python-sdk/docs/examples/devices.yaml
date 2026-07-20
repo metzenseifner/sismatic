@@ -4,6 +4,7 @@ defaults:
   password: "schmoe"
   eager: true
   sis_keepalive_secs: 120
+  eager_retry_secs: 30
 
 devices:
   - id: Hall A

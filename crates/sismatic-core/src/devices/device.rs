@@ -140,6 +140,7 @@ mod tests {
             command_timeout: Duration::from_millis(500),
             eager: false,
             sis_keepalive: None,
+            eager_retry: None,
         }
     }
 

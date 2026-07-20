@@ -88,6 +88,7 @@ mod tests {
                 command_timeout: Duration::from_secs(3),
                 eager: false,
                 sis_keepalive: None,
+                eager_retry: None,
             })
             .collect()
     }
