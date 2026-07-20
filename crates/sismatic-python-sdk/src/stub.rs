@@ -97,16 +97,20 @@ class Sis:
         \"\"\"The ids of every configured device.\"\"\"
         ...
 
-    def query(self, device: str, name: QueryName) -> int | bool | str | list[Alarm]:
-        \"\"\"Read a built-in field (e.g. \\\"firmware\\\", \\\"ssh_port\\\") from a device.\"\"\"
+    def groups(self) -> list[str]:
+        \"\"\"The ids of every configured device group.\"\"\"
         ...
 
-    def command(self, device: str, name: CommandName) -> str:
-        \"\"\"Run a recorder command (e.g. \\\"start\\\", \\\"stop\\\") on a device.\"\"\"
+    def query(self, target: str, name: QueryName) -> int | bool | str | list[Alarm] | dict[str, int | bool | str | list[Alarm]]:
+        \"\"\"Read a built-in field (e.g. \\\"firmware\\\", \\\"ssh_port\\\") from a device, or from a group (returns a dict keyed by member id).\"\"\"
         ...
 
-    def register(self, device: str, name: RegisterName, value: str) -> str:
-        \"\"\"Write `value` into a metadata register (e.g. \\\"title\\\") on a device.\"\"\"
+    def command(self, target: str, name: CommandName) -> str | dict[str, str]:
+        \"\"\"Run a recorder command (e.g. \\\"start\\\", \\\"stop\\\") on a device, or on a group (returns a dict keyed by member id).\"\"\"
+        ...
+
+    def register(self, target: str, name: RegisterName, value: str) -> str | dict[str, str]:
+        \"\"\"Write `value` into a metadata register (e.g. \\\"title\\\") on a device, or on a group (returns a dict keyed by member id).\"\"\"
         ...
 
     def close(self) -> None:

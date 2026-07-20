@@ -22,7 +22,7 @@ use axum::{
 };
 use serde_json::json;
 
-use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::registry::{Registry, Target};
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
@@ -38,11 +38,9 @@ async fn main() -> Result<()> {
     let config = std::env::var("SISMATIC_CONFIG").unwrap_or_else(|_| "devices.toml".into());
     let addr = std::env::var("SISMATIC_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
 
-    let registry = Registry::from_configs(
-        sismatic_core::devices::config::load(&config)
-            .with_context(|| format!("loading {config}"))?,
-        Arc::new(RusshConnector),
-    );
+    let resolved = sismatic_core::devices::config::load(&config)
+        .with_context(|| format!("loading {config}"))?;
+    let registry = Registry::build(resolved.devices, resolved.groups, Arc::new(RusshConnector));
 
     // Eagerly connect and keep warm any device the config marks `eager`. The
     // guard lives until `main` returns (i.e. for the server's lifetime); on
@@ -55,6 +53,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/devices", get(list_devices))
+        .route("/groups", get(list_groups))
         .route("/devices/{id}/query/{name}", get(query))
         .route("/devices/{id}/command/{name}", post(command))
         .route("/devices/{id}/register/{name}", post(register))
@@ -74,6 +73,12 @@ async fn health() -> &'static str {
 
 async fn list_devices(State(registry): State<AppState>) -> Json<Vec<String>> {
     let mut ids = registry.ids();
+    ids.sort();
+    Json(ids)
+}
+
+async fn list_groups(State(registry): State<AppState>) -> Json<Vec<String>> {
+    let mut ids = registry.group_ids();
     ids.sort();
     Json(ids)
 }
@@ -109,25 +114,47 @@ async fn register(
     run(&registry, &id, &name, instruction).await
 }
 
-/// Look up `id`, run one instruction, and render the decoded value as JSON.
+/// Resolve `id` to a device or group, run one instruction, and render the
+/// result as JSON. A device yields a single `value`; a group yields a
+/// `results` object mapping each member's device id to its value, so the
+/// caller sees the whole fan-out.
 async fn run(
     registry: &Registry,
     id: &str,
     name: &str,
     instruction: Instruction,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let device = registry
-        .device(id)
-        .ok_or_else(|| AppError::UnknownDevice(id.to_string()))?;
-    let value = device
-        .run(&instruction)
-        .await
-        .map_err(|e| AppError::Device(e.to_string()))?;
-    Ok(Json(json!({
-        "device": id,
-        "name": name,
-        "value": value_to_json(value),
-    })))
+    match registry
+        .target(id)
+        .ok_or_else(|| AppError::UnknownDevice(id.to_string()))?
+    {
+        Target::Device(device) => {
+            let value = device
+                .run(&instruction)
+                .await
+                .map_err(|e| AppError::Device(e.to_string()))?;
+            Ok(Json(json!({
+                "device": id,
+                "name": name,
+                "value": value_to_json(value),
+            })))
+        }
+        Target::Group(group) => {
+            let results = group
+                .run(&instruction)
+                .await
+                .map_err(|e| AppError::Device(e.to_string()))?;
+            let results: serde_json::Map<String, serde_json::Value> = results
+                .into_iter()
+                .map(|(member, value)| (member, value_to_json(value)))
+                .collect();
+            Ok(Json(json!({
+                "group": id,
+                "name": name,
+                "results": results,
+            })))
+        }
+    }
 }
 
 /// Map a decoded [`Value`] onto its natural JSON type, mirroring the Python

@@ -93,6 +93,42 @@ devices:
     host: 10.0.150.3
 ```
 
+### Device groups
+
+A `[[group]]` names one or more devices so they act as one — the case being
+more than one recorder in a room that must start together. Addressing the group
+id sends the instruction to every member at once, over the members' own warm
+connections:
+
+```toml
+[[device]]
+id = "room-5-front"
+host = "10.0.0.7"
+
+[[device]]
+id = "room-5-back"
+host = "10.0.0.8"
+
+[[group]]
+id = "room-5"
+devices = ["room-5-front", "room-5-back"]
+```
+
+A group id is accepted anywhere a device id is. Because a group has many
+members, a group call returns a `dict` keyed by member id (a single device
+still returns its scalar value):
+
+```py
+sis.command("room-5", "start")
+# {'room-5-front': 'RcdrY1', 'room-5-back': 'RcdrY1'}
+
+sis.groups()          # -> ['room-5']
+```
+
+Each member must name a device defined in the same config, and group ids share
+the device id namespace (a group may not reuse a device's id). If any member
+fails, the call raises, naming which members failed.
+
 ### from_config
 
 Not using a file? `Sis.from_config(mapping)` takes an already-parsed `dict`
@@ -142,7 +178,7 @@ for the full rationale.
 ```py
 >>> from sismatic import Sis
 >>> [m for m in dir(Sis) if not m.startswith('_')]
-['close', 'command', 'from_config', 'from_file', 'from_toml', 'ids', 'query', 'register']
+['close', 'command', 'from_config', 'from_file', 'from_toml', 'groups', 'ids', 'query', 'register']
 ```
 
 The wheel ships a PEP 561 `py.typed` marker and a type stub, so editors and

@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 
 use sismatic_core::devices::config;
-use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::registry::{Registry, Target};
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::Instruction;
@@ -39,13 +39,15 @@ struct Cli {
 enum Action {
     /// List the ids of every configured device.
     Ids,
-    /// Read a built-in field from a device (e.g. `firmware`, `ssh_port`).
-    Query { device: String, name: String },
-    /// Run a recorder command on a device (e.g. `start`, `stop`, `pause`).
-    Command { device: String, name: String },
-    /// Write a value into a metadata register on a device (e.g. `title`).
+    /// List the ids of every configured device group.
+    Groups,
+    /// Read a built-in field from a device or group (e.g. `firmware`, `ssh_port`).
+    Query { target: String, name: String },
+    /// Run a recorder command on a device or group (e.g. `start`, `stop`, `pause`).
+    Command { target: String, name: String },
+    /// Write a value into a metadata register on a device or group (e.g. `title`).
     Register {
-        device: String,
+        target: String,
         name: String,
         value: String,
     },
@@ -55,10 +57,9 @@ enum Action {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let registry = Registry::from_configs(
-        config::load(&cli.config).with_context(|| format!("loading {}", cli.config.display()))?,
-        Arc::new(RusshConnector),
-    );
+    let resolved =
+        config::load(&cli.config).with_context(|| format!("loading {}", cli.config.display()))?;
+    let registry = Registry::build(resolved.devices, resolved.groups, Arc::new(RusshConnector));
 
     match cli.action {
         Action::Ids => {
@@ -68,31 +69,52 @@ async fn main() -> Result<()> {
                 println!("{id}");
             }
         }
-        Action::Query { device, name } => {
-            let instruction = Query::from_str(&name)?.instruction();
-            println!("{}", run(&registry, &device, instruction).await?);
+        Action::Groups => {
+            let mut ids = registry.group_ids();
+            ids.sort();
+            for id in ids {
+                println!("{id}");
+            }
         }
-        Action::Command { device, name } => {
+        Action::Query { target, name } => {
+            let instruction = Query::from_str(&name)?.instruction();
+            run(&registry, &target, instruction).await?;
+        }
+        Action::Command { target, name } => {
             let instruction = SisCommand::from_str(&name)?.instruction();
-            println!("{}", run(&registry, &device, instruction).await?);
+            run(&registry, &target, instruction).await?;
         }
         Action::Register {
-            device,
+            target,
             name,
             value,
         } => {
             let instruction = Register::from_str(&name)?.instruction(&value);
-            println!("{}", run(&registry, &device, instruction).await?);
+            run(&registry, &target, instruction).await?;
         }
     }
 
     Ok(())
 }
 
-/// Look up `device` in the registry and run one instruction against it.
-async fn run(registry: &Registry, device: &str, instruction: Instruction) -> Result<Value> {
-    let device = registry
-        .device(device)
-        .ok_or_else(|| anyhow!("unknown device '{device}'"))?;
-    Ok(device.run(&instruction).await?)
+/// Resolve `target` to a device or group, run one instruction, and print the
+/// result. A single device prints just its value; a group prints one
+/// `device-id: value` line per member so the fan-out is visible.
+async fn run(registry: &Registry, target: &str, instruction: Instruction) -> Result<()> {
+    match registry
+        .target(target)
+        .ok_or_else(|| anyhow!("unknown device or group '{target}'"))?
+    {
+        Target::Device(device) => {
+            let value: Value = device.run(&instruction).await?;
+            println!("{value}");
+        }
+        Target::Group(group) => {
+            let results = group.run(&instruction).await?;
+            for (id, value) in results {
+                println!("{id}: {value}");
+            }
+        }
+    }
+    Ok(())
 }
