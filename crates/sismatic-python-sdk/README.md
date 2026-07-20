@@ -55,7 +55,8 @@ port = 22023
 connect_secs = 5
 command_secs = 3
 eager = true              # open connections up front instead of on first use
-sis_keepalive_secs = 120  # probe idle devices so warm connections stay warm
+sis_keepalive_secs = 120  # while warm, probe idle devices so connections stay warm
+eager_retry_secs = 30     # while cold, retry connecting to unreachable eager devices
 
 [[device]]
 id = "atrium-101"
@@ -81,6 +82,7 @@ defaults:
   password: "schmoe"
   eager: true
   sis_keepalive_secs: 120
+  eager_retry_secs: 30
 
 devices:
   - id: Hall A
@@ -111,6 +113,7 @@ devices = {
     "password": "schmoe",
     "eager": True,
     "sis_keepalive_secs": 120,
+    "eager_retry_secs": 30,
     "port": 22023,
   },
   "devices": [
@@ -127,7 +130,10 @@ print(sis.ids())
 Connections are lazy by default — the expensive SSH handshake is paid on a
 device's first instruction. Set `eager` to pay it up front, and
 `sis_keepalive_secs` to send a benign probe on an interval so a device's
-inactivity timer never lets the connection go cold. See
+inactivity timer never lets the connection go cold. Because `eager` means
+"hold a warm connection over time," `eager_retry_secs` sets how often to
+re-attempt the handshake for an eager device that is unreachable at startup or
+has since dropped (`0` gives up after the first failure). See
 [the design note on eager connections and SIS keepalive](https://github.com/metzenseifner/sismatic/blob/main/docs/sis-keepalive-eager-connections.md)
 for the full rationale.
 

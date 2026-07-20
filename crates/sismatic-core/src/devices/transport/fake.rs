@@ -58,8 +58,8 @@ impl FakeTransport {
     }
 
     /// Set what happens after the scripted reads are exhausted.
-    pub fn on_exhausted(mut self, behaviour: Exhausted) -> Self {
-        self.on_exhausted = behaviour;
+    pub fn on_exhausted(mut self, behavior: Exhausted) -> Self {
+        self.on_exhausted = behavior;
         self
     }
 

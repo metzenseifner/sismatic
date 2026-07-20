@@ -8,6 +8,7 @@ devices = {
             "password": "schmoe",
             "eager": True,
             "sis_keepalive_secs": 120,
+            "eager_retry_secs": 30,
             "port": 22023,
             },
         "devices": [

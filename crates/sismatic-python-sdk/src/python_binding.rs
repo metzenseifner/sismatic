@@ -81,7 +81,9 @@ impl Sismatic {
     /// Build a session from a config file, choosing the deserializer from the
     /// extension (`.toml`, `.json`, `.yaml`/`.yml`). Devices are connected lazily
     /// on their first command by default; any device marked `eager` in the config
-    /// is connected at once and kept warm by a background SIS keepalive.
+    /// is connected at once and kept warm by a background SIS keepalive, which also
+    /// retries the connection on the `eager_retry_secs` interval whenever the device
+    /// is cold (unreachable at startup or dropped since).
     #[staticmethod]
     fn from_file(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
         let configs = sismatic_core::devices::config::load(path)
@@ -94,7 +96,7 @@ impl Sismatic {
     /// library you like (INI, XML, a database row, environment variables) and
     /// hand the resulting `dict` here; it is deserialized into the core's
     /// `RawConfig` and resolved through the same format-agnostic `resolve_config`
-    /// every file loader ends in. Connection behaviour matches
+    /// every file loader ends in. Connection behavior matches
     /// [`from_file`](Self::from_file).
     #[staticmethod]
     fn from_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
