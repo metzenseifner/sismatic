@@ -1,44 +1,111 @@
-//! The set of known devices, keyed by id.
+//! The set of known devices and groups, keyed by id.
 //!
 //! A [`Registry`] is built once from a `devices.toml` and a shared
-//! [`Connector`], and hands out `Arc<Device>` by id. Because every lookup of the
-//! same id returns the same [`Device`], callers transparently share that
-//! device's one warm connection — the registry is the keep-warm cache, one
-//! entry per device.
+//! [`Connector`], and hands out `Arc<Device>` (or `Arc<DeviceGroup>`) by id.
+//! Because every lookup of the same id returns the same [`Device`], callers
+//! transparently share that device's one warm connection — the registry is the
+//! keep-warm cache, one entry per device.
+//!
+//! A [`DeviceGroup`] is a name over several of those same device handles, so a
+//! caller can address a whole room by one id; its members reuse the very warm
+//! connections the registry already holds. Device and group ids share one
+//! namespace (the config layer guarantees they never collide), so [`target`]
+//! resolves either kind from a single id.
+//!
+//! [`target`]: Registry::target
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::config::DeviceConfig;
+use super::config::{DeviceConfig, GroupConfig};
 use super::connector::Connector;
 use super::device::Device;
+use super::group::DeviceGroup;
 
-/// A lookup table of devices, each owning its own cached connection.
+/// What an id resolves to: a lone device or a group of them. Both answer the
+/// same instructions, so a facade can run against either after one lookup.
+pub enum Target {
+    Device(Arc<Device>),
+    Group(Arc<DeviceGroup>),
+}
+
+/// A lookup table of devices and the groups layered over them.
 pub struct Registry {
     devices: DashMap<String, Arc<Device>>,
+    groups: DashMap<String, Arc<DeviceGroup>>,
 }
 
 impl Registry {
-    /// Build a registry from already-resolved configs, all sharing `connector`.
+    /// Build a registry of devices only (no groups), all sharing `connector`.
     pub fn from_configs(configs: Vec<DeviceConfig>, connector: Arc<dyn Connector>) -> Self {
+        Self::build(configs, Vec::new(), connector)
+    }
+
+    /// Build a registry from resolved device and group configs, all sharing
+    /// `connector`. The `group_configs` are assumed valid — every member id
+    /// naming a device present in `device_configs` — which the config layer's
+    /// [`resolve_config`] guarantees; any member that somehow does not resolve
+    /// is skipped rather than panicking.
+    ///
+    /// [`resolve_config`]: super::config::resolve_config
+    pub fn build(
+        device_configs: Vec<DeviceConfig>,
+        group_configs: Vec<GroupConfig>,
+        connector: Arc<dyn Connector>,
+    ) -> Self {
         let devices = DashMap::new();
-        for config in configs {
+        for config in device_configs {
             let id = config.id.clone();
             let device = Arc::new(Device::new(config, Arc::clone(&connector)));
             devices.insert(id, device);
         }
-        Self { devices }
+
+        let groups = DashMap::new();
+        for group in group_configs {
+            let members = group
+                .device_ids
+                .iter()
+                .filter_map(|id| devices.get(id).map(|d| Arc::clone(d.value())))
+                .collect();
+            groups.insert(
+                group.id.clone(),
+                Arc::new(DeviceGroup::new(group.id, members)),
+            );
+        }
+
+        Self { devices, groups }
     }
 
-    /// The device with this id, or `None` if it is not in the registry.
+    /// The device with this id, or `None` if no device has it. This looks up
+    /// devices only; use [`target`](Self::target) to resolve a group id too.
     pub fn device(&self, id: &str) -> Option<Arc<Device>> {
         self.devices.get(id).map(|d| Arc::clone(d.value()))
+    }
+
+    /// The group with this id, or `None` if no group has it.
+    pub fn group(&self, id: &str) -> Option<Arc<DeviceGroup>> {
+        self.groups.get(id).map(|g| Arc::clone(g.value()))
+    }
+
+    /// Resolve `id` to a device or a group, whichever owns it, or `None`. Since
+    /// the two share one id namespace, at most one kind can match.
+    pub fn target(&self, id: &str) -> Option<Target> {
+        if let Some(device) = self.device(id) {
+            Some(Target::Device(device))
+        } else {
+            self.group(id).map(Target::Group)
+        }
     }
 
     /// The ids of every known device, in no particular order.
     pub fn ids(&self) -> Vec<String> {
         self.devices.iter().map(|d| d.key().clone()).collect()
+    }
+
+    /// The ids of every known group, in no particular order.
+    pub fn group_ids(&self) -> Vec<String> {
+        self.groups.iter().map(|g| g.key().clone()).collect()
     }
 
     /// A handle to every device, in no particular order. Used to drive
@@ -150,5 +217,57 @@ mod tests {
 
         // ...reuse the same device, and therefore the same connection.
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    fn group_config() -> Vec<GroupConfig> {
+        vec![GroupConfig {
+            id: "everywhere".into(),
+            device_ids: vec!["atrium-101".into(), "annex-far".into()],
+        }]
+    }
+
+    #[test]
+    fn a_group_resolves_alongside_its_devices() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let registry = Registry::build(example_configs(), group_config(), connector);
+
+        assert_eq!(registry.group_ids(), vec!["everywhere"]);
+        let group = registry.group("everywhere").unwrap();
+        let mut members = group.member_ids();
+        members.sort();
+        assert_eq!(members, vec!["annex-far", "atrium-101"]);
+    }
+
+    #[tokio::test]
+    async fn target_resolves_a_device_or_a_group_from_one_id() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let registry = Registry::build(example_configs(), group_config(), connector);
+
+        assert!(matches!(
+            registry.target("atrium-101"),
+            Some(Target::Device(_))
+        ));
+        assert!(matches!(
+            registry.target("everywhere"),
+            Some(Target::Group(_))
+        ));
+        assert!(registry.target("nope").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_group_command_reaches_every_member() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let registry = Registry::build(example_configs(), group_config(), connector);
+
+        let group = registry.group("everywhere").unwrap();
+        let results = group.run(&Query::SshPort.instruction()).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, v)| *v == Value::Port(22023)));
     }
 }

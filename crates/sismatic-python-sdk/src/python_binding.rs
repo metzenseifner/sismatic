@@ -10,6 +10,9 @@
 //! Each call releases the GIL (`allow_threads`) around `block_on`, so a slow
 //! device does not stall other Python threads.
 
+// TODO Consider using Rust’s documentation blocks but with Sphinx’s RST syntax
+// see demo: https://github.com/insight-platform/pyo3-sphinx-documentation
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,11 +20,12 @@ use std::time::Duration;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pythonize::depythonize;
 use tokio::runtime::Runtime;
 
-use sismatic_core::devices::config::{DeviceConfig, RawConfig, resolve_config};
-use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::config::{RawConfig, Resolved, resolve_config};
+use sismatic_core::devices::registry::{Registry, Target};
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
@@ -86,9 +90,9 @@ impl Sismatic {
     /// is cold (unreachable at startup or dropped since).
     #[staticmethod]
     fn from_file(py: Python<'_>, path: &str) -> PyResult<Py<Self>> {
-        let configs = sismatic_core::devices::config::load(path)
+        let resolved = sismatic_core::devices::config::load(path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Self::build(py, configs)
+        Self::build(py, resolved)
     }
 
     /// Build a session from an already-parsed mapping shaped like the config
@@ -102,13 +106,18 @@ impl Sismatic {
     fn from_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
         let raw: RawConfig =
             depythonize(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let configs = resolve_config(raw).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Self::build(py, configs)
+        let resolved = resolve_config(raw).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Self::build(py, resolved)
     }
 
     /// The ids of every configured device.
     fn ids(&self) -> PyResult<Vec<String>> {
         Ok(self.registry()?.ids())
+    }
+
+    /// The ids of every configured device group.
+    fn groups(&self) -> PyResult<Vec<String>> {
+        Ok(self.registry()?.group_ids())
     }
 
     /// Close every SSH connection and shut the tokio runtime down, in that
@@ -159,40 +168,46 @@ impl Sismatic {
         false
     }
 
-    /// Read a built-in field (e.g. `"firmware"`, `"ssh_port"`) from `device`.
-    fn query(&self, py: Python<'_>, device: &str, name: &str) -> PyResult<Py<PyAny>> {
+    /// Read a built-in field (e.g. `"firmware"`, `"ssh_port"`) from a device or
+    /// group. Against a group, returns a `dict` mapping each member's id to its
+    /// value; against a single device, returns the value itself.
+    fn query(&self, py: Python<'_>, target: &str, name: &str) -> PyResult<Py<PyAny>> {
         let query = Query::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        self.execute(py, device, query.instruction())
+        self.execute(py, target, query.instruction())
     }
 
-    /// Run a recorder command (e.g. `"start"`, `"stop"`, `"pause"`) on `device`.
-    fn command(&self, py: Python<'_>, device: &str, name: &str) -> PyResult<Py<PyAny>> {
+    /// Run a recorder command (e.g. `"start"`, `"stop"`, `"pause"`) on a device
+    /// or group. Against a group every member receives the command at once, and
+    /// the return is a `dict` of each member's reply; against a single device it
+    /// is that one reply.
+    fn command(&self, py: Python<'_>, target: &str, name: &str) -> PyResult<Py<PyAny>> {
         let command = Command::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        self.execute(py, device, command.instruction())
+        self.execute(py, target, command.instruction())
     }
 
-    /// Write `value` into a metadata register (e.g. `"title"`) on `device`. The
-    /// device truncates the value at its own length limit.
+    /// Write `value` into a metadata register (e.g. `"title"`) on a device or
+    /// group. The device truncates the value at its own length limit. Against a
+    /// group, returns a `dict` of each member's echoed reply.
     fn register(
         &self,
         py: Python<'_>,
-        device: &str,
+        target: &str,
         name: &str,
         value: &str,
     ) -> PyResult<Py<PyAny>> {
         let register =
             Register::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        self.execute(py, device, register.instruction(value))
+        self.execute(py, target, register.instruction(value))
     }
 }
 
 impl Sismatic {
     /// Construct the tokio runtime, registry, and SIS keepalive around a resolved
-    /// device list, then register the `atexit` teardown. The shared tail of every
-    /// `from_*` constructor.
-    fn build(py: Python<'_>, configs: Vec<DeviceConfig>) -> PyResult<Py<Self>> {
+    /// config (devices plus groups), then register the `atexit` teardown. The
+    /// shared tail of every `from_*` constructor.
+    fn build(py: Python<'_>, resolved: Resolved) -> PyResult<Py<Self>> {
         let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
+        let registry = Registry::build(resolved.devices, resolved.groups, Arc::new(RusshConnector));
         let sis_keepalive = SisKeepalive::spawn(runtime.handle(), registry.devices());
         let session = Py::new(
             py,
@@ -216,26 +231,41 @@ impl Sismatic {
         self.runtime.as_ref().ok_or_else(closed_err)
     }
 
-    /// Look up `device`, run `instruction` to completion on the runtime, and turn
-    /// the decoded value into a native Python object. The GIL is released for the
-    /// duration of the (blocking) device exchange.
+    /// Resolve `target` to a device or a group, run `instruction` to completion
+    /// on the runtime, and turn the reply into a native Python object. A device
+    /// yields its single decoded value; a group yields a `dict` mapping each
+    /// member's id to its value. The GIL is released for the duration of the
+    /// (blocking) device exchange.
     fn execute(
         &self,
         py: Python<'_>,
-        device: &str,
+        target: &str,
         instruction: Instruction,
     ) -> PyResult<Py<PyAny>> {
         let registry = self.registry()?;
         let runtime = self.runtime()?;
-        let device = registry
-            .device(device)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown device '{device}'")))?;
 
-        let value = py
-            .detach(|| runtime.block_on(device.run(&instruction)))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-        value_into_py(py, value)
+        match registry
+            .target(target)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown device or group '{target}'")))?
+        {
+            Target::Device(device) => {
+                let value = py
+                    .detach(|| runtime.block_on(device.run(&instruction)))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                value_into_py(py, value)
+            }
+            Target::Group(group) => {
+                let results = py
+                    .detach(|| runtime.block_on(group.run(&instruction)))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let dict = PyDict::new(py);
+                for (member, value) in results {
+                    dict.set_item(member, value_into_py(py, value)?)?;
+                }
+                dict.into_py_any(py)
+            }
+        }
     }
 }
 

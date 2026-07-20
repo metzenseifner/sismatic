@@ -43,7 +43,42 @@ username = "admin"
 password = "extron"
 connect_secs = 10   # override default connect timeout
 command_secs = 8    # override default command timeout
+
+# A group is a name over one or more devices. Addressing the group id sends
+# the instruction to every member at once — see "Device Groups" below.
+[[group]]
+id = "room-5"
+devices = ["atrium-101", "annex-far"]
 ```
+
+# Device Groups
+
+A `[[group]]` bundles several devices behind a single id so they act as one.
+The motivating case is more than one recorder in the same room that must start
+together: address the group and every member receives the instruction at once,
+rather than one after another. A group has just two fields, an `id` and the
+`devices` it contains, each of which must name a `[[device]]` defined elsewhere
+in the same file. Group ids share the same namespace as device ids, so a group
+may not reuse a device's id, and any id resolves to at most one device or group.
+
+Sending to a group fans the instruction out concurrently — each member's
+exchange is dispatched before any is awaited — over the members' own warm
+connections (a group holds the same device handles the registry hands out, so
+grouping changes nothing about a device's connection reuse or self-healing). A
+group run reports *every* member's outcome: on success the members' replies
+tagged by device id, and on any failure exactly which members failed and why,
+so a partial failure is surfaced rather than hidden.
+
+Across the facades, a group id is accepted anywhere a device id is:
+
+- **CLI**: `sismatic command room-5 start` runs `start` on every member and
+  prints one `device-id: value` line per member; `sismatic groups` lists group
+  ids.
+- **Python**: `sis.command("room-5", "start")` returns a `dict` keyed by member
+  id (a single device still returns its scalar value); `sis.groups()` lists
+  group ids.
+- **Web**: `POST /devices/room-5/command/start` returns a `results` object
+  keyed by member id; `GET /groups` lists group ids.
 
 # Warm versus Cold Connections
 

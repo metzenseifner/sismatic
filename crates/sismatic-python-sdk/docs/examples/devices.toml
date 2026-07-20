@@ -16,3 +16,8 @@ host = "10.0.150.2"
 [[device]]
 id = "Atrium"
 host = "10.0.150.3"
+
+# Address both halls as one: a command sent to "Halls" reaches each member.
+[[group]]
+id = "Halls"
+devices = ["Hall A", "Hall B"]
