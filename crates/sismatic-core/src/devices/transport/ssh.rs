@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use russh::client::{self, Config, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::keys::ssh_key::PublicKey;
 use russh::{Channel, ChannelMsg};
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
 use crate::devices::config::DeviceConfig;
@@ -138,6 +138,7 @@ impl Connector for RusshConnector {
         // command is sent, so the first reply parses cleanly.
         drain_login_banner(&mut channel).await;
 
+        info!("connection established"); // fires only on the success path
         Ok(Box::new(RusshTransport {
             _session: session,
             // Deliberately *not* channel.into_stream(): it builds its reader
