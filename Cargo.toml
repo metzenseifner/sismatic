@@ -9,7 +9,7 @@ members = [
 
 # Shared across every member so a version/edition/license bump happens once.
 [workspace.package]
-version = "0.2.18"
+version = "0.2.19"
 edition = "2024"
 license = "ECL-2.0"
 
@@ -17,8 +17,11 @@ license = "ECL-2.0"
 # `foo.workspace = true` and add only the extra features they need, so e.g. the
 # web tree never leaks into the wheel build and pyo3 never leaks into the CLI.
 [workspace.dependencies]
-# Internal
-sismatic-core = { path = "crates/sismatic-core" }
+# Internal. The `version` is required (not just `path`) so that `cargo package`
+# succeeds under release-plz's `git_only` mode — packaging a crate errors if a
+# path dependency omits a version. release-plz keeps this in lockstep with the
+# workspace version on every bump.
+sismatic-core = { path = "crates/sismatic-core", version = "0.2.19" }
 
 # Shared third-party
 anyhow = "1"

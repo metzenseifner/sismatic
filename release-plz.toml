@@ -15,6 +15,17 @@
 # PAT / GitHub App token (see .github/workflows/release-plz.yml).
 
 [workspace]
+# Derive versions from git tags instead of the cargo registry. This is the
+# crux of why release-plz works here at all: none of these crates are published
+# to crates.io (`publish = false` everywhere), so the default registry-based
+# version detection finds no prior version, can't compute a bump, and just
+# echoes whatever is already in Cargo.toml — never opening a release PR. With
+# `git_only`, release-plz reads the last `v{version}` tag as the baseline and
+# bumps from the conventional commits since it. (Requires the internal
+# `sismatic-core` dependency in Cargo.toml to carry a `version`, otherwise
+# `cargo package` — which git_only runs to diff each crate — refuses to
+# package a path dependency that has no version requirement.)
+git_only = true
 # Default everything OFF; the crates that should release opt in below. This
 # keeps the CLI/web binaries and the pyo3 cdylib from ever being pushed to
 # crates.io or tagged by accident.

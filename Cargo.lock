@@ -2513,7 +2513,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sismatic-cli"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "clap",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-core"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -2543,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-python-sdk"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "pyo3",
  "pyo3-log",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-web"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "axum",

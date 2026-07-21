@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19](https://github.com/metzenseifner/sismatic/releases/tag/v0.2.19) - 2026-07-21
+
+### Added
+
+- device groups: one id can address a set of devices; a group call fans out
+  concurrently and reports per-member results (CLI, Python, and web facades)
+- eager retries: `eager_retry_secs` keeps a warm connection by re-attempting
+  cold devices on a short cadence instead of giving up after the first failure
+- log info on connection established
+
 ## [0.2.18](https://github.com/metzenseifner/sismatic/releases/tag/v0.2.18) - 2026-07-18
 
 ### Added
