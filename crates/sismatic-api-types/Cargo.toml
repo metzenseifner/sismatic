@@ -1,0 +1,28 @@
+[package]
+name = "sismatic-api-types"
+description = "Serde DTOs defining the Sismatic HTTP API wire contract (no logic, no I/O)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The *only* required dependency. api-types is the wire contract and nothing
+# more: no `sismatic-core`, no transport, no persistence. Keeping its dependency
+# cone this small is what lets both the server and every client share it without
+# any of them dragging in the others — and, critically, what keeps the frontends
+# free of a compile path to `sismatic-core` (see the workspace design note §2).
+serde.workspace = true
+
+# Optional: emit TypeScript definitions from these same structs so the React
+# frontend consumes one source of truth for the JSON shapes. Off by default so a
+# plain `cargo build` (and `nix flake check`) never compiles the proc-macro tree.
+ts-rs = { workspace = true, optional = true }
+
+[features]
+# Derive `ts_rs::TS` on every DTO. Enable, then generate `.ts` bindings with a
+# test or `TS::export_all` in a downstream tool.
+ts = ["dep:ts-rs"]
+
+[dev-dependencies]
+# Exercises the round-trip in the crate/doc examples; not part of the contract.
+serde_json.workspace = true

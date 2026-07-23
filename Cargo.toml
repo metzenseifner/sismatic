@@ -4,7 +4,8 @@ members = [
   "crates/sismatic-core",
   "crates/sismatic-python-sdk",
   "crates/sismatic-cli",
-  "crates/sismatic-web/backend",
+  "crates/sismatic-web/backend", "crates/sismatic-server", "crates/sismatic-store", "crates/sismatic-sync",
+  "crates/sismatic-api-types",
 ]
 
 # Shared across every member so a version/edition/license bump happens once.
@@ -22,6 +23,9 @@ license = "ECL-2.0"
 # path dependency omits a version. release-plz keeps this in lockstep with the
 # workspace version on every bump.
 sismatic-core = { path = "crates/sismatic-core", version = "0.2.19" }
+# The wire contract. Shared by the (future) http-api and api-client; depends on
+# nothing internal, so it never widens any consumer's dependency cone.
+sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.19" }
 
 # Shared third-party
 anyhow = "1"
@@ -51,6 +55,9 @@ serde_json = "1.0"
 serde-saphyr = "0.0.29"
 tokio = { version = "1" }
 toml = "0.8"
+# Optional in `sismatic-api-types` (feature `ts`): emit TypeScript definitions
+# from the DTOs so the web frontend shares one source of truth for JSON shapes.
+ts-rs = "12"
 winnow = "1.0.3"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3.23", features = [
