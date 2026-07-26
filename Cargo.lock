@@ -2562,6 +2562,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sismatic-sync"
+version = "0.2.19"
+dependencies = [
+ "sismatic-api-types",
+ "sismatic-core",
+]
+
+[[package]]
 name = "sismatic-web"
 version = "0.2.19"
 dependencies = [

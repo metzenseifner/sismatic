@@ -77,3 +77,7 @@ release = false
 [[package]]
 name = "sismatic-api-types"
 release = false
+
+[[package]]
+name = "sismatic-sync"
+release = false
