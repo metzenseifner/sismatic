@@ -64,3 +64,16 @@ release = false
 [[package]]
 name = "sismatic-web"
 release = false
+
+# The serialization-contract crate, added after the v0.2.19 tag. Under `git_only` with a
+# package-name-less shared tag (`v{{version}}`), release-plz maps every member to
+# the same `v*` tags — so it mistakes the tag matching this crate's inherited
+# workspace version (v0.2.19) for a prior release, then fails to diff because the
+# crate doesn't exist at that commit ("Failed to find package sismatic-api-types").
+# `publish = false` and nothing released depends on it yet, so skip it: it inherits
+# the bumped workspace version passively via `version.workspace = true`, like the
+# binaries above. Once a v* tag exists that *contains* this crate, it can be flipped
+# to `release = true` (or joined to the `sismatic` version_group) safely.
+[[package]]
+name = "sismatic-api-types"
+release = false
