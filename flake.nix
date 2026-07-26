@@ -347,6 +347,40 @@
               src = pkgs.lib.sources.sourceFilesBySuffices src [ ".toml" ];
             };
 
+            # Guardrail for the release-plz footgun that broke CI when
+            # sismatic-api-types was added. A new workspace member defaults to
+            # `release = true`; because the git tag is shared workspace-wide
+            # (git_tag_name = "v{{ version }}"), release-plz then looks for the
+            # crate in a worktree at the last tag — where a just-added crate does
+            # not exist — and the whole release-pr job errors. That dynamic
+            # failure can't be reproduced here (no network, no tag history), but
+            # its root cause is a *static* drift: a member with no explicit entry
+            # in release-plz.toml. Enforce that the member set and the
+            # [[package]] set match exactly.
+            release-plz-config =
+              let
+                cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+                releasePlz = builtins.fromTOML (builtins.readFile ./release-plz.toml);
+                # Dir basename != package name (crates/sismatic-web/backend ->
+                # "sismatic-web"), so read each member's own manifest for the
+                # real name.
+                memberNames = map (
+                  m: (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml"))).package.name
+                ) cargoToml.workspace.members;
+                entryNames = map (p: p.name) (releasePlz.package or [ ]);
+                missing = lib.subtractLists entryNames memberNames; # members with no entry
+                stale = lib.subtractLists memberNames entryNames; # entries with no member
+              in
+              assert lib.assertMsg (missing == [ ] && stale == [ ]) ''
+                release-plz.toml is out of sync with the workspace members.
+                  members missing a [[package]] entry: ${lib.concatStringsSep ", " missing}
+                  stale [[package]] entries (no such member): ${lib.concatStringsSep ", " stale}
+                Every workspace member needs an explicit entry (release = false
+                unless it should be processed), so a new crate can't silently
+                default to release = true.
+              '';
+              pkgs.runCommand "release-plz-config-ok" { } "touch $out";
+
             # Security advisories against the pinned advisory-db input.
             # Update with: nix flake update advisory-db
             audit = craneLib.cargoAudit {

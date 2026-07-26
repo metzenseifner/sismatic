@@ -6,6 +6,7 @@ members = [
   "crates/sismatic-cli",
   "crates/sismatic-web/backend",
   "crates/sismatic-api-types",
+  "crates/sismatic-sync",
 ]
 
 # Shared across every member so a version/edition/license bump happens once.
