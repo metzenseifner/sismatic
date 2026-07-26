@@ -23,7 +23,10 @@ use std::sync::Arc;
 use winnow::error::ErrMode;
 use winnow::{ModalResult, Partial};
 
-use crate::protocol::states::RecordingState;
+// Re-exported so consumers (e.g. the DTO conversion in `sismatic-sync`) can name
+// the type for an *exhaustive* match — the private `states` module keeps its
+// other items internal.
+pub use crate::protocol::states::RecordingState;
 
 /// A decoded response value. The variant reflects what the field means, so a
 /// caller can pattern-match instead of re-parsing a string.
