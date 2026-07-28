@@ -1,0 +1,17 @@
+[package]
+name = "sismatic-store-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dashmap.workspace = true
+sismatic-api-types.workspace = true
+sismatic-store = { version = "0.2.20", path = "../sismatic-store" }
+
+[dev-dependencies]
+# The store trait is async, so the unit tests need a runtime and the
+# `#[tokio::test]` macro. A current-thread runtime is enough — the tests do no
+# real I/O and only exercise the in-memory maps.
+tokio = { workspace = true, features = ["macros", "rt"] }

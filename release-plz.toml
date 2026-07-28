@@ -81,3 +81,17 @@ release = false
 [[package]]
 name = "sismatic-sync"
 release = false
+
+# The store *port* (the `ReadStore`/`WriteStore` traits) and its in-memory
+# adapter. Both are internal, `publish = false`, and nothing released depends on
+# them yet, so — like the crates above — they only need to be *processed* (not
+# released): they inherit the bumped workspace version passively via
+# `version.workspace = true`. Flip to `release = true` once a released crate
+# depends on them.
+[[package]]
+name = "sismatic-store"
+release = false
+
+[[package]]
+name = "sismatic-store-memory"
+release = false

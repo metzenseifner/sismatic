@@ -1,12 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/sismatic-api-types",
+  "crates/sismatic-cli",
   "crates/sismatic-core",
   "crates/sismatic-python-sdk",
-  "crates/sismatic-cli",
-  "crates/sismatic-web/backend",
-  "crates/sismatic-api-types",
+  "crates/sismatic-store",
+  "crates/sismatic-store-memory",
   "crates/sismatic-sync",
+  "crates/sismatic-web/backend",
 ]
 
 # Shared across every member so a version/edition/license bump happens once.
