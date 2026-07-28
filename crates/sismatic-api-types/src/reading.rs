@@ -74,6 +74,16 @@ pub struct TimeSpan {
     pub end: Timestamp,
 }
 
+impl TimeSpan {
+    /// True if `at` falls within the closed interval `[start, end]`.
+    ///
+    /// Timestamps are RFC 3339 in UTC, a format that sorts lexicographically in
+    /// chronological order, so the bounds can be compared as plain strings.
+    pub fn within(&self, at: &Timestamp) -> bool {
+        self.start.0 <= at.0 && at.0 <= self.end.0
+    }
+}
+
 /// Filters for a readings query, deserialized from the URL query string, e.g.
 /// `?field=RUNNING_STATE&start=...&end=...&limit=100`. Every field is optional:
 /// omit `field` for all fields, omit the bounds for "latest", omit `limit` for

@@ -2562,6 +2562,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sismatic-store"
+version = "0.2.20"
+dependencies = [
+ "async-trait",
+ "sismatic-api-types",
+]
+
+[[package]]
+name = "sismatic-store-memory"
+version = "0.2.20"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "sismatic-api-types",
+ "sismatic-store",
+ "tokio",
+]
+
+[[package]]
 name = "sismatic-sync"
 version = "0.2.20"
 dependencies = [
