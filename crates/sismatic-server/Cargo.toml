@@ -1,0 +1,19 @@
+[package]
+name = "sismatic-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+sismatic-core = { version = "0.2.20", path = "../sismatic-core", features = [
+  "ssh",
+] }
+sismatic-store = { version = "0.2.20", path = "../sismatic-store" }
+sismatic-store-memory = { version = "0.2.20", path = "../sismatic-store-memory" }
+# The composition root drives the write side, so it needs the `driver` feature
+# (the poll loops), not just the pure `dto` seam.
+sismatic-sync = { version = "0.2.20", path = "../sismatic-sync", features = [
+  "driver",
+] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }

@@ -5,6 +5,7 @@ members = [
   "crates/sismatic-cli",
   "crates/sismatic-core",
   "crates/sismatic-python-sdk",
+  "crates/sismatic-server",
   "crates/sismatic-store",
   "crates/sismatic-store-memory",
   "crates/sismatic-sync",
@@ -57,6 +58,12 @@ serde_json = "1.0"
 # path forward now that `serde_yaml` is deprecated.
 serde-saphyr = "0.0.29"
 tokio = { version = "1" }
+# Cancellation tokens for the `sismatic-sync` driver's cooperative shutdown; only
+# pulled in under that crate's `driver` feature.
+tokio-util = { version = "0.7", features = ["rt"] }
+# RFC-3339 wall-clock timestamps for the readings the sync driver persists. The
+# `clock` feature enables `Utc::now()`; no other default features are needed.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "0.8"
 # Optional in `sismatic-api-types` (feature `ts`): emit TypeScript definitions
 # from the DTOs so the web frontend shares one source of truth for JSON shapes.

@@ -12,3 +12,31 @@ license.workspace = true
 # so no `ssh` feature — no tokio/russh in the conversion's dependency cone.
 sismatic-core.workspace = true
 sismatic-api-types.workspace = true
+
+# --- Write-side driver (feature `driver`) ---------------------------------
+# The `dto` seam above is pure; the poll-loop driver is not. Everything below is
+# optional and activated only by `driver`, so a consumer that wants just the
+# `Value -> ReadingValue` translation never pulls tokio/russh/a clock into its
+# dependency cone. `driver` additionally turns on `sismatic-core/ssh`, since
+# actually reaching `Device::run` needs the real SSH transport.
+sismatic-store = { version = "0.2.20", path = "../sismatic-store", optional = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "time",
+], optional = true }
+tokio-util = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[features]
+default = []
+# The keep-in-sync poll loops: `spawn`, `SyncConfig`, `SyncHandle`.
+driver = [
+  "dep:sismatic-store",
+  "dep:tokio",
+  "dep:tokio-util",
+  "dep:chrono",
+  "dep:tracing",
+  "sismatic-core/ssh",
+]
