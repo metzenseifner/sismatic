@@ -29,6 +29,14 @@ tokio-util = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
+[dev-dependencies]
+# The driver's tests drive real poll loops over core's test doubles
+# (`CountingConnector`/`FakeTransport`, behind core's `testing` feature) and
+# record what reaches the store, so they need no network and no real store.
+async-trait.workspace = true
+sismatic-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
 [features]
 default = []
 # The keep-in-sync poll loops: `spawn`, `SyncConfig`, `SyncHandle`.

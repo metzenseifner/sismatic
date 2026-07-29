@@ -11,7 +11,6 @@
 pub mod configuration;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use sismatic_core::devices::config::Resolved;
 use sismatic_core::devices::registry::Registry;
@@ -44,12 +43,22 @@ pub async fn run(
         Arc::new(RusshConnector),
     ));
 
+    // A rename, not a decision: `configuration` already folded the per-field
+    // overrides into the inherited default and decoded `interval_secs: 0` into
+    // the `None` that means never, so there is nothing left to resolve here.
     let sync = sismatic_sync::spawn(
         registry,
         write,
         sismatic_sync::SyncConfig {
-            interval: Duration::from_secs(cfg.sync.interval_secs),
-            fields: cfg.sync.fields,
+            fields: cfg
+                .sync
+                .fields
+                .into_iter()
+                .map(|field| sismatic_sync::FieldSchedule {
+                    name: field.name,
+                    interval: field.interval,
+                })
+                .collect(),
         },
     );
 

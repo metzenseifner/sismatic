@@ -2834,6 +2834,7 @@ dependencies = [
 name = "sismatic-sync"
 version = "0.2.20"
 dependencies = [
+ "async-trait",
  "chrono",
  "sismatic-api-types",
  "sismatic-core",

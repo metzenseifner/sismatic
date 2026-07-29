@@ -9,9 +9,12 @@
 //! neither depends on the working directory the test binary is launched from.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Duration;
 
 use sismatic_core::devices::config::{self, Resolved};
-use sismatic_server::configuration::{ServerConfig, SyncConfig, get_configuration};
+use sismatic_core::protocol::instructions::query::Query;
+use sismatic_server::configuration::{FieldConfig, ServerConfig, SyncConfig, get_configuration};
 use sismatic_server::run;
 
 fn fixture(name: &str) -> PathBuf {
@@ -40,10 +43,63 @@ fn devices_config_path_resolves_next_to_the_config_file_and_loads() {
 fn the_fixture_config_resolves_its_sync_and_http_sections() {
     let cfg = get_configuration(fixture("configuration.yaml")).expect("reading fixture config");
 
-    assert_eq!(cfg.sync.interval_secs, 5);
-    assert_eq!(cfg.sync.fields, vec!["RUNNING_STATE".to_owned()]);
+    assert_eq!(cfg.sync.default_interval, Some(Duration::from_secs(5)));
     assert_eq!(cfg.http.host, "0.0.0.0");
     assert_eq!(cfg.http.port, 9000);
+
+    // The fixture writes one field bare, one as a table, and one disabled with
+    // `interval_secs: 0`; they arrive as one flat list in which each field
+    // already carries its own schedule, `None` being never.
+    let schedule: Vec<(&str, Option<u64>)> = cfg
+        .sync
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.interval.map(|i| i.as_secs())))
+        .collect();
+    assert_eq!(
+        schedule,
+        [
+            ("RUNNING_STATE", Some(5)),
+            ("FIRMWARE", Some(3600)),
+            ("UNIT_NAME", None),
+        ]
+    );
+}
+
+/// The catch-all config, read from a real file: `"*"` survives YAML quoting and
+/// expands to core's whole query catalog, with the two overrides still applied.
+///
+/// The unit tests prove the expansion *equals* `Query::ALL`; what only a real
+/// file can show is that the spelling a deployment actually writes parses.
+#[test]
+fn the_wildcard_config_expands_through_the_real_loader() {
+    let cfg = get_configuration(fixture("configuration-all-fields.yaml"))
+        .expect("reading the wildcard fixture");
+
+    let by_name = |name: &str| {
+        cfg.sync
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from the expansion"))
+            .interval
+    };
+
+    // Far more than the three fields the file mentions by name.
+    assert!(cfg.sync.fields.len() > 3, "wildcard did not expand");
+    assert_eq!(by_name("RUNNING_STATE"), Some(Duration::from_secs(5)));
+    assert_eq!(by_name("MAC_ADDRESS"), None);
+    assert_eq!(by_name("FIRMWARE"), Some(Duration::from_secs(300)));
+
+    // Every expanded field is a name core will actually accept, which is what
+    // makes the wildcard safe to hand straight to the driver.
+    for field in &cfg.sync.fields {
+        assert!(
+            Query::from_str(&field.name).is_ok(),
+            "wildcard produced a field core cannot query: {}",
+            field.name
+        );
+    }
 }
 
 /// A missing config file is an error, not a panic or a silent set of defaults.
@@ -60,8 +116,19 @@ async fn run_starts_and_shuts_down_without_touching_the_filesystem() {
     let cfg = ServerConfig {
         devices_config_path: PathBuf::from("unused-by-run.toml"),
         sync: SyncConfig {
-            interval_secs: 1,
-            fields: vec!["RUNNING_STATE".to_owned()],
+            default_interval: Some(Duration::from_secs(1)),
+            fields: vec![
+                FieldConfig {
+                    name: "RUNNING_STATE".to_owned(),
+                    interval: Some(Duration::from_secs(1)),
+                },
+                // A disabled field must be as harmless to `run` as an enabled
+                // one: it is skipped, not turned into a zero-delay ticker.
+                FieldConfig {
+                    name: "UNIT_NAME".to_owned(),
+                    interval: None,
+                },
+            ],
         },
         http: sismatic_server::configuration::HttpConfig {
             host: "127.0.0.1".to_owned(),

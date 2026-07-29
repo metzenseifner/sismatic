@@ -14,4 +14,4 @@ pub mod dto;
 #[cfg(feature = "driver")]
 mod driver;
 #[cfg(feature = "driver")]
-pub use driver::{SyncConfig, SyncHandle, spawn};
+pub use driver::{FieldSchedule, SyncConfig, SyncHandle, spawn};
