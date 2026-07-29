@@ -1,0 +1,13 @@
+# Fixture for tests/server_checks.rs. `devices_config_path` is relative, so it
+# only resolves if paths are anchored to this file's directory rather than to
+# the test process's working directory.
+devices_config_path: devices.toml
+
+sync:
+  interval_secs: 5
+  fields:
+    - RUNNING_STATE
+
+http:
+  host: 0.0.0.0
+  port: 9000

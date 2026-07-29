@@ -114,6 +114,19 @@ exceptions = [
   # sources under a license soup that includes MIT-0. Keep that rare license
   # scoped to just this crate rather than adding it to the global allow list.
   { allow = ["MIT-0"], crate = "aws-lc-sys" },
+  #
+  # The next two arrive through the `config` crate, which sismatic-server uses
+  # to read `configuration.yaml`. Both licenses are permissive; they are scoped
+  # per-crate rather than globally allowed so a future dependency cannot slip in
+  # under them unnoticed.
+  #
+  # Zlib: OSI-approved and FSF-libre, as permissive as MIT.
+  # config -> yaml-rust2 -> hashlink -> hashbrown -> foldhash.
+  { allow = ["Zlib"], crate = "foldhash" },
+  # CC0-1.0: a public-domain dedication. Build-time only — it is reached solely
+  # through a proc-macro, so nothing it covers ships in the binary.
+  # config -> rust-ini -> ordered-multimap -> dlv-list -> const-random(-macro).
+  { allow = ["CC0-1.0"], crate = "tiny-keccak" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

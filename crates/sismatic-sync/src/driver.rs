@@ -42,6 +42,7 @@ use crate::dto;
 /// `fields` are canonical query names as [`Query`] spells them (e.g.
 /// `"RUNNING_STATE"`) — the same string that lands in [`Reading::field`], which
 /// is why it need not be mirrored as a typed enum here.
+#[derive(Debug)]
 pub struct SyncConfig {
     /// Delay between polls of a given field on a given device.
     pub interval: Duration,

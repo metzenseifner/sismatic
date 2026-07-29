@@ -4,10 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+path = "src/main.rs"
+name = "sismatic-server"
+
 [dependencies]
 anyhow.workspace = true
+config = "0.15.25"
+serde.workspace = true
+# `toml`/`yaml` give the composition root core's extension-dispatching
+# `config::load`, so `devices_config_path` may name either format.
 sismatic-core = { version = "0.2.20", path = "../sismatic-core", features = [
   "ssh",
+  "toml",
+  "yaml",
 ] }
 sismatic-store = { version = "0.2.20", path = "../sismatic-store" }
 sismatic-store-memory = { version = "0.2.20", path = "../sismatic-store-memory" }

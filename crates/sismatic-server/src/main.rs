@@ -1,46 +1,36 @@
-//! The composition root: construct the shared store handle once and start both
-//! sides of the system on one Tokio runtime — the `sync` write-side task set
-//! ([`sismatic_sync::spawn`]) and, eventually, the read-side http-api.
+//! The composition root: read the two config files, then hand the resolved
+//! values to [`sismatic_server::run`], which starts both sides of the system on
+//! one Tokio runtime — the `sync` write-side task set ([`sismatic_sync::spawn`])
+//! and, eventually, the read-side http-api.
+//!
+//! Every impure step lives here: the server config read, and the device config
+//! read that `devices_config_path` names. Both are one line each, which is the
+//! point — the logic they feed is pure and unit-tested elsewhere.
 
-use std::sync::Arc;
-use std::time::Duration;
+use sismatic_core::devices::config;
+use sismatic_server::configuration::get_configuration;
+use sismatic_server::run;
 
-use sismatic_core::devices::registry::Registry;
-use sismatic_core::devices::transport::ssh::RusshConnector;
-use sismatic_store::{DynReadStore, DynWriteStore};
-use sismatic_store_memory::MemoryStore;
-use sismatic_sync::SyncConfig;
+/// Server config used when `SISMATIC_SERVER_CONFIG` names none.
+const DEFAULT_CONFIG_PATH: &str = "configuration.yaml";
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // One store, two capability-narrowed views: the write side may only write,
-    // the read side may only read.
-    let store = MemoryStore::default();
-    let _read: DynReadStore = Arc::new(store.clone());
-    let write: DynWriteStore = Arc::new(store);
+async fn main() -> Result<(), std::io::Error> {
+    let config_path =
+        std::env::var("SISMATIC_SERVER_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_owned());
 
-    // TODO: load device/group configs from the server config instead of the
-    // empty registry below.
-    let registry = Arc::new(Registry::build(
-        Vec::new(),
-        Vec::new(),
-        Arc::new(RusshConnector),
-    ));
+    let cfg = get_configuration(&config_path)
+        .unwrap_or_else(|e| panic!("reading server config {config_path}: {e}"));
 
-    // TODO: source interval/fields from the server config (`cfg.sync`).
-    let sync = sismatic_sync::spawn(
-        registry,
-        write,
-        SyncConfig {
-            interval: Duration::from_secs(30),
-            fields: vec!["RUNNING_STATE".to_string()],
-        },
-    );
+    let devices = config::load(&cfg.devices_config_path).unwrap_or_else(|e| {
+        panic!(
+            "loading devices config {}: {e}",
+            cfg.devices_config_path.display()
+        )
+    });
 
-    // Until the http-api lands and holds the runtime, block on Ctrl-C.
-    // sismatic_http_api::serve(_read, cfg.http).await?; // gets a ReadStore, never a WriteStore
-    tokio::signal::ctrl_c().await?;
-
-    sync.shutdown().await;
-    Ok(())
+    run(cfg, devices, async {
+        tokio::signal::ctrl_c().await.expect("ctrl-c handler")
+    })
+    .await
 }
