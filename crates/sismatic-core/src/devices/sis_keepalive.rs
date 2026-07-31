@@ -17,6 +17,13 @@
 //!   shorter [`eager_retry`] interval, re-attempting the SSH handshake until the
 //!   device answers and the task flips back to warm.
 //!
+//! Every probe goes through [`Device::probe`] rather than [`Device::run`], so it
+//! dials even when the device's cold gate is shut. That is what keeps the two
+//! mechanisms complementary instead of competing: for an eager device this task
+//! is the *only* thing that dials while the device is down — on the
+//! [`eager_retry`] cadence the operator set — and the gate spares every other
+//! caller from repeating the attempt in between.
+//!
 //! The tasks are best-effort: a failed warm-up, SIS keepalive, or retry is
 //! logged, never fatal, and the device's own self-healing reconnect still covers
 //! the next real command in between. Non-eager devices get no task and stay fully
@@ -115,7 +122,10 @@ async fn keep_warm(device: Arc<Device>) {
         // `sis_keepalive` before its next keepalive tick, a cold one waits the
         // shorter `eager_retry` before trying to reconnect. Either wait being unset
         // ends the task, leaving the device to self-heal on its next real command.
-        let (wait, next_trigger) = match device.run(&query).await {
+        // `probe`, not `run`: this task *is* the retry mechanism for a cold
+        // device, so it dials through the cold gate rather than being held off
+        // by a window its own success is what closes. See `Device::probe`.
+        let (wait, next_trigger) = match device.probe(&query).await {
             Ok(_) => {
                 debug!(warm = true, trigger, "device warm");
                 (sis_keepalive, "periodic")
@@ -165,6 +175,9 @@ mod tests {
             eager: true,
             sis_keepalive,
             eager_retry,
+            // Gated hard, to prove these tasks dial *through* the gate: with
+            // `probe` swapped back to `run`, the cold-side tests below stall.
+            cold_backoff: Some(Duration::from_secs(3600)),
         }
     }
 

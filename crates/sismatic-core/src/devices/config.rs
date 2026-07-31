@@ -13,6 +13,7 @@
 //! eager = true       # connect to every device at startup and keep it warm
 //! sis_keepalive_secs = 120  # re-issue `Q` this often while warm; 0 disables the SIS keepalive
 //! eager_retry_secs = 30     # while eager but cold, retry connecting this often; 0 disables retry
+//! cold_backoff_secs = 30    # after a failed dial, refuse new ones this long; 0 disables the gate
 //!
 //! [[device]]
 //! id = "atrium-101"
@@ -70,6 +71,17 @@ const DEFAULT_SIS_KEEPALIVE_SECS: u64 = 120;
 /// dropped). Kept well above `connect_secs` so a genuinely unreachable device is
 /// retried steadily without hammering it.
 const DEFAULT_EAGER_RETRY_SECS: u64 = 30;
+
+/// How long a device stays gated *cold* after a dial fails, when `cold_backoff_secs`
+/// is left unset. This is what stops every caller of a down device from paying its
+/// own `connect_secs` to rediscover the same fact: the first failed dial arms the
+/// gate and everyone after it fails instantly until the window closes.
+///
+/// Matched to [`DEFAULT_EAGER_RETRY_SECS`] on purpose — both answer "how long is a
+/// failed dial worth believing?" — and it bounds how late a recovered device is
+/// noticed by a *lazy* device's poll loop, since for an eager one the keepalive
+/// supervisor re-dials through the gate on its own cadence.
+const DEFAULT_COLD_BACKOFF_SECS: u64 = 30;
 
 /// The SMP's SIS-over-SSH port, used when neither the device nor `[defaults]` names one.
 const DEFAULT_PORT: u16 = 22023;
@@ -166,6 +178,30 @@ pub struct DeviceConfig {
     ///
     /// [`eager`]: DeviceConfig::eager
     pub eager_retry: Option<Duration>,
+    /// How long to refuse new connection attempts after one has failed. A device
+    /// holds at most one connection, so without this every caller that wants it —
+    /// each of a fleet poller's per-field loops, say — pays its own
+    /// [`connect_timeout`] to rediscover that the device is down. The first failed
+    /// dial arms the gate; callers arriving inside the window get
+    /// [`DeviceError::Cold`] immediately instead, and the next dial after it closes
+    /// re-tests the device for everyone.
+    ///
+    /// `None` means never gate (a bare `cold_backoff_secs = 0`): every call dials,
+    /// which is the behavior from before this field existed.
+    ///
+    /// Unlike [`sis_keepalive`] and [`eager_retry`] this applies to *every* device,
+    /// eager or not — it is a property of the connection, not of the keep-warm
+    /// intent. [`SisKeepalive`] deliberately dials *through* the gate (see
+    /// [`Device::probe`]), so an eager device's re-dial cadence stays
+    /// [`eager_retry`] and the two never fight.
+    ///
+    /// [`connect_timeout`]: DeviceConfig::connect_timeout
+    /// [`DeviceError::Cold`]: super::device::DeviceError::Cold
+    /// [`Device::probe`]: super::device::Device::probe
+    /// [`SisKeepalive`]: super::sis_keepalive::SisKeepalive
+    /// [`sis_keepalive`]: DeviceConfig::sis_keepalive
+    /// [`eager_retry`]: DeviceConfig::eager_retry
+    pub cold_backoff: Option<Duration>,
 }
 
 /// A resolved device group: a name plus the ids of its member devices, every
@@ -368,6 +404,14 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         .unwrap_or(DEFAULT_EAGER_RETRY_SECS);
     let eager_retry = (eager_retry_secs > 0).then(|| Duration::from_secs(eager_retry_secs));
 
+    // Unlike the three above, this one is not scoped to `eager`: the cold gate
+    // guards the connection itself, so a lazy device wants it just as much.
+    let cold_backoff_secs = device
+        .cold_backoff_secs
+        .or(defaults.cold_backoff_secs)
+        .unwrap_or(DEFAULT_COLD_BACKOFF_SECS);
+    let cold_backoff = (cold_backoff_secs > 0).then(|| Duration::from_secs(cold_backoff_secs));
+
     Ok(DeviceConfig {
         host: device.host,
         port,
@@ -378,6 +422,7 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         eager,
         sis_keepalive,
         eager_retry,
+        cold_backoff,
         id,
     })
 }
@@ -415,6 +460,7 @@ struct Defaults {
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
     eager_retry_secs: Option<u64>,
+    cold_backoff_secs: Option<u64>,
 }
 
 /// A device as written: `id` and `host` are required, the rest may inherit.
@@ -431,6 +477,7 @@ struct RawDevice {
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
     eager_retry_secs: Option<u64>,
+    cold_backoff_secs: Option<u64>,
 }
 
 /// A group as written: an `id` and the ids of the member devices. Nothing here
@@ -709,6 +756,59 @@ host = "10.0.0.5"
     }
 
     #[test]
+    fn cold_backoff_applies_to_a_lazy_device_too() {
+        // The gate guards the connection, not the keep-warm intent, so a device
+        // that never mentions `eager` still gets one.
+        let atrium = &from_toml_str(USER_EXAMPLE).unwrap().devices[0];
+        assert!(!atrium.eager);
+        assert_eq!(atrium.cold_backoff, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn cold_backoff_inherits_from_defaults_and_overrides_per_device() {
+        let text = r#"
+[defaults]
+username = "admin"
+password = "extron"
+cold_backoff_secs = 45
+
+[[device]]
+id = "inherits"
+host = "10.0.0.5"
+
+[[device]]
+id = "overrides"
+host = "10.0.0.6"
+cold_backoff_secs = 10
+"#;
+        let devices = from_toml_str(text).unwrap().devices;
+        assert_eq!(
+            get(&devices, "inherits").cold_backoff,
+            Some(Duration::from_secs(45))
+        );
+        assert_eq!(
+            get(&devices, "overrides").cold_backoff,
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn cold_backoff_secs_zero_disables_the_gate() {
+        // The opt-out: every caller dials, as before the gate existed.
+        let text = r#"
+[defaults]
+username = "admin"
+password = "extron"
+cold_backoff_secs = 0
+
+[[device]]
+id = "always-dials"
+host = "10.0.0.5"
+"#;
+        assert_eq!(from_toml_str(text).unwrap().devices[0].cold_backoff, None);
+    }
+
+    #[test]
     fn eager_and_sis_keepalive_inherit_from_defaults() {
         let text = r#"
 [defaults]
@@ -910,6 +1010,7 @@ mod resolve_config_tests {
                 eager: None,
                 sis_keepalive_secs: None,
                 eager_retry_secs: None,
+                cold_backoff_secs: None,
             },
             devices: vec![RawDevice {
                 id: "bare".into(),
@@ -922,6 +1023,7 @@ mod resolve_config_tests {
                 eager: None,
                 sis_keepalive_secs: None,
                 eager_retry_secs: None,
+                cold_backoff_secs: None,
             }],
             groups: Vec::new(),
         };
@@ -948,6 +1050,7 @@ mod resolve_config_tests {
                     eager: None,
                     sis_keepalive_secs: None,
                     eager_retry_secs: None,
+                    cold_backoff_secs: None,
                 },
                 RawDevice {
                     id: "dup".into(),
@@ -960,6 +1063,7 @@ mod resolve_config_tests {
                     eager: None,
                     sis_keepalive_secs: None,
                     eager_retry_secs: None,
+                    cold_backoff_secs: None,
                 },
             ],
             groups: Vec::new(),

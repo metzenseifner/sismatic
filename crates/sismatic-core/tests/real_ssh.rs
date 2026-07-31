@@ -50,6 +50,7 @@ async fn queries_firmware_over_real_ssh() {
         eager: false,
         sis_keepalive: None,
         eager_retry: None,
+        cold_backoff: None,
     }];
     let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
     let device = registry.device("real").expect("device present");

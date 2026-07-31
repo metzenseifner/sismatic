@@ -29,6 +29,7 @@ command_secs = 3
 eager = true # eagerly establish connections to pay the cost of the full SSH handshake up front (default: false; connect upon first instruction)
 sis_keepalive_secs = 120 # while warm, interval at which to send a probe instruction to SMPs to keep the connection open; SMPs' idle timer is 5 minutes by default. 0 disables. (default: 120)
 eager_retry_secs = 30 # while eager but cold, interval at which to retry connecting to a device that is unreachable or has dropped. 0 disables (give up after the first failed connect). (default: 30)
+cold_backoff_secs = 30 # after a dial fails, how long before another is attempted; callers in between fail instantly instead of each paying connect_secs. 0 disables. (default: 30)
 
 [[device]]
 id = "atrium-101"
@@ -105,3 +106,20 @@ that drops later — would otherwise stay cold until the next real command. The
 background task re-attempts the SSH handshake on this interval until the device
 answers again and returns to the warm keepalive cadence. Set it to `0` to restore
 the old behavior of giving up after the first failed connect.
+
+Because a device holds a single connection, every caller that wants an
+unreachable device would otherwise pay its own `connect_secs` to rediscover the
+same fact — and pay it serially, since they queue behind one another. A fleet
+poller running one loop per (device, field) turns a single dead SMP into dozens
+of full connect timeouts per round. `cold_backoff_secs` stops that: a failed dial
+is remembered, and callers arriving before the window closes fail immediately
+instead of dialing. One dial per window tests the device on everyone's behalf.
+This applies to every device, eager or not, since it is a property of the
+connection rather than of the keep-warm intent; set it to `0` to disable.
+
+The two settings are complementary rather than overlapping. For an eager device
+the keepalive task deliberately dials *through* the backoff window — it is the
+component whose job is re-testing a device that is down — so the re-dial cadence
+stays exactly `eager_retry_secs`, and `cold_backoff_secs` only holds off everyone
+else in between. For a lazy device there is no such task, so the window closing
+is what lets the next command re-test the device.

@@ -6,6 +6,12 @@
 //!   `sismatic-core` and persists what it reads through a [`DynWriteStore`];
 //! - the **read side**, [`sismatic_http_api::run`], which answers HTTP requests
 //!   about what was persisted, through a [`DynReadStore`].
+//!
+//! Alongside the write side it runs [`SisKeepalive`], core's keep-warm
+//! supervisor, which opens and holds a connection to every device the devices
+//! file marks `eager`. Without it those settings resolve into [`Resolved`] and
+//! are then read by nobody, and the first poll of every field races to open the
+//! same connection.
 pub mod configuration;
 pub mod telemetry;
 
@@ -14,6 +20,7 @@ use std::sync::Arc;
 
 use sismatic_core::devices::config::Resolved;
 use sismatic_core::devices::registry::Registry;
+use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_http_api::ServerHandle;
 use sismatic_store::{DynReadStore, DynWriteStore};
@@ -49,6 +56,18 @@ pub async fn run(
     let server = sismatic_http_api::run(listener, read)?;
     let handle = server.handle();
 
+    // Started *before* the poll loops so that for an eager device the first
+    // connection is opened by the one task whose job that is, rather than raced
+    // for by every field loop at once. It is not a barrier — sync does not wait
+    // on it — because it must not be one: a device that is down at startup would
+    // then never be polled at all. The two compose through the cold gate instead
+    // (see `Device::probe`): this supervisor is what re-dials a down device, and
+    // the gate is what stops the poll loops from doing so in between.
+    //
+    // The guard must outlive the loops it warms connections for — dropping it
+    // aborts every task — so it is bound here and dropped explicitly at shutdown.
+    let keepalive = SisKeepalive::spawn(&tokio::runtime::Handle::current(), registry.devices());
+
     let sync = sismatic_sync::spawn(
         registry,
         write,
@@ -76,6 +95,11 @@ pub async fn run(
         }
         () = shutdown => stop_http(handle, serving).await,
     };
+
+    // Aborted before the drain, not after: keeping connections warm is pointless
+    // once we are on the way out, and a keepalive probe starting now would only
+    // add an SSH exchange for the drain below to wait behind.
+    drop(keepalive);
 
     // Instrumented by the driver itself (`sync_shutdown`), which is where the
     // number of loops being drained is known.

@@ -80,8 +80,8 @@
 //!
 //! `interval_secs: 0` means *never*: the field stays listed but no poll loop is
 //! started for it, which is how a field is turned off without deleting it from
-//! the config. That is the same sentinel core spells for `sis_keepalive_secs`
-//! and `eager_retry_secs`, decoded the same way — [`resolve_config`] turns it
+//! the config. That is the same sentinel core spells for `sis_keepalive_secs`,
+//! `eager_retry_secs`, and `cold_backoff_secs`, decoded the same way — [`resolve_config`] turns it
 //! into `None` here, so no consumer downstream has to know that `0` is special
 //! (and a zero [`Duration`], which `tokio::time::interval` panics on, cannot be
 //! constructed at all). Because it resolves like any other value, `0` works at
@@ -372,7 +372,7 @@ fn interval(secs: u64) -> Option<Duration> {
 /// Expand `"*"` and fold per-field overrides into one ordered, duplicate-free
 /// schedule.
 ///
-/// Two passes, because the wildcard has to honour an override that appears
+/// Two passes, because the wildcard has to honor an override that appears
 /// *after* it as readily as one that appears before: the first pass settles what
 /// each explicitly-named field resolves to, and only then does the second pass
 /// lay fields out in order, expanding the wildcard into whatever it did not
