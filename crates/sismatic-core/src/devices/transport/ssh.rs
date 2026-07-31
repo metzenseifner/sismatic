@@ -103,6 +103,7 @@ pub struct RusshConnector;
 impl Connector for RusshConnector {
     #[instrument(
     name = "Connecting to get an SSH transport",
+    level = "debug";
     skip_all,
     fields(
         connection_id = %Uuid::new_v4(),
