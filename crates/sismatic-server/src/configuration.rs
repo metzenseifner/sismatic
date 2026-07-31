@@ -19,6 +19,17 @@
 //! 2. the `[defaults]` table,
 //! 3. the built-in constant.
 //!
+//! Every one of those keys can also be written from the environment, which is
+//! merged over the file *before* the fallback above runs — see
+//! [the environment](#the-environment).
+//!
+//! `host` and `port` add one more layer above all three, but *outside* the
+//! resolver: the composition root folds `--host`/`--port` in afterwards via
+//! [`HttpConfig::with_overrides`]. Keeping it a separate step is what lets
+//! [`resolve_config`] stay a function of the file alone — the command line is
+//! not part of the file, and pretending otherwise would put an `Option` from
+//! `argv` into the middle of a pure resolver.
+//!
 //! `interval_secs` adds a fourth, still-more-specific layer at the top: an entry
 //! in `sync.fields` may pin its own. That is what makes a mixed schedule
 //! expressible — `RUNNING_STATE` is worth polling every few seconds, `FIRMWARE`
@@ -80,6 +91,75 @@
 //! Relative paths resolve against the *config file's* directory rather than the
 //! process's working directory, so a config and the devices file it names travel
 //! together and no test (or systemd unit) has to care where it was launched from.
+//! That holds for a path written in the environment too: the value lands in the
+//! same key, so it is anchored the same way, and an environment that wants to
+//! escape the config's directory says so with an absolute path.
+//!
+//! # The environment
+//!
+//! Every key above is also addressable from the environment under a name derived
+//! mechanically from its path: `SISMATIC_SERVER__`, then the path upper-cased
+//! with `__` between segments.
+//!
+//! | key | variable |
+//! | --- | --- |
+//! | *(the file to read)*  | `SISMATIC_SERVER__CONFIG` |
+//! | `devices_config_path` | `SISMATIC_SERVER__DEVICES_CONFIG_PATH` |
+//! | `sync.interval_secs`  | `SISMATIC_SERVER__SYNC__INTERVAL_SECS` |
+//! | `sync.fields`         | `SISMATIC_SERVER__SYNC__FIELDS` |
+//! | `http.host`           | `SISMATIC_SERVER__HTTP__HOST` |
+//! | `http.port`           | `SISMATIC_SERVER__HTTP__PORT` |
+//! | `defaults.port`       | `SISMATIC_SERVER__DEFAULTS__PORT` |
+//!
+//! There is no list of blessed variable names anywhere in this crate, and that
+//! is the point: the name *is* the key path, so a key added to
+//! [`RawServerConfig`] is settable from the environment the day it exists, and
+//! an operator who can read the config file can derive the variable without
+//! consulting anything. `deny_unknown_fields` reaches the environment for the
+//! same reason it reaches the file — `SISMATIC_SERVER__HTTP__PROT` fails at
+//! startup naming `prot`, rather than leaving a port that silently stayed 8080.
+//!
+//! The prefix names this binary rather than the project, so a sibling process
+//! that grows its own settings takes its own namespace (`SISMATIC_WEB__…`) and
+//! one deployment's environment can configure several of them without a
+//! variable meaning two things.
+//!
+//! The environment is a second *writer* of the one document, not a tier stacked
+//! on top of the whole document. It is merged over the file and then the
+//! layering above resolves the result, so `SISMATIC_SERVER__DEFAULTS__HOST`
+//! still loses to a file that sets `http.host` — exactly as a `[defaults]` entry
+//! in the file would. Address the key you would have written, not a vaguer one.
+//!
+//! Three consequences of that merge worth stating:
+//!
+//! - Scalars and lists overwrite; tables merge. `SISMATIC_SERVER__HTTP__PORT`
+//!   leaves a `host` in the same `[http]` table alone, but
+//!   `SISMATIC_SERVER__SYNC__FIELDS` *replaces* the file's field list rather
+//!   than appending to it.
+//! - A field list from the environment is comma-separated bare names —
+//!   `SISMATIC_SERVER__SYNC__FIELDS=RUNNING_STATE,FIRMWARE`, or `'*'` for the
+//!   whole catalog — each inheriting the resolved default. The table spelling
+//!   that pins a per-field interval has no environment form; a schedule that
+//!   mixed is a schedule that belongs in the file.
+//! - An empty value reads as unset, not as an empty string. A shell expanding an
+//!   unset variable and a systemd `Environment=SISMATIC_SERVER__HTTP__HOST=`
+//!   both produce one, and neither means "the host is now nothing".
+//!
+//! ## `SISMATIC_SERVER__CONFIG`, the one that is not a key
+//!
+//! [`CONFIG_PATH_ENV`] is spelled like the rest because an operator should not
+//! have to learn a second rule, but it is the one variable that names *which*
+//! document to read rather than a value inside one. It is therefore answered by
+//! the composition root before this module is reached (see `main`), and
+//! [`env_source`] drops it from the layer it contributes here.
+//!
+//! That drop is load-bearing, not tidiness. Left in, `deny_unknown_fields` would
+//! reject `config` as an unknown key — the very variable that chose the file
+//! would abort the read of it. Dropping it in the *source* rather than admitting
+//! a dead `config` field to [`RawServerConfig`] is what keeps the rejection
+//! intact where it still means something: `config: other.yaml` written in a
+//! config file is a startup error naming the key, because a document that names
+//! another document has said nothing.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -101,18 +181,129 @@ const ALL_FIELDS: &str = "*";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
 
-/// Read a server config file and resolve it. The only step that touches the
-/// filesystem; everything after the read is a pure function of the bytes.
+/// Namespace for every variable this binary reads. Names the *binary*, not the
+/// project, so a sibling process configured from the same environment cannot
+/// collide with it — see [the module docs](self#the-environment).
+const ENV_PREFIX: &str = "SISMATIC_SERVER";
+/// What separates one key-path segment from the next, *and* the prefix from the
+/// path: the `config` crate falls back to this for `prefix_separator`, so one
+/// choice fixes both and `SISMATIC_SERVER__` becomes the whole claimed
+/// namespace.
+const ENV_SEPARATOR: &str = "__";
+/// What separates the elements of a list-valued key such as `sync.fields`.
+const ENV_LIST_SEPARATOR: &str = ",";
+/// The key [`CONFIG_PATH_ENV`] collapses to once the prefix is stripped, and so
+/// the one [`env_source`] must drop before the document is deserialized.
+const ENV_CONFIG_PATH_KEY: &str = "config";
+
+/// The variable naming which config file to read.
+///
+/// Public because the composition root has to answer it *before* there is a
+/// document to resolve, and it must spell the name identically to the source
+/// that excludes it. `env_var_names_agree` below pins the two together.
+pub const CONFIG_PATH_ENV: &str = "SISMATIC_SERVER__CONFIG";
+
+/// Read a server config file, merge the environment over it, and resolve the
+/// result. The only step that touches the filesystem; everything after the read
+/// is a pure function of the bytes and the variables.
 ///
 /// The format is inferred from the extension by the `config` crate, and
-/// relative paths inside the file are anchored to the file's own directory.
+/// relative paths — whichever layer wrote them — are anchored to the file's own
+/// directory.
 pub fn get_configuration(path: impl AsRef<Path>) -> Result<ServerConfig, ConfigError> {
+    get_configuration_with_env(path, env_source())
+}
+
+/// [`get_configuration`] against an explicit environment source.
+///
+/// The seam exists because the environment is the one input a test cannot set
+/// safely: `std::env::set_var` is `unsafe` in edition 2024 precisely because
+/// cargo runs tests on threads that share one environment. Passing
+/// `env_source().source(Some(vars))` resolves against a literal map instead, so
+/// a test states the variables it means and no other test can see them.
+pub fn get_configuration_with_env(
+    path: impl AsRef<Path>,
+    env: EnvSource,
+) -> Result<ServerConfig, ConfigError> {
     let path = path.as_ref();
-    let raw: RawServerConfig = config::Config::builder()
-        .add_source(config::File::from(path))
+    Ok(resolve_config(
+        base_dir(path),
+        raw_config(config::File::from(path), env)?,
+    ))
+}
+
+/// The environment as a config source: every key of [`RawServerConfig`],
+/// addressable as `SISMATIC_SERVER__` + its path.
+pub fn env_source() -> EnvSource {
+    EnvSource(
+        config::Environment::with_prefix(ENV_PREFIX)
+            .separator(ENV_SEPARATOR)
+            // An unset shell variable expands to the empty string, and a systemd
+            // unit writes one for `Environment=SISMATIC_SERVER__HTTP__HOST=`.
+            // Neither is a request for an empty host, so both read as "not set".
+            .ignore_empty(true)
+            // Environment values are all strings. `try_parsing` types the ones
+            // that are obviously numbers, and — the reason it is not optional
+            // here — it is what gates `list_separator` at all.
+            .try_parsing(true)
+            .list_separator(ENV_LIST_SEPARATOR)
+            // Named individually rather than left to `list_separator` alone,
+            // because a bare `list_separator` would split *every* variable: a
+            // host is not a one-element list, and `devices_config_path` may not
+            // contain a comma just because `fields` does.
+            .with_list_parse_key("sync.fields")
+            .with_list_parse_key("defaults.fields"),
+    )
+}
+
+/// The `SISMATIC_SERVER__` environment, restricted to the keys that are part of
+/// the config document.
+///
+/// Exactly one variable in the namespace is not: [`CONFIG_PATH_ENV`], which
+/// names the document instead of a value in it and is answered by the
+/// composition root. `config`'s [`Environment`](config::Environment) has no
+/// exclusion list, so the restriction is this wrapper — a source in its own
+/// right, which keeps the loader a plain composition of two sources whose order
+/// is their precedence.
+#[derive(Debug, Clone)]
+pub struct EnvSource(config::Environment);
+
+impl EnvSource {
+    /// Read `source` instead of the process's environment, prefix filtering and
+    /// all. The seam tests use — see [`get_configuration_with_env`].
+    #[must_use]
+    pub fn source(self, source: Option<config::Map<String, String>>) -> Self {
+        Self(self.0.source(source))
+    }
+}
+
+impl config::Source for EnvSource {
+    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn collect(&self) -> Result<config::Map<String, config::Value>, ConfigError> {
+        let mut keys = self.0.collect()?;
+        keys.remove(ENV_CONFIG_PATH_KEY);
+        Ok(keys)
+    }
+}
+
+/// Merge the two writers of the config document into one parsed
+/// [`RawServerConfig`]. Order is the precedence: the environment is added last,
+/// so it wins at any key it names and is silent at every key it does not.
+///
+/// Generic over the file source so the unit tests below can feed config *text*
+/// through exactly this path rather than a near-copy of it.
+fn raw_config(
+    file: impl config::Source + Send + Sync + 'static,
+    env: EnvSource,
+) -> Result<RawServerConfig, ConfigError> {
+    config::Config::builder()
+        .add_source(file)
+        .add_source(env)
         .build()?
-        .try_deserialize()?;
-    Ok(resolve_config(base_dir(path), raw))
+        .try_deserialize()
 }
 
 /// The directory a config file's relative paths resolve against. A bare
@@ -397,23 +588,63 @@ pub struct HttpConfig {
     pub port: u16,
 }
 
+impl HttpConfig {
+    /// Fold command-line overrides in above whatever the file resolved to.
+    ///
+    /// `None` means *the caller named nothing*, so the resolved value stands —
+    /// which is why the composition root's flags are `Option`, not flags with
+    /// clap-side defaults. A clap `default_value` would arrive here
+    /// indistinguishable from a value the operator typed, and would therefore
+    /// silently outrank the config file every time.
+    ///
+    /// Consumes and returns rather than mutating in place: a [`ServerConfig`] is
+    /// finished once the composition root is done with it, and there is no
+    /// second moment at which overriding would be legitimate.
+    pub fn with_overrides(self, host: Option<String>, port: Option<u16>) -> Self {
+        Self {
+            host: host.unwrap_or(self.host),
+            port: port.unwrap_or(self.port),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Parse config *text* rather than a file: these tests exercise the same
-    /// serde surface the real loader uses, with no filesystem involved.
+    /// Parse config *text* with a stated environment rather than a file: these
+    /// tests exercise the same merge and the same serde surface the real loader
+    /// uses, with no filesystem and no process environment involved.
+    ///
+    /// `vars` is spelled the way an operator would spell it, `SISMATIC_SERVER__` and
+    /// all, because [`env_source`] filters an injected map by prefix exactly as
+    /// it filters the real environment — so a test that gets the prefix wrong
+    /// fails the same way a deployment would.
+    fn try_raw(text: &str, vars: &[(&str, &str)]) -> Result<RawServerConfig, ConfigError> {
+        let vars = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        raw_config(
+            config::File::from_str(text, config::FileFormat::Yaml),
+            env_source().source(Some(vars)),
+        )
+    }
+
     fn raw(text: &str) -> RawServerConfig {
-        config::Config::builder()
-            .add_source(config::File::from_str(text, config::FileFormat::Yaml))
-            .build()
-            .expect("building config")
-            .try_deserialize()
-            .expect("deserializing config")
+        try_raw(text, &[]).expect("building config")
     }
 
     fn resolve(base: &str, text: &str) -> ServerConfig {
         resolve_config(Path::new(base), raw(text))
+    }
+
+    /// [`resolve`] with an environment layered over the text.
+    fn resolve_env(base: &str, text: &str, vars: &[(&str, &str)]) -> ServerConfig {
+        resolve_config(
+            Path::new(base),
+            try_raw(text, vars).expect("building config"),
+        )
     }
 
     /// `(name, secs)` pairs — `None` being *never* — the shape assertions about
@@ -760,18 +991,272 @@ mod tests {
     }
 
     #[test]
+    fn a_command_line_override_beats_every_layer_of_the_file() {
+        let cfg = resolve("", "defaults:\n  port: 9999\nhttp:\n  host: 0.0.0.0\n");
+        let http = cfg.http.with_overrides(Some("::1".to_owned()), Some(3000));
+        assert_eq!(http.host, "::1");
+        assert_eq!(http.port, 3000);
+    }
+
+    #[test]
+    fn an_unnamed_override_leaves_the_resolved_value_alone() {
+        // The half-named case is the one worth pinning: `--port` must not drag
+        // the built-in host along behind it and clobber what the file said.
+        let cfg = resolve("", "http:\n  host: 0.0.0.0\n  port: 9999\n");
+        let http = cfg.http.with_overrides(None, Some(3000));
+        assert_eq!(http.host, "0.0.0.0");
+        assert_eq!(http.port, 3000);
+    }
+
+    #[test]
+    fn overriding_nothing_is_the_identity() {
+        let cfg = resolve("", "http:\n  host: 0.0.0.0\n  port: 9999\n");
+        assert_eq!(cfg.http.clone().with_overrides(None, None), cfg.http);
+    }
+
+    #[test]
+    fn an_environment_variable_beats_the_file_at_the_key_it_names() {
+        let cfg = resolve_env(
+            "",
+            "http:\n  host: 0.0.0.0\n  port: 9999\n",
+            &[("SISMATIC_SERVER__HTTP__PORT", "1234")],
+        );
+        assert_eq!(cfg.http.port, 1234);
+        // ...and says nothing about the key beside it: the two live in one
+        // table, and tables merge rather than overwrite.
+        assert_eq!(cfg.http.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn every_section_is_reachable_by_its_key_path() {
+        // The property that makes the scheme worth adopting: one derivation rule
+        // — `SISMATIC_SERVER__` + the path, upper-cased — reaches a top-level key, a
+        // nested one, and the `[defaults]` table alike, with nothing per-key
+        // written down anywhere in this crate.
+        let cfg = resolve_env(
+            "",
+            "{}",
+            &[
+                ("SISMATIC_SERVER__DEVICES_CONFIG_PATH", "/srv/pool.toml"),
+                ("SISMATIC_SERVER__SYNC__INTERVAL_SECS", "5"),
+                ("SISMATIC_SERVER__HTTP__HOST", "0.0.0.0"),
+                ("SISMATIC_SERVER__DEFAULTS__PORT", "9000"),
+                // `[defaults]` takes the same field spelling `[sync]` does, so
+                // it needs the same list handling to be reachable at all.
+                ("SISMATIC_SERVER__DEFAULTS__FIELDS", "FIRMWARE,UNIT_NAME"),
+            ],
+        );
+        assert_eq!(cfg.devices_config_path, PathBuf::from("/srv/pool.toml"));
+        assert_eq!(cfg.sync.default_interval, Some(Duration::from_secs(5)));
+        assert_eq!(cfg.http.host, "0.0.0.0");
+        assert_eq!(cfg.http.port, 9000);
+        assert_eq!(
+            schedule(&cfg),
+            [("FIRMWARE", Some(5)), ("UNIT_NAME", Some(5))]
+        );
+    }
+
+    #[test]
+    fn the_environment_writes_the_document_rather_than_outranking_it() {
+        // The distinction the module docs insist on: `[defaults]` from the
+        // environment is still `[defaults]`, so it loses to an `[http]` the file
+        // states, exactly as it would if the file had written both.
+        let cfg = resolve_env(
+            "",
+            "http:\n  host: 0.0.0.0\n",
+            &[("SISMATIC_SERVER__DEFAULTS__HOST", "10.0.0.1")],
+        );
+        assert_eq!(cfg.http.host, "0.0.0.0");
+        // The same variable does reach a file that left the section unset.
+        let cfg = resolve_env("", "{}", &[("SISMATIC_SERVER__DEFAULTS__HOST", "10.0.0.1")]);
+        assert_eq!(cfg.http.host, "10.0.0.1");
+    }
+
+    #[test]
+    fn a_relative_path_from_the_environment_is_anchored_like_one_from_the_file() {
+        // It lands in the same key, so it resolves by the same rule — there is
+        // no second anchoring policy for values that arrived by another route.
+        let cfg = resolve_env(
+            "/etc/sismatic",
+            "{}",
+            &[("SISMATIC_SERVER__DEVICES_CONFIG_PATH", "devices.toml")],
+        );
+        assert_eq!(
+            cfg.devices_config_path,
+            PathBuf::from("/etc/sismatic/devices.toml")
+        );
+    }
+
+    #[test]
+    fn a_field_list_from_the_environment_replaces_the_file_s() {
+        // Lists overwrite where tables merge, so this is a replacement and not
+        // an append — the config below contributes no field at all.
+        let cfg = resolve_env(
+            "",
+            "sync:\n  interval_secs: 5\n  fields: [UNIT_NAME]\n",
+            &[("SISMATIC_SERVER__SYNC__FIELDS", "RUNNING_STATE,FIRMWARE")],
+        );
+        assert_eq!(
+            schedule(&cfg),
+            [("RUNNING_STATE", Some(5)), ("FIRMWARE", Some(5))]
+        );
+    }
+
+    #[test]
+    fn a_one_element_field_list_is_still_a_list() {
+        // The case a naive split would get wrong by producing a bare string,
+        // which `fields` could not accept at all.
+        let cfg = resolve_env("", "{}", &[("SISMATIC_SERVER__SYNC__FIELDS", "FIRMWARE")]);
+        assert_eq!(schedule(&cfg), [("FIRMWARE", Some(DEFAULT_INTERVAL_SECS))]);
+    }
+
+    #[test]
+    fn the_wildcard_survives_the_environment_intact() {
+        let cfg = resolve_env(
+            "",
+            "sync:\n  interval_secs: 300\n",
+            &[("SISMATIC_SERVER__SYNC__FIELDS", ALL_FIELDS)],
+        );
+        assert_eq!(cfg.sync.fields.len(), Query::ALL.len());
+        assert_eq!(interval_of(&cfg, "FIRMWARE"), Some(Some(300)));
+    }
+
+    #[test]
+    fn the_never_sentinel_survives_the_environment_intact() {
+        // `0` is decoded after the merge like any other value, so the
+        // environment inherits the sentinel without knowing about it.
+        let cfg = resolve_env(
+            "",
+            "sync:\n  interval_secs: 5\n  fields: [FIRMWARE]\n",
+            &[("SISMATIC_SERVER__SYNC__INTERVAL_SECS", "0")],
+        );
+        assert_eq!(cfg.sync.default_interval, None);
+        assert_eq!(schedule(&cfg), [("FIRMWARE", None)]);
+    }
+
+    #[test]
+    fn an_empty_variable_reads_as_unset_rather_than_as_an_empty_value() {
+        // What an unset shell expansion and a bare systemd `Environment=` both
+        // produce. Overriding a good host with `""` would fail at bind time,
+        // far from the cause.
+        let cfg = resolve_env(
+            "",
+            "http:\n  host: 0.0.0.0\n",
+            &[("SISMATIC_SERVER__HTTP__HOST", "")],
+        );
+        assert_eq!(cfg.http.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn env_var_names_agree() {
+        // The one name spelled twice: `CONFIG_PATH_ENV` is what the composition
+        // root reads, `ENV_CONFIG_PATH_KEY` is what this module drops, and they
+        // have to be the same variable. Derived here rather than concatenated at
+        // the definition so `CONFIG_PATH_ENV` stays a literal an operator can
+        // grep for.
+        assert_eq!(
+            CONFIG_PATH_ENV,
+            format!(
+                "{ENV_PREFIX}{ENV_SEPARATOR}{}",
+                ENV_CONFIG_PATH_KEY.to_uppercase()
+            )
+        );
+    }
+
+    #[test]
+    fn the_config_path_variable_is_not_a_document_key() {
+        // It shares the namespace with every other variable — that is the point
+        // of the naming — but it chose the file rather than saying anything
+        // about its contents. Left in the document it would be an unknown field,
+        // so the variable that picked the config would abort reading it.
+        let cfg = resolve_env(
+            "",
+            "http:\n  port: 9999\n",
+            &[(CONFIG_PATH_ENV, "/etc/sismatic/configuration.yaml")],
+        );
+        assert_eq!(cfg.http.port, 9999);
+    }
+
+    #[test]
+    fn a_config_key_written_in_the_file_is_still_rejected() {
+        // The other half of dropping it in the *source*: `config` never became a
+        // real field, so a document naming another document is still the typo it
+        // almost certainly is.
+        let err = try_raw("config: other.yaml\n", &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("config"),
+            "expected the unknown key in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_variable_is_left_alone() {
+        let cfg = resolve_env(
+            "",
+            "{}",
+            &[
+                ("PATH", "/usr/bin"),
+                ("HOME", "/root"),
+                // Including one that shares the prefix but not the separator:
+                // the namespace this source claims is `SISMATIC_SERVER__`, so a
+                // sibling binary's variables cannot leak into this document.
+                ("SISMATIC_WEB__HTTP__PORT", "1234"),
+            ],
+        );
+        assert_eq!(cfg.http.port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_misspelled_variable_is_rejected_by_name() {
+        // `deny_unknown_fields` reaches the environment exactly as it reaches
+        // the file, so a typo is a startup error rather than a setting that
+        // silently did nothing.
+        let err = try_raw("{}", &[("SISMATIC_SERVER__HTTP__PROT", "1234")]).unwrap_err();
+        assert!(
+            err.to_string().contains("prot"),
+            "expected the unknown key in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_variable_that_is_not_the_key_s_type_is_rejected() {
+        let err = try_raw("{}", &[("SISMATIC_SERVER__HTTP__PORT", "not-a-port")]).unwrap_err();
+        assert!(
+            err.to_string().contains("port"),
+            "expected the offending key in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_command_line_override_beats_the_environment_too() {
+        // The top of the whole stack: flag, then variable, then file, then
+        // built-in. The flag is folded in outside the resolver, so this is the
+        // test that the two mechanisms compose in the stated order.
+        let cfg = resolve_env(
+            "",
+            "http:\n  host: 0.0.0.0\n  port: 9999\n",
+            &[
+                ("SISMATIC_SERVER__HTTP__HOST", "10.0.0.1"),
+                ("SISMATIC_SERVER__HTTP__PORT", "1234"),
+            ],
+        );
+        assert_eq!((cfg.http.host.as_str(), cfg.http.port), ("10.0.0.1", 1234));
+
+        let http = cfg.http.with_overrides(Some("::1".to_owned()), None);
+        assert_eq!(http.host, "::1");
+        // ...and a flag the operator did not type leaves the variable standing.
+        assert_eq!(http.port, 1234);
+    }
+
+    #[test]
     fn a_misspelled_key_inside_a_field_table_is_rejected_by_name() {
         // The point of hand-rolling `RawField`'s `Deserialize`: an untagged enum
         // would report only "data did not match any variant" and lose the key.
-        let err = config::Config::builder()
-            .add_source(config::File::from_str(
-                "sync:\n  fields:\n    - name: FIRMWARE\n      intervl_secs: 3600\n",
-                config::FileFormat::Yaml,
-            ))
-            .build()
-            .expect("building config")
-            .try_deserialize::<RawServerConfig>()
-            .unwrap_err();
+        let err = try_raw(
+            "sync:\n  fields:\n    - name: FIRMWARE\n      intervl_secs: 3600\n",
+            &[],
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("intervl_secs"),
             "expected the unknown key in the error, got: {err}"
@@ -780,15 +1265,7 @@ mod tests {
 
     #[test]
     fn a_field_table_missing_its_name_is_rejected() {
-        let err = config::Config::builder()
-            .add_source(config::File::from_str(
-                "sync:\n  fields:\n    - interval_secs: 3600\n",
-                config::FileFormat::Yaml,
-            ))
-            .build()
-            .expect("building config")
-            .try_deserialize::<RawServerConfig>()
-            .unwrap_err();
+        let err = try_raw("sync:\n  fields:\n    - interval_secs: 3600\n", &[]).unwrap_err();
         assert!(
             err.to_string().contains("name"),
             "expected the missing key in the error, got: {err}"
@@ -797,15 +1274,7 @@ mod tests {
 
     #[test]
     fn a_misspelled_field_is_rejected_rather_than_ignored() {
-        let err = config::Config::builder()
-            .add_source(config::File::from_str(
-                "devices_config_pth: devices.toml\n",
-                config::FileFormat::Yaml,
-            ))
-            .build()
-            .expect("building config")
-            .try_deserialize::<RawServerConfig>()
-            .unwrap_err();
+        let err = try_raw("devices_config_pth: devices.toml\n", &[]).unwrap_err();
         assert!(
             err.to_string().contains("devices_config_pth"),
             "expected the unknown key in the error, got: {err}"

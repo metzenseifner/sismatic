@@ -2,39 +2,37 @@
 //! already-loaded device set, it starts both sides of the system on the caller's
 //! Tokio runtime and runs until `shutdown` completes.
 //!
-//! Note what [`run`] does *not* do: it never reads a file. `configuration` turns
-//! text into a `ServerConfig`, core turns `devices_config_path` into a
-//! [`Resolved`], and both happen in the composition root (`main`). Everything
-//! here is a function of its arguments, so a test drives the whole server with
-//! literal values and no fixtures on disk.
-
+//! - the **write side**, [`sismatic_sync::spawn`], which polls devices through
+//!   `sismatic-core` and persists what it reads through a [`DynWriteStore`];
+//! - the **read side**, [`sismatic_http_api::run`], which answers HTTP requests
+//!   about what was persisted, through a [`DynReadStore`].
 pub mod configuration;
+pub mod telemetry;
 
+use std::net::TcpListener;
 use std::sync::Arc;
 
 use sismatic_core::devices::config::Resolved;
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::transport::ssh::RusshConnector;
+use sismatic_http_api::ServerHandle;
 use sismatic_store::{DynReadStore, DynWriteStore};
 use sismatic_store_memory::MemoryStore;
+use tokio::task::JoinHandle;
+use tracing::{info, instrument};
 
 use crate::configuration::ServerConfig;
 
-/// Start the sync write-side (and, eventually, the read-side http-api) and run
-/// until `shutdown` resolves, then stop the poll loops.
-///
-/// `devices` arrives resolved rather than as a path: loading it is core's job
-/// and core already tests that loader, so re-reading it here would only couple
-/// the server's tests to the filesystem.
+/// Start the "sync" write-side and the read-side "http-api", and run until
+/// `shutdown` resolves — or until the server stops on its own — then stop the
+/// poll loops.
 pub async fn run(
     cfg: ServerConfig,
     devices: Resolved,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), std::io::Error> {
-    // One store, two capability-narrowed views: the write side may only write,
-    // the read side may only read.
     let store = MemoryStore::default();
-    let _read: DynReadStore = Arc::new(store.clone());
+    let read: DynReadStore = Arc::new(store.clone());
     let write: DynWriteStore = Arc::new(store);
 
     let registry = Arc::new(Registry::build(
@@ -43,9 +41,14 @@ pub async fn run(
         Arc::new(RusshConnector),
     ));
 
-    // A rename, not a decision: `configuration` already folded the per-field
-    // overrides into the inherited default and decoded `interval_secs: 0` into
-    // the `None` that means never, so there is nothing left to resolve here.
+    // Bound and built before anything is *started*, so the one failure that is
+    // likely here — the port is taken — is reported by a process that has
+    // opened no SSH connection and started no poll loop, and has therefore
+    // nothing to unwind.
+    let listener = TcpListener::bind((cfg.http.host.as_str(), cfg.http.port))?;
+    let server = sismatic_http_api::run(listener, read)?;
+    let handle = server.handle();
+
     let sync = sismatic_sync::spawn(
         registry,
         write,
@@ -62,10 +65,49 @@ pub async fn run(
         },
     );
 
-    // TODO: sismatic_http_api::serve(_read, cfg.http).await?; — the read side
-    // gets a ReadStore, never a WriteStore.
-    shutdown.await;
+    let mut serving = tokio::spawn(server);
+    let served = tokio::select! {
+        joined = &mut serving => {
+            // Nothing to stop on the read side — it is already down. Said out
+            // loud because the two ways out of this select are worth telling
+            // apart in a log: this one is a failure, the other is an operator.
+            info!("the http server stopped on its own");
+            joined.expect("the http server task")
+        }
+        () = shutdown => stop_http(handle, serving).await,
+    };
 
+    // Instrumented by the driver itself (`sync_shutdown`), which is where the
+    // number of loops being drained is known.
     sync.shutdown().await;
-    Ok(())
+    served
+}
+
+/// Stop the read side and wait for it to finish serving.
+///
+/// A named function, rather than the body of the `select!` arm it was lifted
+/// out of, so that [`macro@instrument`] has an item to attach to: the macro
+/// wraps a function's future in a span, and an inline block is not a function.
+/// The span is what makes the drain *measurable* — it opens when the signal
+/// lands and closes when the last in-flight request has been answered, so the
+/// formatter's `elapsed_milliseconds` on close is the drain time, which is the
+/// number an operator tuning a stop timeout actually needs. No amount of
+/// `info!` at either end gives that without the reader subtracting timestamps.
+///
+/// `skip_all` because neither argument is a value worth recording: [`JoinHandle`]
+/// would render as an opaque task id, and [`ServerHandle`] does not implement
+/// `Debug` at all — the macro records every argument unless told otherwise, so
+/// omitting this would not compile.
+#[instrument(name = "http_shutdown", skip_all)]
+async fn stop_http(
+    handle: ServerHandle,
+    serving: JoinHandle<Result<(), std::io::Error>>,
+) -> Result<(), std::io::Error> {
+    info!("shutdown signal received; draining in-flight requests");
+    // `true` drains: in-flight requests get to finish rather than losing a
+    // response to a connection closed mid-write.
+    handle.stop(true).await;
+    let served = serving.await.expect("the http server task");
+    info!("the http server stopped");
+    served
 }

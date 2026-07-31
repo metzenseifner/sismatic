@@ -35,7 +35,7 @@ use sismatic_store::DynWriteStore;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::dto;
 
@@ -84,9 +84,22 @@ impl SyncHandle {
     ///
     /// Cancellation is cooperative: a loop finishes its current SSH exchange
     /// before exiting, rather than being aborted mid-command.
+    ///
+    /// Instrumented here rather than at the call site because this is where the
+    /// two facts about a drain are known: how many loops are being waited on
+    /// (the span's `tasks`, recorded when the span opens — a `JoinSet` that has
+    /// been drained can no longer say), and how long the wait took, which the
+    /// formatter derives from the span's close. Since cancellation is
+    /// cooperative, that duration is bounded below by the slowest in-flight SSH
+    /// exchange, which is exactly the thing worth watching.
+    ///
+    /// `skip(self)` is required, not stylistic: `#[instrument]` records every
+    /// argument including the receiver, and [`SyncHandle`] is not `Debug`.
+    #[instrument(name = "sync_shutdown", skip(self), fields(tasks = self.tasks.len()))]
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         while self.tasks.join_next().await.is_some() {}
+        info!("sync driver stopped");
     }
 }
 

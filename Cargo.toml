@@ -4,6 +4,7 @@ members = [
   "crates/sismatic-api-types",
   "crates/sismatic-cli",
   "crates/sismatic-core",
+  "crates/sismatic-http-api",
   "crates/sismatic-python-sdk",
   "crates/sismatic-server",
   "crates/sismatic-store",
@@ -32,6 +33,12 @@ sismatic-core = { path = "crates/sismatic-core", version = "0.2.20" }
 sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.19" }
 
 # Shared third-party
+# The read side's HTTP framework. `default-features = false` drops the response
+# compressors (brotli/gzip/zstd), cookies, HTTP/2 and the routing macros — none
+# of which this API uses — so the read side's dependency cone stays close to the
+# framework itself rather than pulling a compression toolchain into every build
+# and every license audit. Turn a feature back on in the member that needs it.
+actix-web = { version = "4.13", default-features = false }
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
@@ -51,6 +58,12 @@ pyo3-log = "0.13.4"
 # `Sis.from_config` can turn any parsed `dict` into a `RawConfig`. Versioned in
 # lockstep with pyo3, so 0.29 matches our pyo3 0.29.
 pythonize = "0.29.0"
+# Test-only HTTP client: the http-api's integration tests drive the real server
+# over a real socket rather than through the framework's in-process test
+# harness, so what they exercise is the response an operator's probe sees.
+# `default-features = false` drops the TLS stacks (and the system
+# proxy/keychain lookups behind them); the tests only ever talk to loopback.
+reqwest = { version = "0.12", default-features = false }
 russh = "0.60.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
