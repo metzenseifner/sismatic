@@ -85,9 +85,17 @@
           # test in src/stub.rs pulls python/sismatic/__init__.pyi in via
           # include_str!, so the file must be present whenever the crate's tests
           # are compiled (clippy, nextest), not only when the wheel is built.
+          #
+          # tests/fixtures/ likewise: an integration test that reads a config
+          # file off disk (sismatic-server) needs the file itself in the build
+          # sandbox, and it is a .yaml/.toml that filterCargoSources drops.
           src = lib.cleanSourceWith {
             src = ./.;
-            filter = path: type: (craneLib.filterCargoSources path type) || (lib.hasInfix "/python/" path);
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type)
+              || (lib.hasInfix "/python/" path)
+              || (lib.hasInfix "/tests/fixtures/" path);
           };
 
           # Version is shared by every workspace member (workspace.package),

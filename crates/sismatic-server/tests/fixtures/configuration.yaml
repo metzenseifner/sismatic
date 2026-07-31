@@ -1,0 +1,21 @@
+# Fixture for tests/server_checks.rs. `devices_config_path` is relative, so it
+# only resolves if paths are anchored to this file's directory rather than to
+# the test process's working directory.
+devices_config_path: devices.toml
+
+# All three cases, on purpose: the bare name inherits `interval_secs`, the
+# table overrides it, and `0` turns a field off while leaving it written down.
+# A firmware string does not change between polls the way a recording state
+# does, and the unit name changes only when someone reconfigures the device.
+sync:
+  interval_secs: 5
+  fields:
+    - RUNNING_STATE
+    - name: FIRMWARE
+      interval_secs: 3600
+    - name: UNIT_NAME
+      interval_secs: 0
+
+http:
+  host: 0.0.0.0
+  port: 9000

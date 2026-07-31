@@ -7,3 +7,11 @@
 //! drifting away from core's decoded values.
 
 pub mod dto;
+
+// The write-side driver. Behind the `driver` feature because, unlike `dto`, it
+// pulls tokio + a clock and turns on `sismatic-core/ssh` — see the Cargo.toml
+// note on keeping the pure conversion's dependency cone light.
+#[cfg(feature = "driver")]
+mod driver;
+#[cfg(feature = "driver")]
+pub use driver::{FieldSchedule, SyncConfig, SyncHandle, spawn};

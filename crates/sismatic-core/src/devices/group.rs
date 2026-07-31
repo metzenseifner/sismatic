@@ -156,6 +156,7 @@ mod tests {
             eager: false,
             sis_keepalive: None,
             eager_retry: None,
+            cold_backoff: None,
         }
     }
 

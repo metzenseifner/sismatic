@@ -65,6 +65,12 @@ release = false
 name = "sismatic-web"
 release = false
 
+# The composition-root binary. Like the other binaries: internal, published
+# nowhere, inherits the bumped workspace version passively.
+[[package]]
+name = "sismatic-server"
+release = false
+
 # The serialization-contract crate, added after the v0.2.19 tag. Under `git_only` with a
 # package-name-less shared tag (`v{{version}}`), release-plz maps every member to
 # the same `v*` tags — so it mistakes the tag matching this crate's inherited
@@ -94,4 +100,12 @@ release = false
 
 [[package]]
 name = "sismatic-store-memory"
+release = false
+
+# The read side (the actix-web application over the store's read port). Internal,
+# `publish = false`, and reached only by the server binary, so like the crates
+# above it is processed but not released — it inherits the bumped workspace
+# version passively via `version.workspace = true`.
+[[package]]
+name = "sismatic-http-api"
 release = false

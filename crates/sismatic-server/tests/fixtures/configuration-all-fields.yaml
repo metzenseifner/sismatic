@@ -1,0 +1,17 @@
+# Fixture for tests/server_checks.rs — the catch-all shape a deployment writes
+# when it wants everything core can query and never wants to edit this list
+# again. The quotes around `*` are required: a bare `*` opens a YAML alias.
+devices_config_path: devices.toml
+
+sync:
+  interval_secs: 300
+  fields:
+    - "*"                   # every field core knows about, at 300s
+    - name: RUNNING_STATE
+      interval_secs: 5      # ...except the one worth watching closely
+    - name: MAC_ADDRESS
+      interval_secs: 0      # ...and the one that never changes
+
+http:
+  host: 0.0.0.0
+  port: 9000

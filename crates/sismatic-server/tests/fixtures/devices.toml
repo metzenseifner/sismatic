@@ -1,0 +1,18 @@
+# Fixture device pool for tests/server_checks.rs. Never connected to: the tests
+# assert on the resolved config, and `run` only opens a connection when a poll
+# loop fires, which the immediate shutdown prevents.
+[defaults]
+username = "admin"
+password = "extron"
+
+[[device]]
+id = "fixture-atrium"
+host = "10.0.0.7"
+
+[[device]]
+id = "fixture-annex"
+host = "10.9.40.12"
+
+[[group]]
+id = "fixture-room"
+devices = ["fixture-atrium", "fixture-annex"]

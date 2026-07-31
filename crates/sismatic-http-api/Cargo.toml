@@ -1,0 +1,27 @@
+[package]
+name = "sismatic-http-api"
+description = "The read side of Sismatic: an actix-web application over the store's ReadStore port."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+actix-web.workspace = true
+# The *only* internal dependency, and deliberately the read half of the
+# hexagon's storage port. Not `sismatic-core`: the read side answers from what
+# the write side already persisted, so it never needs a device, a transport or
+# an SSH session — and keeping that out of its dependency cone is what stops the
+# API (and anything that links it) from acquiring a compile path to core.
+sismatic-store = { version = "0.2.20", path = "../sismatic-store" }
+
+[dev-dependencies]
+# Needed to implement `ReadStore` for the test double in `tests/health_check.rs`
+# — the store port is an async trait.
+async-trait.workspace = true
+reqwest.workspace = true
+# The tests drive a real server, so they need a runtime and `#[tokio::test]`.
+# `rt` (current-thread) is enough: actix runs its workers on their own threads,
+# and the test's runtime only has to poll the client and the server handle.
+tokio = { workspace = true, features = ["macros", "rt"] }
+# The test double implements the port, so it speaks the port's vocabulary.
+sismatic-api-types.workspace = true
