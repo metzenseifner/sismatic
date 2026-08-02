@@ -3210,8 +3210,10 @@ dependencies = [
  "actix-web",
  "async-trait",
  "reqwest",
+ "serde_json",
  "sismatic-api-types",
  "sismatic-store",
+ "sismatic-store-memory",
  "tokio",
 ]
 
