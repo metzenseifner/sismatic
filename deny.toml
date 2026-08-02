@@ -123,6 +123,12 @@ exceptions = [
   # Zlib: OSI-approved and FSF-libre, as permissive as MIT.
   # config -> yaml-rust2 -> hashlink -> hashbrown -> foldhash.
   { allow = ["Zlib"], crate = "foldhash" },
+  # Same license, different route in: utoipa-swagger-ui's *build* script unzips
+  # the vendored Swagger UI bundle, and the zip crate's deflate decoder is
+  # zlib-rs. Build-time only — the extracted assets are what ends up in the
+  # binary, not this decompressor — and scoped per-crate for the same reason as
+  # every other entry here.
+  { allow = ["Zlib"], crate = "zlib-rs" },
   # CC0-1.0: a public-domain dedication. Build-time only — it is reached solely
   # through a proc-macro, so nothing it covers ships in the binary.
   # config -> rust-ini -> ordered-multimap -> dlv-list -> const-random(-macro).

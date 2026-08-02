@@ -97,7 +97,7 @@ async fn one_field_comes_back_as_a_reading() {
     )])
     .await;
 
-    let (status, body) = get(format!("{address}/devices/atrium-101/fields/SSH_PORT")).await;
+    let (status, body) = get(format!("{address}/v1/devices/atrium-101/fields/SSH_PORT")).await;
 
     assert_eq!(status, 200);
     // The whole body, not field-by-field: this is the shape a client compiles
@@ -125,7 +125,7 @@ async fn every_field_of_a_device_is_listed_sorted_by_name() {
     ])
     .await;
 
-    let (status, body) = get(format!("{address}/devices/atrium-101/fields")).await;
+    let (status, body) = get(format!("{address}/v1/devices/atrium-101/fields")).await;
 
     assert_eq!(status, 200);
     let fields: Vec<&str> = body["readings"]
@@ -153,7 +153,8 @@ async fn a_field_is_addressable_however_it_is_spelled_in_the_url() {
         "running-state",
         "Running-State",
     ] {
-        let (status, body) = get(format!("{address}/devices/atrium-101/fields/{spelling}")).await;
+        let (status, body) =
+            get(format!("{address}/v1/devices/atrium-101/fields/{spelling}")).await;
 
         assert_eq!(status, 200, "spelling {spelling} should resolve");
         // However it was asked for, the answer names the field canonically —
@@ -172,7 +173,7 @@ async fn a_field_with_no_reading_is_404_with_the_shared_error_envelope() {
     )])
     .await;
 
-    let (status, body) = get(format!("{address}/devices/atrium-101/fields/SSH_PORT")).await;
+    let (status, body) = get(format!("{address}/v1/devices/atrium-101/fields/SSH_PORT")).await;
 
     assert_eq!(status, 404);
     // The machine-readable half is what a client branches on; the message is for
@@ -193,7 +194,7 @@ async fn an_unknown_device_lists_no_fields_rather_than_404() {
     // nothing yet, so it must not claim the former. See `list_fields`.
     let address = spawn_with([]).await;
 
-    let (status, body) = get(format!("{address}/devices/nobody/fields")).await;
+    let (status, body) = get(format!("{address}/v1/devices/nobody/fields")).await;
 
     assert_eq!(status, 200);
     assert_eq!(body, serde_json::json!({ "readings": [] }));
@@ -211,7 +212,7 @@ async fn history_returns_one_field_oldest_first() {
     .await;
 
     let (status, body) = get(format!(
-        "{address}/devices/atrium-101/fields/SSH_PORT/history"
+        "{address}/v1/devices/atrium-101/fields/SSH_PORT/history"
     ))
     .await;
 
@@ -237,7 +238,7 @@ async fn history_is_scoped_to_the_requested_span() {
     .await;
 
     let (status, body) = get(format!(
-        "{address}/devices/atrium-101/fields/T/history\
+        "{address}/v1/devices/atrium-101/fields/T/history\
          ?start=2026-07-23T14:00:00Z&end=2026-07-23T15:00:00Z"
     ))
     .await;
@@ -261,7 +262,7 @@ async fn a_limited_history_is_the_most_recent_rows_still_in_order() {
     .await;
 
     let (status, body) = get(format!(
-        "{address}/devices/atrium-101/fields/T/history?limit=2"
+        "{address}/v1/devices/atrium-101/fields/T/history?limit=2"
     ))
     .await;
 
@@ -284,7 +285,7 @@ async fn an_empty_span_is_an_empty_list_not_a_404() {
     let address = spawn_with([reading("atrium-101", "T", 1, "2026-07-23T14:00:00Z")]).await;
 
     let (status, body) = get(format!(
-        "{address}/devices/atrium-101/fields/T/history\
+        "{address}/v1/devices/atrium-101/fields/T/history\
          ?start=2020-01-01T00:00:00Z&end=2020-12-31T23:59:59Z"
     ))
     .await;
@@ -298,7 +299,7 @@ async fn a_field_query_parameter_contradicting_the_path_is_rejected() {
     let address = spawn_with([reading("atrium-101", "T", 1, "2026-07-23T14:00:00Z")]).await;
 
     let (status, body) = get(format!(
-        "{address}/devices/atrium-101/fields/T/history?field=FIRMWARE"
+        "{address}/v1/devices/atrium-101/fields/T/history?field=FIRMWARE"
     ))
     .await;
 
@@ -315,7 +316,7 @@ async fn a_field_query_parameter_agreeing_with_the_path_is_accepted() {
     // Redundant, but not a contradiction — and normalized the same way, so a
     // lowercase spelling of the same field still agrees.
     let (status, _) = get(format!(
-        "{address}/devices/atrium-101/fields/T/history?field=t"
+        "{address}/v1/devices/atrium-101/fields/T/history?field=t"
     ))
     .await;
 
@@ -329,7 +330,7 @@ async fn a_store_failure_is_a_500_and_not_a_404() {
     // second would tell a dashboard to stop asking.
     let address = spawn_app(Arc::new(FailingStore));
 
-    let (status, body) = get(format!("{address}/devices/atrium-101/fields/FIRMWARE")).await;
+    let (status, body) = get(format!("{address}/v1/devices/atrium-101/fields/FIRMWARE")).await;
 
     assert_eq!(status, 500);
     assert_eq!(body["code"], "internal");
@@ -340,7 +341,7 @@ async fn the_readings_routes_are_gets() {
     let address = spawn_with([]).await;
 
     let response = reqwest::Client::new()
-        .post(format!("{address}/devices/atrium-101/fields/FIRMWARE"))
+        .post(format!("{address}/v1/devices/atrium-101/fields/FIRMWARE"))
         .send()
         .await
         .expect("posting to a readings route");

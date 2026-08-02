@@ -1,165 +1,6 @@
 //! Server configuration: the process-level knobs (where the devices file lives,
 //! how often to poll, where to listen), kept distinct from the *device* config
 //! that `sismatic-core` owns.
-//!
-//! The split mirrors core's own discipline (see [`sismatic_core::devices::config`]):
-//! [`get_configuration`] is the only impure step — it reads one file — and
-//! [`resolve_config`] is a pure, total function from an already-parsed
-//! [`RawServerConfig`] to a [`ServerConfig`] with every default folded in. That
-//! is what makes this layer testable without a filesystem: the precedence rules
-//! below are plain unit tests over values, and `devices_config_path` is *only* a
-//! path here. Turning that path into devices is core's `config::load`, which
-//! core already tests; the server calls it once, in the composition root, and
-//! hands the result to [`run`](crate::run).
-//!
-//! Precedence for every setting is the same three-layer fallback, most specific
-//! first:
-//!
-//! 1. the setting's own section (`devices_config_path`, `[sync]`, `[http]`),
-//! 2. the `[defaults]` table,
-//! 3. the built-in constant.
-//!
-//! Every one of those keys can also be written from the environment, which is
-//! merged over the file *before* the fallback above runs — see
-//! [the environment](#the-environment).
-//!
-//! `host` and `port` add one more layer above all three, but *outside* the
-//! resolver: the composition root folds `--host`/`--port` in afterwards via
-//! [`HttpConfig::with_overrides`]. Keeping it a separate step is what lets
-//! [`resolve_config`] stay a function of the file alone — the command line is
-//! not part of the file, and pretending otherwise would put an `Option` from
-//! `argv` into the middle of a pure resolver.
-//!
-//! `interval_secs` adds a fourth, still-more-specific layer at the top: an entry
-//! in `sync.fields` may pin its own. That is what makes a mixed schedule
-//! expressible — `RUNNING_STATE` is worth polling every few seconds, `FIRMWARE`
-//! changes about once a year — without every deployment restating an interval
-//! for every field it lists:
-//!
-//! ```yaml
-//! sync:
-//!   interval_secs: 5          # the default every field inherits
-//!   fields:
-//!     - RUNNING_STATE         # inherits 5
-//!     - name: FIRMWARE
-//!       interval_secs: 3600   # overrides it
-//! ```
-//!
-//! Both spellings of an entry — a bare name and a table — resolve to the same
-//! [`FieldConfig`], so [`SyncConfig::fields`] is a flat list of fields that each
-//! already know their own interval. Nothing downstream re-derives it.
-//!
-//! # The `"*"` wildcard
-//!
-//! An entry of `"*"` stands for *every field core knows how to query* — it
-//! expands to [`Query::ALL`], the list the `instruction_catalog!` macro
-//! generates alongside the [`Query`] variants themselves. Adding a query to
-//! core's catalog therefore starts polling it on the next restart, with no edit
-//! to any server config. (Quote it: a bare `*` opens a YAML alias.)
-//!
-//! ```yaml
-//! sync:
-//!   interval_secs: 300
-//!   fields:
-//!     - "*"                   # every field core knows about, at 300s
-//!     - name: RUNNING_STATE
-//!       interval_secs: 5      # ...except this one, which is worth watching
-//!     - name: MAC_ADDRESS
-//!       interval_secs: 0      # ...and this one, which never changes
-//! ```
-//!
-//! The wildcard *fills*, it does not assert: a field named explicitly anywhere
-//! in the list keeps the interval that entry gives it, whether the entry sits
-//! above or below the `"*"`. That makes the expansion order-independent, so
-//! there is no way to write the two lines in the "wrong" order and silently lose
-//! an override. Among explicit entries the last mention of a field wins, and a
-//! field is emitted once no matter how many times it is mentioned. The wildcard
-//! may also carry its own `interval_secs`, which then fills every field it
-//! expands to instead of the inherited default — including `0`, which lists the
-//! whole catalog switched off so individual fields can be turned back on.
-//!
-//! `interval_secs: 0` means *never*: the field stays listed but no poll loop is
-//! started for it, which is how a field is turned off without deleting it from
-//! the config. That is the same sentinel core spells for `sis_keepalive_secs`,
-//! `eager_retry_secs`, and `cold_backoff_secs`, decoded the same way — [`resolve_config`] turns it
-//! into `None` here, so no consumer downstream has to know that `0` is special
-//! (and a zero [`Duration`], which `tokio::time::interval` panics on, cannot be
-//! constructed at all). Because it resolves like any other value, `0` works at
-//! every layer: as a field's own override, or in `[sync]`/`[defaults]` to
-//! default the whole fleet to off and re-enable named fields individually.
-//!
-//! Relative paths resolve against the *config file's* directory rather than the
-//! process's working directory, so a config and the devices file it names travel
-//! together and no test (or systemd unit) has to care where it was launched from.
-//! That holds for a path written in the environment too: the value lands in the
-//! same key, so it is anchored the same way, and an environment that wants to
-//! escape the config's directory says so with an absolute path.
-//!
-//! # The environment
-//!
-//! Every key above is also addressable from the environment under a name derived
-//! mechanically from its path: `SISMATIC_SERVER__`, then the path upper-cased
-//! with `__` between segments.
-//!
-//! | key | variable |
-//! | --- | --- |
-//! | *(the file to read)*  | `SISMATIC_SERVER__CONFIG` |
-//! | `devices_config_path` | `SISMATIC_SERVER__DEVICES_CONFIG_PATH` |
-//! | `sync.interval_secs`  | `SISMATIC_SERVER__SYNC__INTERVAL_SECS` |
-//! | `sync.fields`         | `SISMATIC_SERVER__SYNC__FIELDS` |
-//! | `http.host`           | `SISMATIC_SERVER__HTTP__HOST` |
-//! | `http.port`           | `SISMATIC_SERVER__HTTP__PORT` |
-//! | `defaults.port`       | `SISMATIC_SERVER__DEFAULTS__PORT` |
-//!
-//! There is no list of blessed variable names anywhere in this crate, and that
-//! is the point: the name *is* the key path, so a key added to
-//! [`RawServerConfig`] is settable from the environment the day it exists, and
-//! an operator who can read the config file can derive the variable without
-//! consulting anything. `deny_unknown_fields` reaches the environment for the
-//! same reason it reaches the file — `SISMATIC_SERVER__HTTP__PROT` fails at
-//! startup naming `prot`, rather than leaving a port that silently stayed 8080.
-//!
-//! The prefix names this binary rather than the project, so a sibling process
-//! that grows its own settings takes its own namespace (`SISMATIC_WEB__…`) and
-//! one deployment's environment can configure several of them without a
-//! variable meaning two things.
-//!
-//! The environment is a second *writer* of the one document, not a tier stacked
-//! on top of the whole document. It is merged over the file and then the
-//! layering above resolves the result, so `SISMATIC_SERVER__DEFAULTS__HOST`
-//! still loses to a file that sets `http.host` — exactly as a `[defaults]` entry
-//! in the file would. Address the key you would have written, not a vaguer one.
-//!
-//! Three consequences of that merge worth stating:
-//!
-//! - Scalars and lists overwrite; tables merge. `SISMATIC_SERVER__HTTP__PORT`
-//!   leaves a `host` in the same `[http]` table alone, but
-//!   `SISMATIC_SERVER__SYNC__FIELDS` *replaces* the file's field list rather
-//!   than appending to it.
-//! - A field list from the environment is comma-separated bare names —
-//!   `SISMATIC_SERVER__SYNC__FIELDS=RUNNING_STATE,FIRMWARE`, or `'*'` for the
-//!   whole catalog — each inheriting the resolved default. The table spelling
-//!   that pins a per-field interval has no environment form; a schedule that
-//!   mixed is a schedule that belongs in the file.
-//! - An empty value reads as unset, not as an empty string. A shell expanding an
-//!   unset variable and a systemd `Environment=SISMATIC_SERVER__HTTP__HOST=`
-//!   both produce one, and neither means "the host is now nothing".
-//!
-//! ## `SISMATIC_SERVER__CONFIG`, the one that is not a key
-//!
-//! [`CONFIG_PATH_ENV`] is spelled like the rest because an operator should not
-//! have to learn a second rule, but it is the one variable that names *which*
-//! document to read rather than a value inside one. It is therefore answered by
-//! the composition root before this module is reached (see `main`), and
-//! [`env_source`] drops it from the layer it contributes here.
-//!
-//! That drop is load-bearing, not tidiness. Left in, `deny_unknown_fields` would
-//! reject `config` as an unknown key — the very variable that chose the file
-//! would abort the read of it. Dropping it in the *source* rather than admitting
-//! a dead `config` field to [`RawServerConfig`] is what keeps the rejection
-//! intact where it still means something: `config: other.yaml` written in a
-//! config file is a startup error naming the key, because a document that names
-//! another document has said nothing.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -170,8 +11,7 @@ use serde::Deserialize;
 use serde::de::{self, MapAccess, value::MapAccessDeserializer};
 use sismatic_core::protocol::instructions::query::Query;
 
-/// Devices file used when neither the config nor `[defaults]` names one; matches
-/// the CLI's `--config` default so both front-ends agree on the convention.
+/// Default devices config path relative to the configuration file.
 const DEFAULT_DEVICES_CONFIG_PATH: &str = "devices.toml";
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FIELDS: &[&str] = &["RUNNING_STATE"];
@@ -181,16 +21,8 @@ const ALL_FIELDS: &str = "*";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
 
-/// Namespace for every variable this binary reads. Names the *binary*, not the
-/// project, so a sibling process configured from the same environment cannot
-/// collide with it — see [the module docs](self#the-environment).
 const ENV_PREFIX: &str = "SISMATIC_SERVER";
-/// What separates one key-path segment from the next, *and* the prefix from the
-/// path: the `config` crate falls back to this for `prefix_separator`, so one
-/// choice fixes both and `SISMATIC_SERVER__` becomes the whole claimed
-/// namespace.
 const ENV_SEPARATOR: &str = "__";
-/// What separates the elements of a list-valued key such as `sync.fields`.
 const ENV_LIST_SEPARATOR: &str = ",";
 /// The key [`CONFIG_PATH_ENV`] collapses to once the prefix is stripped, and so
 /// the one [`env_source`] must drop before the document is deserialized.
@@ -199,13 +31,12 @@ const ENV_CONFIG_PATH_KEY: &str = "config";
 /// The variable naming which config file to read.
 ///
 /// Public because the composition root has to answer it *before* there is a
-/// document to resolve, and it must spell the name identically to the source
+/// config to resolve, and it must spell the name identically to the source
 /// that excludes it. `env_var_names_agree` below pins the two together.
 pub const CONFIG_PATH_ENV: &str = "SISMATIC_SERVER__CONFIG";
 
 /// Read a server config file, merge the environment over it, and resolve the
-/// result. The only step that touches the filesystem; everything after the read
-/// is a pure function of the bytes and the variables.
+/// result.
 ///
 /// The format is inferred from the extension by the `config` crate, and
 /// relative paths — whichever layer wrote them — are anchored to the file's own
@@ -214,13 +45,12 @@ pub fn get_configuration(path: impl AsRef<Path>) -> Result<ServerConfig, ConfigE
     get_configuration_with_env(path, env_source())
 }
 
-/// [`get_configuration`] against an explicit environment source.
+/// [`get_configuration`] using an explicit process environment source.
 ///
-/// The seam exists because the environment is the one input a test cannot set
-/// safely: `std::env::set_var` is `unsafe` in edition 2024 precisely because
-/// cargo runs tests on threads that share one environment. Passing
-/// `env_source().source(Some(vars))` resolves against a literal map instead, so
-/// a test states the variables it means and no other test can see them.
+/// The abstraction seam exists to enable testing of the process environment input:
+/// `std::env::set_var` is `unsafe` in edition 2024 precisely because cargo runs tests on threads
+/// that share one environment. Passing `env_source().source(Some(vars))` resolves against a literal
+/// map instead, so a test states the variables it means and no other test can see them.
 pub fn get_configuration_with_env(
     path: impl AsRef<Path>,
     env: EnvSource,
@@ -237,34 +67,24 @@ pub fn get_configuration_with_env(
 pub fn env_source() -> EnvSource {
     EnvSource(
         config::Environment::with_prefix(ENV_PREFIX)
+            // separator of namespace prefix from the variable name
             .separator(ENV_SEPARATOR)
             // An unset shell variable expands to the empty string, and a systemd
             // unit writes one for `Environment=SISMATIC_SERVER__HTTP__HOST=`.
             // Neither is a request for an empty host, so both read as "not set".
             .ignore_empty(true)
-            // Environment values are all strings. `try_parsing` types the ones
-            // that are obviously numbers, and — the reason it is not optional
-            // here — it is what gates `list_separator` at all.
+            // Environment values are all strings. `try_parsing` applies types to the ones that are
+            // obviously numbers, and — the reason it is not optional here — it is what gates
+            // `list_separator` at all.
             .try_parsing(true)
             .list_separator(ENV_LIST_SEPARATOR)
-            // Named individually rather than left to `list_separator` alone,
-            // because a bare `list_separator` would split *every* variable: a
-            // host is not a one-element list, and `devices_config_path` may not
-            // contain a comma just because `fields` does.
             .with_list_parse_key("sync.fields")
             .with_list_parse_key("defaults.fields"),
     )
 }
 
 /// The `SISMATIC_SERVER__` environment, restricted to the keys that are part of
-/// the config document.
-///
-/// Exactly one variable in the namespace is not: [`CONFIG_PATH_ENV`], which
-/// names the document instead of a value in it and is answered by the
-/// composition root. `config`'s [`Environment`](config::Environment) has no
-/// exclusion list, so the restriction is this wrapper — a source in its own
-/// right, which keeps the loader a plain composition of two sources whose order
-/// is their precedence.
+/// the config document. Enables us to simulate the process environment in tests.
 #[derive(Debug, Clone)]
 pub struct EnvSource(config::Environment);
 
@@ -289,35 +109,30 @@ impl config::Source for EnvSource {
     }
 }
 
-/// Merge the two writers of the config document into one parsed
+/// Merge the two writers of the in-memory config document into one parsed
 /// [`RawServerConfig`]. Order is the precedence: the environment is added last,
 /// so it wins at any key it names and is silent at every key it does not.
 ///
 /// Generic over the file source so the unit tests below can feed config *text*
-/// through exactly this path rather than a near-copy of it.
+/// through exactly this path.
 fn raw_config(
     file: impl config::Source + Send + Sync + 'static,
     env: EnvSource,
 ) -> Result<RawServerConfig, ConfigError> {
     config::Config::builder()
+        // Abstracts support for multiple server config file formats
         .add_source(file)
         .add_source(env)
         .build()?
         .try_deserialize()
 }
 
-/// The directory a config file's relative paths resolve against. A bare
-/// `configuration.yaml` has no parent, which is exactly the working directory —
-/// i.e. the empty base, so `join` leaves the path as written.
+/// Resolve a given path's parent path segment if given in path literal.
 fn base_dir(config_path: &Path) -> &Path {
     config_path.parent().unwrap_or_else(|| Path::new(""))
 }
 
 /// Fold `[defaults]` and the built-in defaults into a fully-resolved config.
-///
-/// Pure and total: same input, same output, no I/O, no panics, nothing read from
-/// the environment. `base` is the directory relative paths are anchored to,
-/// passed in rather than discovered so this stays a function of its arguments.
 pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let defaults = raw.defaults;
     let sync = raw.sync.unwrap_or_default();
@@ -329,15 +144,12 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
             .unwrap_or_else(|| DEFAULT_DEVICES_CONFIG_PATH.to_owned()),
     );
 
-    // The interval a field inherits when it does not pin one of its own.
-    let default_interval = interval(
+    let default_interval = handle_interval(
         sync.interval_secs
             .or(defaults.interval_secs)
             .unwrap_or(DEFAULT_INTERVAL_SECS),
     );
 
-    // Each entry's own `interval_secs` sits above that default; folding it in
-    // here is what lets every consumer read one concrete schedule per field.
     let fields = resolve_fields(
         sync.fields
             .or(defaults.fields)
@@ -365,24 +177,27 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
 /// Decode the `interval_secs` sentinel: `0` is *never*, anything else is a
 /// delay. The one place in the server that knows `0` is special — mirrors
 /// core's `sis_keepalive_secs` / `eager_retry_secs`.
-fn interval(secs: u64) -> Option<Duration> {
+fn handle_interval(secs: u64) -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
-/// Expand `"*"` and fold per-field overrides into one ordered, duplicate-free
-/// schedule.
+/// Normalize the vector of FieldConfigs. Expand `"*"` and fold per-field overrides into one
+/// ordered, duplicate-free schedule.
 ///
 /// Two passes, because the wildcard has to honor an override that appears
-/// *after* it as readily as one that appears before: the first pass settles what
+/// *after* it: the first pass settles what
 /// each explicitly-named field resolves to, and only then does the second pass
 /// lay fields out in order, expanding the wildcard into whatever it did not
 /// claim. Doing it in one pass would make the result depend on where in the list
 /// the `"*"` happens to sit.
 fn resolve_fields(raw: Vec<RawField>, default_interval: Option<Duration>) -> Vec<FieldConfig> {
-    // Pass 1: every explicitly-named field, last mention winning.
+    // Pass 1: every explicitly-named field, last mentioned wins.
     let mut explicit: Vec<(&str, Option<Duration>)> = Vec::new();
+    // collect all explicitly-named fields
     for field in raw.iter().filter(|f| !f.is_wildcard()) {
-        let resolved = field.interval_secs.map_or(default_interval, interval);
+        let resolved = field
+            .interval_secs
+            .map_or(default_interval, handle_interval);
         match explicit.iter_mut().find(|(name, _)| *name == field.name) {
             Some(entry) => entry.1 = resolved,
             None => explicit.push((&field.name, resolved)),
@@ -410,7 +225,9 @@ fn resolve_fields(raw: Vec<RawField>, default_interval: Option<Duration>) -> Vec
         if field.is_wildcard() {
             // A wildcard may pin the interval it fills with; otherwise it fills
             // with whatever the layers below resolved to.
-            let fill = field.interval_secs.map_or(default_interval, interval);
+            let fill = field
+                .interval_secs
+                .map_or(default_interval, handle_interval);
             for query in Query::ALL {
                 push(
                     query.name(),
@@ -442,9 +259,8 @@ pub struct RawServerConfig {
     pub http: Option<RawHttp>,
 }
 
-/// Fallbacks for anything the sections above leave unset. One flat table so a
-/// deployment can pin, say, a devices path and a port without restating the
-/// sections that own them.
+/// Fallbacks for anything the sections above leave unset. Intentional flat structure usability
+/// until complexity grows beyond some threshold.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
@@ -474,10 +290,9 @@ pub struct RawHttp {
 /// a table that also pins an interval — parse into this one shape, so the
 /// resolver has a single case to handle and a config may mix them freely.
 ///
-/// `interval_secs` stays `Option<u64>` at this layer precisely because "unset"
-/// and "written down" must remain distinguishable until [`resolve_config`]
-/// collapses them — that is the whole content of an override, and it is what
-/// makes an explicit `interval_secs: 0` mean *never* rather than reading as
+/// `interval_secs` stays `Option<u64>` at this layer precisely because we must distinguish
+/// "unset" from "given"  until [`resolve_config`]
+/// collapses them. Also makes makes an explicit `interval_secs: 0`: means *never* rather than reading as
 /// absent and inheriting the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawField {
@@ -500,10 +315,8 @@ impl RawField {
     }
 }
 
-/// The table spelling of a [`RawField`]. Split out as a named struct so it can
-/// carry `deny_unknown_fields`: this is what makes `- name: FIRMWARE` with a
-/// misspelled `intervl_secs` an error naming the key, rather than a field that
-/// silently polls at the default.
+/// Provides parsing user feedback through `deny_unknown_fields`. Avoid accidental default value
+/// from silently being used in due to a spelling mistake e.g. `intreval_secs`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFieldTable {
@@ -548,32 +361,68 @@ impl<'de> Deserialize<'de> for RawField {
 
 /// A fully-resolved server config: every field concrete, every path anchored.
 /// Deliberately *not* `Deserialize` — the only way to obtain one is
-/// [`resolve_config`], so no code path can skip the defaulting.
+/// [`resolve_config`], so no code path can skip it (folds in the default values).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
-    /// Where the devices file lives, anchored to the server config's directory.
-    /// Consumed by the composition root, which loads it via core; the server
-    /// runtime itself never sees a path.
+    /// Where the devices file lives, using the server config's directory as base.
     pub devices_config_path: PathBuf,
     pub sync: SyncConfig,
     pub http: HttpConfig,
 }
 
+/// Represents command line input
+///
+/// Deliberately free of any `clap` types, so the command-line parser stays in
+/// the composition root: `main` maps its own `Args` into this.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Overrides {
+    pub devices_config_path: Option<PathBuf>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+}
+
+impl ServerConfig {
+    /// Fold the command line in above a config the file and the environment have
+    /// already fully resolved — the whole of the top layer, in one place.
+    ///
+    /// `None` at a field means *the caller named nothing*, so the resolved value
+    /// stands; [`Overrides::default`] is therefore the identity. That is what
+    /// makes the composition root's flags `Option` with no clap-side defaults: a
+    /// `default_value` would arrive here indistinguishable from a value the
+    /// operator typed, and would silently outrank the config file every time.
+    ///
+    /// Note what does *not* happen to `devices_config_path` here. It is not
+    /// anchored to the config file's directory the way [`resolve_config`] anchors
+    /// a path the file's devices_config_path named, because a path typed at a shell prompt is
+    /// relative to the process's working directory. Re-anchoring it would hand
+    /// back the very file the flag set out to replace — see
+    /// [the module docs](self#relative-paths).
+    #[must_use]
+    pub fn with_overrides(self, overrides: Overrides) -> Self {
+        Self {
+            devices_config_path: overrides
+                .devices_config_path
+                .unwrap_or(self.devices_config_path),
+            sync: self.sync,
+            http: HttpConfig {
+                host: overrides.host.unwrap_or(self.http.host),
+                port: overrides.port.unwrap_or(self.http.port),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncConfig {
-    /// The interval a field inherits when it pins none of its own, `None` if
-    /// that inherited value is *never*. Already folded into every entry of
-    /// `fields`, so no consumer needs it to schedule anything; it is kept
-    /// because it is the answer to "what would a field added to this config poll
-    /// at", which the entries alone do not give.
+    /// The interval a field inherits when it sets none explicitly, `None` means
+    /// that inherited value is *never*.
     pub default_interval: Option<Duration>,
     /// Every field the config lists, each with its own resolved schedule —
     /// including the disabled ones, so a config's full intent stays legible.
     pub fields: Vec<FieldConfig>,
 }
 
-/// One field and the schedule it actually polls on — the override already
-/// applied, or the inherited default already substituted.
+/// One field and its polling frequency
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldConfig {
     /// Canonical query name, e.g. `"RUNNING_STATE"`.
@@ -586,26 +435,6 @@ pub struct FieldConfig {
 pub struct HttpConfig {
     pub host: String,
     pub port: u16,
-}
-
-impl HttpConfig {
-    /// Fold command-line overrides in above whatever the file resolved to.
-    ///
-    /// `None` means *the caller named nothing*, so the resolved value stands —
-    /// which is why the composition root's flags are `Option`, not flags with
-    /// clap-side defaults. A clap `default_value` would arrive here
-    /// indistinguishable from a value the operator typed, and would therefore
-    /// silently outrank the config file every time.
-    ///
-    /// Consumes and returns rather than mutating in place: a [`ServerConfig`] is
-    /// finished once the composition root is done with it, and there is no
-    /// second moment at which overriding would be legitimate.
-    pub fn with_overrides(self, host: Option<String>, port: Option<u16>) -> Self {
-        Self {
-            host: host.unwrap_or(self.host),
-            port: port.unwrap_or(self.port),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -990,28 +819,106 @@ mod tests {
         assert_eq!(schedule(&cfg), [("RUNNING_STATE", Some(1))]);
     }
 
+    /// The overrides an operator who typed every flag would produce.
+    fn overrides(devices_config_path: &str, host: &str, port: u16) -> Overrides {
+        Overrides {
+            devices_config_path: Some(PathBuf::from(devices_config_path)),
+            host: Some(host.to_owned()),
+            port: Some(port),
+        }
+    }
+
     #[test]
     fn a_command_line_override_beats_every_layer_of_the_file() {
-        let cfg = resolve("", "defaults:\n  port: 9999\nhttp:\n  host: 0.0.0.0\n");
-        let http = cfg.http.with_overrides(Some("::1".to_owned()), Some(3000));
-        assert_eq!(http.host, "::1");
-        assert_eq!(http.port, 3000);
+        let cfg = resolve(
+            "",
+            "devices_config_path: from-the-file.toml\ndefaults:\n  port: 9999\nhttp:\n  host: 0.0.0.0\n",
+        )
+        .with_overrides(overrides("/srv/typed.toml", "::1", 3000));
+
+        assert_eq!(cfg.devices_config_path, PathBuf::from("/srv/typed.toml"));
+        assert_eq!(cfg.http.host, "::1");
+        assert_eq!(cfg.http.port, 3000);
     }
 
     #[test]
     fn an_unnamed_override_leaves_the_resolved_value_alone() {
         // The half-named case is the one worth pinning: `--port` must not drag
-        // the built-in host along behind it and clobber what the file said.
-        let cfg = resolve("", "http:\n  host: 0.0.0.0\n  port: 9999\n");
-        let http = cfg.http.with_overrides(None, Some(3000));
-        assert_eq!(http.host, "0.0.0.0");
-        assert_eq!(http.port, 3000);
+        // the built-in host along behind it and clobber what the file said, and
+        // must leave the sections it says nothing about entirely alone.
+        let resolved = resolve(
+            "",
+            "devices_config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
+        );
+        let cfg = resolved.clone().with_overrides(Overrides {
+            port: Some(3000),
+            ..Overrides::default()
+        });
+
+        assert_eq!(cfg.http.port, 3000);
+        assert_eq!(cfg.http.host, "0.0.0.0");
+        assert_eq!(cfg.devices_config_path, resolved.devices_config_path);
+        assert_eq!(cfg.sync, resolved.sync);
     }
 
     #[test]
     fn overriding_nothing_is_the_identity() {
+        // The property that makes one override step safe to apply
+        // unconditionally: the composition root never has to ask whether the
+        // operator typed anything before calling it.
+        let cfg = resolve(
+            "",
+            "devices_config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
+        );
+        assert_eq!(cfg.clone().with_overrides(Overrides::default()), cfg);
+    }
+
+    #[test]
+    fn a_command_line_path_is_not_anchored_to_the_config_directory() {
+        // The one asymmetry worth stating in a test rather than only in prose:
+        // the same relative path means different things by the route it took.
+        // A document travels with the deployment, so its path anchors to the
+        // config's directory; a flag travels with the operator, so its path is
+        // theirs to resolve against the working directory they typed it in.
+        let resolved = resolve("/etc/sismatic", "devices_config_path: devices.toml\n");
+        assert_eq!(
+            resolved.devices_config_path,
+            PathBuf::from("/etc/sismatic/devices.toml")
+        );
+
+        let cfg = resolved.with_overrides(Overrides {
+            devices_config_path: Some(PathBuf::from("devices.toml")),
+            ..Overrides::default()
+        });
+        assert_eq!(cfg.devices_config_path, PathBuf::from("devices.toml"));
+    }
+
+    #[test]
+    fn applying_two_override_sets_is_applying_their_merge() {
+        // `with_overrides` is a monoid homomorphism from `Overrides` under
+        // left-biased choice into endomorphisms under composition. Practically:
+        // a future second source of overrides can be merged in first or applied
+        // second, and neither ordering re-derives the precedence rule.
         let cfg = resolve("", "http:\n  host: 0.0.0.0\n  port: 9999\n");
-        assert_eq!(cfg.http.clone().with_overrides(None, None), cfg.http);
+        let inner = Overrides {
+            host: Some("::1".to_owned()),
+            ..Overrides::default()
+        };
+        let outer = Overrides {
+            port: Some(3000),
+            ..Overrides::default()
+        };
+
+        let sequential = cfg
+            .clone()
+            .with_overrides(inner.clone())
+            .with_overrides(outer.clone());
+        let merged = cfg.with_overrides(Overrides {
+            devices_config_path: outer.devices_config_path.or(inner.devices_config_path),
+            host: outer.host.or(inner.host),
+            port: outer.port.or(inner.port),
+        });
+        assert_eq!(sequential, merged);
     }
 
     #[test]
@@ -1242,10 +1149,13 @@ mod tests {
         );
         assert_eq!((cfg.http.host.as_str(), cfg.http.port), ("10.0.0.1", 1234));
 
-        let http = cfg.http.with_overrides(Some("::1".to_owned()), None);
-        assert_eq!(http.host, "::1");
+        let cfg = cfg.with_overrides(Overrides {
+            host: Some("::1".to_owned()),
+            ..Overrides::default()
+        });
+        assert_eq!(cfg.http.host, "::1");
         // ...and a flag the operator did not type leaves the variable standing.
-        assert_eq!(http.port, 1234);
+        assert_eq!(cfg.http.port, 1234);
     }
 
     #[test]

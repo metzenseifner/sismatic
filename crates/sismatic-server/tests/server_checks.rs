@@ -182,7 +182,7 @@ fn the_real_environment_reaches_the_real_binary() {
     const MISSING: &str = "/nonexistent/from-the-environment.toml";
 
     let out = Command::new(env!("CARGO_BIN_EXE_sismatic-server"))
-        .arg("--config")
+        .arg("--config-path")
         .arg(fixture("configuration.yaml"))
         .env("SISMATIC_SERVER__DEVICES_CONFIG_PATH", MISSING)
         .output()
@@ -200,6 +200,43 @@ fn the_real_environment_reaches_the_real_binary() {
     );
 }
 
+/// ...and that the composition root folds the command line in *at all*, which no
+/// unit test can show for the same reason the one above cannot show the
+/// environment is read: `configuration`'s tests call `ServerConfig::with_overrides`
+/// themselves, so a `main` that had dropped the call would still pass every one
+/// of them.
+///
+/// `--devices-config-path` is the flag worth driving through the real binary,
+/// because the failure it causes quotes the path back — the same trick the
+/// environment test uses to prove a value survived into the resolved config.
+/// Setting the matching variable at the same time makes this an assertion about
+/// *precedence*, not merely about the flag being read: the command line is the
+/// top layer, so the variable must lose.
+#[test]
+fn the_command_line_reaches_the_real_binary_and_outranks_the_environment() {
+    const TYPED: &str = "/nonexistent/from-the-command-line.toml";
+    const EXPORTED: &str = "/nonexistent/from-the-environment.toml";
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sismatic-server"))
+        .arg("--config-path")
+        .arg(fixture("configuration.yaml"))
+        .arg("--devices-config-path")
+        .arg(TYPED)
+        .env("SISMATIC_SERVER__DEVICES_CONFIG_PATH", EXPORTED)
+        .output()
+        .expect("running the server binary");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(TYPED),
+        "expected the flag's devices path to have been used, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(EXPORTED),
+        "the flag should have displaced the variable entirely: {stderr}"
+    );
+}
+
 /// A missing config file is an error, not a panic or a silent set of defaults.
 #[test]
 fn a_missing_config_file_is_reported() {
@@ -214,7 +251,7 @@ fn a_missing_config_file_is_reported() {
 #[test]
 fn a_missing_config_file_makes_the_binary_print_help() {
     let out = Command::new(env!("CARGO_BIN_EXE_sismatic-server"))
-        .arg("--config")
+        .arg("--config-path")
         .arg(fixture("does-not-exist.yaml"))
         // The env layer must not rescue an explicitly-named missing file.
         .env(CONFIG_PATH_ENV, fixture("configuration.yaml"))
@@ -229,7 +266,7 @@ fn a_missing_config_file_makes_the_binary_print_help() {
         "expected the missing path named, got: {stderr}"
     );
     assert!(
-        stderr.contains("--config") && stderr.contains("--host"),
+        stderr.contains("--config-path") && stderr.contains("--host"),
         "expected the help text, got: {stderr}"
     );
     // Help is a diagnostic, not output: a caller piping this binary gets nothing.

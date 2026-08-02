@@ -31,12 +31,19 @@
 //! one failure is answered by the help text rather than by a panic, since help
 //! is what lists the three layers. See [`exit_with_help`].
 //!
-//! `--host` and `--port` sit *above* a config that has already been fully
-//! resolved — file and environment both — so they are folded in here rather
-//! than in the resolver; see [`HttpConfig::with_overrides`]. Every flag is
-//! therefore an `Option` with no clap-side default: a default supplied by clap
-//! would be indistinguishable from one the operator typed, and would outrank
-//! everything below it on every run.
+//! Every other flag sits *above* a config that has already been fully resolved
+//! — file and environment both — so they are folded in here rather than in the
+//! resolver, in one step, by mapping [`Args`] into an [`Overrides`] and applying
+//! it once; see [`ServerConfig::with_overrides`]. Every flag is therefore an
+//! `Option` with no clap-side default: a default supplied by clap would be
+//! indistinguishable from one the operator typed, and would outrank everything
+//! below it on every run.
+//!
+//! [`Args`] and [`Overrides`] are near-identical products, and that repetition
+//! is the price of the boundary rather than an oversight: [`Args`] is `clap`'s
+//! shape — attributes, short flags, help text — and [`Overrides`] is the
+//! library's, with no dependency on how the values were collected. Mapping one
+//! to the other is the single place a flag is tied to the setting it names.
 //!
 //! The same reasoning keeps clap's `env` attribute off these flags. The
 //! environment already reaches these two settings as
@@ -52,8 +59,15 @@
 //! 3. `http:` in the file, then `defaults:`,
 //! 4. the built-in constant.
 //!
+//! `--devices-config-path` layers the same way over
+//! `SISMATIC_SERVER__DEVICES_CONFIG_PATH` and `devices_config_path:`, with one
+//! difference worth knowing: a relative path from the file or the environment is
+//! anchored to the config file's directory, and one typed on the command line is
+//! not. See [the module docs](sismatic_server::configuration#relative-paths).
+//!
 //! [`CONFIG_PATH_ENV`]: sismatic_server::configuration::CONFIG_PATH_ENV
-//! [`HttpConfig::with_overrides`]: sismatic_server::configuration::HttpConfig::with_overrides
+//! [`ServerConfig::with_overrides`]: sismatic_server::configuration::ServerConfig::with_overrides
+//! [`Overrides`]: sismatic_server::configuration::Overrides
 
 use std::ffi::OsString;
 use std::fmt;
@@ -63,17 +77,21 @@ use sismatic_server::telemetry::{get_subscriber, init_subscriber};
 
 use clap::{CommandFactory, Parser};
 use sismatic_core::devices::config;
-use sismatic_server::configuration::{CONFIG_PATH_ENV, ServerConfig, get_configuration};
+use sismatic_server::configuration::{CONFIG_PATH_ENV, Overrides, get_configuration};
 use sismatic_server::run;
 use tracing::{info, instrument};
 
 #[derive(Parser, Debug)]
 #[command(version, author="Jonathan L. Komar", about, long_about = None)]
 struct Args {
-    /// Path to configuration file e.g. configuration.yaml
+    /// Path to server configuration file e.g. configuration.yaml
     /// [env: SISMATIC_SERVER__CONFIG] [default: configuration.yaml]
     #[arg(short, long)]
-    config: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+
+    /// Path to devices configuration file
+    #[arg(short, long)]
+    devices_config_path: Option<PathBuf>,
 
     /// Host to serve on e.g. 127.0.0.1
     /// [env: SISMATIC_SERVER__HTTP__HOST] [default: from config, else 127.0.0.1]
@@ -127,7 +145,7 @@ async fn main() -> Result<(), std::io::Error> {
     // Read by hand rather than through the config layer, because it decides
     // which document that layer reads. The name comes from `configuration` so
     // the one variable answered here and the one dropped there cannot drift.
-    let config_path = resolve_config_path(args.config, std::env::var_os(CONFIG_PATH_ENV));
+    let config_path = resolve_config_path(args.config_path, std::env::var_os(CONFIG_PATH_ENV));
 
     // Asked before the read rather than recovered from it afterwards: the
     // `config` crate reports a missing file as a `Foreign` error wrapping an
@@ -145,11 +163,13 @@ async fn main() -> Result<(), std::io::Error> {
 
     // The one layer neither the file nor the environment can express: flags the
     // operator typed. Folded in here rather than inside `resolve_config` so that
-    // resolver stays a function of the document alone.
-    let cfg = ServerConfig {
-        http: cfg.http.with_overrides(args.host, args.port),
-        ..cfg
-    };
+    // resolver stays a function of the document alone, and in one call rather
+    // than per section so there is one answer to where a flag takes effect.
+    let cfg = cfg.with_overrides(Overrides {
+        devices_config_path: args.devices_config_path,
+        host: args.host,
+        port: args.port,
+    });
 
     let devices = config::load(&cfg.devices_config_path).unwrap_or_else(|e| {
         panic!(

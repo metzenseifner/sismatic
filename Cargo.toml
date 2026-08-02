@@ -23,20 +23,14 @@ license = "ECL-2.0"
 # `foo.workspace = true` and add only the extra features they need, so e.g. the
 # web tree never leaks into the wheel build and pyo3 never leaks into the CLI.
 [workspace.dependencies]
-# Internal. The `version` is required (not just `path`) so that `cargo package`
-# succeeds under release-plz's `git_only` mode — packaging a crate errors if a
-# path dependency omits a version. release-plz keeps this in lockstep with the
-# workspace version on every bump; never hand-edit these (a blind find/replace
-# across Cargo.toml + Cargo.lock is what rewrote the unrelated third-party
-# `ppv-lite86 0.2.21` to a nonexistent `0.2.22` and broke every build).
-#
-# The companion rule: because these carry a `version`, the crates they point at
-# must stay publishable — see the "publishable dependency" rule in
-# release-plz.toml, enforced by `nix flake check`.
-sismatic-core = { path = "crates/sismatic-core", version = "0.2.23" }
-# The wire contract. Shared by the (future) http-api and api-client; depends on
-# nothing internal, so it never widens any consumer's dependency cone.
-sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.23" }
+# Internal crates. All are `publish = false`, so path-only: no version to
+# keep in lockstep with the shared `workspace.package.version`.
+sismatic-api-types = { path = "crates/sismatic-api-types" }
+sismatic-core = { path = "crates/sismatic-core" }
+sismatic-http-api = { path = "crates/sismatic-http-api" }
+sismatic-store = { path = "crates/sismatic-store" }
+sismatic-store-memory = { path = "crates/sismatic-store-memory" }
+sismatic-sync = { path = "crates/sismatic-sync" }
 
 # Shared third-party
 # The read side's HTTP framework. `default-features = false` drops the response
@@ -44,6 +38,12 @@ sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.23" }
 # of which this API uses — so the read side's dependency cone stays close to the
 # framework itself rather than pulling a compression toolchain into every build
 # and every license audit. Turn a feature back on in the member that needs it.
+#
+# One feature comes back regardless of this line: `utoipa-swagger-ui` declares
+# actix-web with `macros`, and cargo unifies features across the graph, so the
+# routing macros are compiled whether or not a handler here uses them. That is
+# the whole of the leak — it does not re-enable the compressors, cookies or
+# HTTP/2, which is why it is recorded rather than worked around.
 actix-web = { version = "4.13", default-features = false }
 anyhow = "1"
 async-trait = "0.1"
@@ -87,6 +87,31 @@ toml = "0.8"
 # Optional in `sismatic-api-types` (feature `ts`): emit TypeScript definitions
 # from the DTOs so the web frontend shares one source of truth for JSON shapes.
 ts-rs = "12"
+# OpenAPI, derived from the same structs `serde` derives from. The point is that
+# the document cannot describe a shape the server does not serve: rename a field
+# and the schema renames with it, because both come off one `#[derive]`. A
+# hand-written openapi.yaml is a second source of truth that is only ever checked
+# by a human noticing.
+#
+# Optional in `sismatic-api-types` (feature `openapi`) for the same reason
+# `ts-rs` is: the wire contract stays a serde-only crate for anyone who wants
+# nothing but the DTOs, and a plain build never compiles the proc-macro tree.
+utoipa = { version = "5.5", features = ["macros"] }
+# Serves the Swagger UI bundle from inside the binary — no CDN, no static-file
+# deployment step, and the docs a server shows are the docs that server was
+# built with.
+#
+# `vendored` is load-bearing, not a preference: without it this crate's build
+# script *downloads* the Swagger UI zip from GitHub, which cannot work in the
+# `nix flake check` sandbox (no network) and would make every build depend on a
+# release asset staying up. `vendored` takes the zip from the
+# `utoipa-swagger-ui-vendored` crate in the lockfile instead, so the UI is
+# pinned like any other dependency. `default-features = false` then drops `url`,
+# which only the download path it replaces ever used.
+utoipa-swagger-ui = { version = "9", default-features = false, features = [
+  "actix-web",
+  "vendored",
+] }
 winnow = "1.0.3"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3.23", features = [

@@ -36,7 +36,7 @@
 //! # Field names in a URL
 //!
 //! Canonical field names are `UPPER_SNAKE` (`RUNNING_STATE`), which is not how
-//! anyone types a URL. [`normalize_field`] upper-cases and rewrites `-` to `_`,
+//! anyone types a URL. `normalize_field` upper-cases and rewrites `-` to `_`,
 //! so `/fields/running-state`, `/fields/running_state` and `/fields/RUNNING_STATE`
 //! all name the same field, and the canonical spelling is what appears in the
 //! response body.
@@ -48,7 +48,11 @@
 //! the sync side stores canonical names.
 
 use actix_web::web;
-use sismatic_api_types::{FieldName, Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
+// `ApiError` is named only by the `#[utoipa::path]` response attributes below —
+// the handlers never build one, they return `ApiFailure` and let it render.
+use sismatic_api_types::{
+    ApiError, FieldName, Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp,
+};
 use sismatic_store::ReadStore;
 
 use crate::routes::error::ApiFailure;
@@ -84,6 +88,19 @@ const END_OF_TIME: &str = "9999-12-31T23:59:59Z";
 /// answering 404 would report a device that is merely unreachable as one that is
 /// not configured. The device registry is the authority on existence, and it
 /// lives on the write side.
+#[utoipa::path(
+    get,
+    path = "/devices/{id}/fields",
+    context_path = "/v1",
+    tag = "readings",
+    params(("id" = String, Path, description = "Device id, as configured on the write side.")),
+    responses(
+        (status = 200, description = "Every field's latest value. An unknown device \
+             yields an empty list rather than a 404 — see the handler's docs.",
+         body = ReadingList),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
 pub async fn list_fields(
     store: web::Data<dyn ReadStore>,
     path: web::Path<String>,
@@ -98,6 +115,28 @@ pub async fn list_fields(
 /// A bare [`Reading`] rather than a one-element list: the response answers a
 /// point question, and its `at` is the freshness of *this* value, which is the
 /// thing a caller checks before trusting it.
+#[utoipa::path(
+    get,
+    path = "/devices/{id}/fields/{field}",
+    context_path = "/v1",
+    tag = "readings",
+    params(
+        ("id" = String, Path, description = "Device id, as configured on the write side."),
+        ("field" = String, Path,
+         description = "Field name. Case-insensitive, and `-` is read as `_`, so \
+             `running-state` and `RUNNING_STATE` name the same field.",
+         example = "RUNNING_STATE"),
+    ),
+    responses(
+        (status = 200, description = "The field's most recent value.", body = Reading),
+        (status = 404, description = "Nothing is stored for this device and field. \
+             This is not a claim that either does not exist: an unknown device, an \
+             unpolled field and a device that has not answered yet are one answer \
+             from here.",
+         body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
 pub async fn read_field(
     store: web::Data<dyn ReadStore>,
     path: web::Path<(String, String)>,
@@ -118,9 +157,36 @@ pub async fn read_field(
 /// over time, oldest first.
 ///
 /// Every parameter is optional: omit the bounds for all of recorded history,
-/// omit `limit` for [`DEFAULT_LIMIT`]. An empty result is a `200` with an empty
+/// omit `limit` for `DEFAULT_LIMIT`. An empty result is a `200` with an empty
 /// list, not a 404 — "nothing happened in that window" is an answer, and the
 /// same request over a wider span may well return rows.
+#[utoipa::path(
+    get,
+    path = "/devices/{id}/fields/{field}/history",
+    context_path = "/v1",
+    tag = "readings",
+    params(
+        ("id" = String, Path, description = "Device id, as configured on the write side."),
+        ("field" = String, Path,
+         description = "Field name, normalized as on the latest-value route.",
+         example = "RUNNING_STATE"),
+        // The four query parameters come from `ReadingQuery`'s `IntoParams`
+        // rather than being restated here, so this route documents the struct
+        // the handler actually deserializes.
+        ReadingQuery,
+    ),
+    responses(
+        (status = 200, description = "The field's readings within the span, oldest \
+             first. Empty is a valid answer, not a 404. Over-long results are \
+             truncated to their most recent rows.",
+         body = ReadingList),
+        (status = 400, description = "A `?field=` that contradicts the field in the \
+             path. Rejected rather than ignored, so a caller can never be served a \
+             different field than the one it spelled out.",
+         body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
 pub async fn field_history(
     store: web::Data<dyn ReadStore>,
     path: web::Path<(String, String)>,

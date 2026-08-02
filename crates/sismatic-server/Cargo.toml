@@ -1,5 +1,6 @@
 [package]
 name = "sismatic-server"
+description = "Sismatic Server is a composition root."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -25,27 +26,20 @@ path = "src/main.rs"
 name = "sismatic-server"
 
 [dependencies]
+
+# `toml`/`yaml` give the composition root core's extension-dispatching
+# `config::load`, so `devices_config_path` may name either format.
+sismatic-core = { workspace = true, features = ["ssh", "toml", "yaml"] }
+sismatic-http-api = { workspace = true }
+sismatic-store = { workspace = true }
+sismatic-store-memory = { workspace = true }
+sismatic-sync = { workspace = true, features = ["driver"] }
+
+#  Third-party dependencies
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 config = "0.15.25"
 serde.workspace = true
-# `toml`/`yaml` give the composition root core's extension-dispatching
-# `config::load`, so `devices_config_path` may name either format.
-sismatic-core = { version = "0.2.23", path = "../sismatic-core", features = [
-  "ssh",
-  "toml",
-  "yaml",
-] }
-# The read side. It sees only the store, so linking it here does not widen the
-# composition root's cone — the root already depends on everything it joins.
-sismatic-http-api = { version = "0.2.23", path = "../sismatic-http-api" }
-sismatic-store = { version = "0.2.23", path = "../sismatic-store" }
-sismatic-store-memory = { version = "0.2.23", path = "../sismatic-store-memory" }
-# The composition root drives the write side, so it needs the `driver` feature
-# (the poll loops), not just the pure `dto` seam.
-sismatic-sync = { version = "0.2.23", path = "../sismatic-sync", features = [
-  "driver",
-] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true, features = ["log"] }
 tracing-bunyan-formatter.workspace = true

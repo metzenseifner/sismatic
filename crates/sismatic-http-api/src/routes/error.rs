@@ -8,12 +8,8 @@
 //!
 //! # Why a local type rather than `ApiError` itself
 //!
-//! `ApiError` lives in `sismatic-api-types`, which depends on `serde` and
-//! nothing else — deliberately, since every client links it and none of them
-//! should acquire a web framework by doing so. `ResponseError` is an
-//! `actix-web` trait, so implementing it on `ApiError` would either require that
-//! dependency in the contract crate or run into the orphan rule here. A local
-//! type carrying the status code and *converting* into the shared body keeps the
+//! A local
+//! type carrying the status code and *converting* into the shared body (`ApiError`) keeps the
 //! framework on this side of the seam and the contract on the other.
 
 use actix_web::http::StatusCode;

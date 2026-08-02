@@ -16,6 +16,7 @@ use crate::{DeviceId, GroupId};
 /// credentials or transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionStatus {
     /// A connection is open.
@@ -30,7 +31,10 @@ pub enum ConnectionStatus {
 /// with every secret omitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceSummary {
+    // See `Reading::device` for why the alias is spelled out for utoipa.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub id: DeviceId,
     pub host: String,
     pub port: u16,
@@ -43,6 +47,7 @@ pub struct DeviceSummary {
 /// payload for a single-device detail view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceDetail {
     pub device: DeviceSummary,
     /// Latest reading per field, most-recent value of each quantity.
@@ -53,6 +58,7 @@ pub struct DeviceDetail {
 /// without a breaking change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceList {
     pub devices: Vec<DeviceSummary>,
 }
@@ -61,14 +67,19 @@ pub struct DeviceList {
 /// id and the devices it fans out to).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GroupSummary {
+    // See `Reading::device` for why the alias is spelled out for utoipa.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub id: GroupId,
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub members: Vec<DeviceId>,
 }
 
 /// The group index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GroupList {
     pub groups: Vec<GroupSummary>,
 }

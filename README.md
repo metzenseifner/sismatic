@@ -15,8 +15,7 @@ There are several reasons why this library is worthwhile:
 
 - [core](./crates/sismatic-core)
 - [python](./crates/sismatic-python-sdk/README.md)
-- [web](./crates/sismatic-web)
-- [cli](./crates/sismatic-cli)
+- [server](./crates/sismatic-server/README.md)
 
 ## Configuration Example
 

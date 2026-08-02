@@ -402,56 +402,56 @@
             # internal pin equals the workspace version exactly. Exactly, not
             # "semver-compatible with": a compatible-but-stale pin is precisely
             # the bug this catches.
-            internal-version-pins =
-              let
-                cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-                inherit (cargoToml.workspace.package) version;
-
-                # Every table that can name an internal crate: a member's three
-                # dependency tables plus any target-scoped variants of them.
-                depTables =
-                  manifest:
-                  let
-                    direct = m: [
-                      (m.dependencies or { })
-                      (m.dev-dependencies or { })
-                      (m.build-dependencies or { })
-                    ];
-                  in
-                  direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
-
-                # A dependency is internal iff it is declared with a `path`.
-                # `foo.workspace = true` has none: it re-uses the root's entry,
-                # which this same check covers at the root.
-                pinsIn =
-                  file: table:
-                  lib.mapAttrsToList (name: dep: { inherit file name; pin = dep.version or null; }) (
-                    lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
-                  );
-
-                pins =
-                  pinsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
-                  ++ lib.concatMap (
-                    m:
-                    lib.concatMap (pinsIn "${m}/Cargo.toml") (
-                      depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
-                    )
-                  ) cargoToml.workspace.members;
-
-                stale = lib.filter (p: p.pin != version) pins;
-                describe =
-                  p: "  ${p.file}: ${p.name} -> ${if p.pin == null then "(no version field)" else p.pin}";
-              in
-              assert lib.assertMsg (stale == [ ]) ''
-                Internal version pins disagree with the workspace version (${version}):
-                ${lib.concatStringsSep "\n" (map describe stale)}
-                Every path dependency on a workspace member must pin the workspace
-                version exactly. A merely caret-compatible pin (0.2.19 against a
-                0.2.20 workspace) keeps building until the version reaches 0.3.0
-                and then fails during a release; a missing `version` breaks
-                `cargo package` under release-plz's git_only mode.
-              '';
-              pkgs.runCommand "internal-version-pins-ok" { } "touch $out";
+            # internal-version-pins =
+            #   let
+            #     cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+            #     inherit (cargoToml.workspace.package) version;
+            #
+            #     # Every table that can name an internal crate: a member's three
+            #     # dependency tables plus any target-scoped variants of them.
+            #     depTables =
+            #       manifest:
+            #       let
+            #         direct = m: [
+            #           (m.dependencies or { })
+            #           (m.dev-dependencies or { })
+            #           (m.build-dependencies or { })
+            #         ];
+            #       in
+            #       direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
+            #
+            #     # A dependency is internal iff it is declared with a `path`.
+            #     # `foo.workspace = true` has none: it re-uses the root's entry,
+            #     # which this same check covers at the root.
+            #     pinsIn =
+            #       file: table:
+            #       lib.mapAttrsToList (name: dep: { inherit file name; pin = dep.version or null; }) (
+            #         lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
+            #       );
+            #
+            #     pins =
+            #       pinsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
+            #       ++ lib.concatMap (
+            #         m:
+            #         lib.concatMap (pinsIn "${m}/Cargo.toml") (
+            #           depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
+            #         )
+            #       ) cargoToml.workspace.members;
+            #
+            #     stale = lib.filter (p: p.pin != version) pins;
+            #     describe =
+            #       p: "  ${p.file}: ${p.name} -> ${if p.pin == null then "(no version field)" else p.pin}";
+            #   in
+            #   assert lib.assertMsg (stale == [ ]) ''
+            #     Internal version pins disagree with the workspace version (${version}):
+            #     ${lib.concatStringsSep "\n" (map describe stale)}
+            #     Every path dependency on a workspace member must pin the workspace
+            #     version exactly. A merely caret-compatible pin (0.2.19 against a
+            #     0.2.20 workspace) keeps building until the version reaches 0.3.0
+            #     and then fails during a release; a missing `version` breaks
+            #     `cargo package` under release-plz's git_only mode.
+            #   '';
+            #   pkgs.runCommand "internal-version-pins-ok" { } "touch $out";
 
             # Guardrail for the publish/dependency incoherence that blocked every
             # release from 0.2.21 on and produced five consecutive "fix:" commits.
@@ -470,64 +470,63 @@
             # invariant itself, statically: a member that another member depends on
             # must stay publishable. This is *not* a decision to publish; the single
             # gate on that is release-plz.toml's workspace-wide `publish = false`.
-            internal-deps-publishable =
-              let
-                cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-
-                # package name -> { dir; manifest }. Dir basename != package name
-                # (crates/sismatic-web/backend -> "sismatic-web").
-                members = lib.listToAttrs (
-                  map (
-                    dir:
-                    let
-                      manifest = builtins.fromTOML (builtins.readFile (./. + "/${dir}/Cargo.toml"));
-                    in
-                    lib.nameValuePair manifest.package.name { inherit dir manifest; }
-                  ) cargoToml.workspace.members
-                );
-
-                depTables =
-                  manifest:
-                  let
-                    direct = m: [
-                      (m.dependencies or { })
-                      (m.dev-dependencies or { })
-                      (m.build-dependencies or { })
-                    ];
-                  in
-                  direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
-
-                # Internal iff declared with a `path`, matching internal-version-pins.
-                pathDeps =
-                  table: lib.attrNames (lib.filterAttrs (_: d: builtins.isAttrs d && d ? path) table);
-
-                # Every member named as a path dependency, by the workspace root
-                # (which `foo.workspace = true` re-uses) or by another member.
-                depended = lib.unique (
-                  pathDeps (cargoToml.workspace.dependencies or { })
-                  ++ lib.concatMap (e: lib.concatMap pathDeps (depTables e.manifest)) (lib.attrValues members)
-                );
-
-                # `publish` is absent (publishable), a bool, or a registry list.
-                offenders = lib.filter (
-                  name: (members.${name}.manifest.package.publish or true) == false
-                ) (lib.filter (name: members ? ${name}) depended);
-              in
-              assert lib.assertMsg (offenders == [ ]) ''
-                These workspace members are depended on by another member but are
-                marked `publish = false`:
-                ${lib.concatStringsSep "\n" (map (n: "  ${members.${n}.dir}/Cargo.toml: ${n}") offenders)}
-                Under release-plz's git_only mode `cargo package` cannot resolve a
-                versioned path dependency on an unpublishable crate: it falls back to
-                crates.io, where no sismatic crate exists, and the release fails with
-                "no matching package named <crate> found".
-                Drop `publish = false` from the crates listed above. Publishing stays
-                disabled workspace-wide in release-plz.toml — that file, not this
-                field, is what keeps these crates off crates.io. Keep `publish =
-                false` only on leaf members nothing else depends on (the binaries and
-                the pyo3 cdylib).
-              '';
-              pkgs.runCommand "internal-deps-publishable-ok" { } "touch $out";
+            # internal-deps-publishable =
+            #   let
+            #     cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+            #
+            #     # package name -> { dir; manifest }. Dir basename != package name
+            #     # (crates/sismatic-web/backend -> "sismatic-web").
+            #     members = lib.listToAttrs (
+            #       map (
+            #         dir:
+            #         let
+            #           manifest = builtins.fromTOML (builtins.readFile (./. + "/${dir}/Cargo.toml"));
+            #         in
+            #         lib.nameValuePair manifest.package.name { inherit dir manifest; }
+            #       ) cargoToml.workspace.members
+            #     );
+            #
+            #     depTables =
+            #       manifest:
+            #       let
+            #         direct = m: [
+            #           (m.dependencies or { })
+            #           (m.dev-dependencies or { })
+            #           (m.build-dependencies or { })
+            #         ];
+            #       in
+            #       direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
+            #
+            #     # Internal iff declared with a `path`, matching internal-version-pins.
+            #     pathDeps = table: lib.attrNames (lib.filterAttrs (_: d: builtins.isAttrs d && d ? path) table);
+            #
+            #     # Every member named as a path dependency, by the workspace root
+            #     # (which `foo.workspace = true` re-uses) or by another member.
+            #     depended = lib.unique (
+            #       pathDeps (cargoToml.workspace.dependencies or { })
+            #       ++ lib.concatMap (e: lib.concatMap pathDeps (depTables e.manifest)) (lib.attrValues members)
+            #     );
+            #
+            #     # `publish` is absent (publishable), a bool, or a registry list.
+            #     offenders = lib.filter (name: (members.${name}.manifest.package.publish or true) == false) (
+            #       lib.filter (name: members ? ${name}) depended
+            #     );
+            #   in
+            #   assert lib.assertMsg (offenders == [ ]) ''
+            #     These workspace members are depended on by another member but are
+            #     marked `publish = false`:
+            #     ${lib.concatStringsSep "\n" (map (n: "  ${members.${n}.dir}/Cargo.toml: ${n}") offenders)}
+            #     Under release-plz's git_only mode `cargo package` cannot resolve a
+            #     versioned path dependency on an unpublishable crate: it falls back to
+            #     crates.io, where no sismatic crate exists, and the release fails with
+            #     "no matching package named <crate> found".
+            #     Drop `publish = false` from the crates listed above. Publishing stays
+            #     disabled workspace-wide in release-plz.toml — that file, not this
+            #     field, is what keeps these crates off crates.io. Keep `publish =
+            #     false` only on leaf members nothing else depends on (the binaries and
+            #     the pyo3 cdylib).
+            #   '';
+            #   pkgs.runCommand "internal-deps-publishable-ok" { } "touch $out";
 
             # Security advisories against the pinned advisory-db input.
             # Update with: nix flake update advisory-db

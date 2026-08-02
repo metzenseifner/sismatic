@@ -4,16 +4,6 @@ description = "Serde DTOs defining the Sismatic HTTP API wire contract (no logic
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# No `publish = false`, deliberately — see the "publishable dependency" rule in
-# release-plz.toml. Other members (`sismatic-store`, `-store-memory`, `-sync`,
-# and this crate's own dev-dependency in `-http-api`) depend on it by path *with
-# a version*. release-plz's git_only mode runs `cargo package` over every member,
-# and cargo will only substitute a locally packaged sibling for such a dependency
-# when that sibling is itself publishable; a `publish = false` sibling sends
-# cargo to crates.io, where no sismatic crate exists, and packaging fails.
-# Nothing actually reaches crates.io: release-plz.toml sets `publish = false`
-# workspace-wide, which is the single gate on publishing.
-publish = true
 
 [dependencies]
 # The *only* required dependency. api-types is the wire contract and nothing
@@ -28,10 +18,22 @@ serde.workspace = true
 # plain `cargo build` (and `nix flake check`) never compiles the proc-macro tree.
 ts-rs = { workspace = true, optional = true }
 
+# Optional, and for exactly the same reason as `ts-rs` above: derive the OpenAPI
+# schema of each DTO from the struct `serde` already derives from, so the
+# published document and the bytes on the wire cannot disagree. Off by default so
+# a client that only wants the DTOs — and `cargo build` / `nix flake check` —
+# never compiles utoipa's proc-macro tree.
+utoipa = { workspace = true, optional = true }
+
 [features]
 # Derive `ts_rs::TS` on every DTO. Enable, then generate `.ts` bindings with a
 # test or `TS::export_all` in a downstream tool.
 ts = ["dep:ts-rs"]
+
+# Derive `utoipa::ToSchema` on every DTO (and `IntoParams` on the query-string
+# types). Enabled by `sismatic-http-api`, which assembles them into the served
+# OpenAPI document; see that crate's `openapi` module.
+openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 # Exercises the round-trip in the crate/doc examples; not part of the contract.

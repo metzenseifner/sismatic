@@ -4,30 +4,37 @@ description = "The read side of Sismatic: an actix-web application over the stor
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# No `publish = false`, deliberately — see the "publishable dependency" rule in
-# release-plz.toml. `sismatic-server` depends on this crate by path *with a
-# version*, so it must stay publishable for `cargo package` to resolve that
-# dependency against the local sibling instead of crates.io. Publishing is gated
-# in release-plz.toml (`publish = false` workspace-wide), not here.
-publish = true
 
 [dependencies]
 actix-web.workspace = true
-# The *only* internal dependency, and deliberately the read half of the
-# hexagon's storage port. Not `sismatic-core`: the read side answers from what
-# the write side already persisted, so it never needs a device, a transport or
-# an SSH session — and keeping that out of its dependency cone is what stops the
-# API (and anything that links it) from acquiring a compile path to core.
-sismatic-store = { version = "0.2.23", path = "../sismatic-store" }
+# `openapi` turns on the DTOs' `ToSchema`/`IntoParams` derives. This crate is the
+# only place that needs them: it is where the schemas are assembled into a
+# document and served, and the contract crate has no opinion about HTTP.
+sismatic-api-types = { workspace = true, features = ["openapi"] }
+sismatic-store = { workspace = true }
+# The `#[utoipa::path]` attributes on the handlers and the `OpenApi` derive that
+# collects them — see `src/openapi.rs`.
+utoipa.workspace = true
+# Serves the browsable UI over the document above. Its `actix-web` feature makes
+# `SwaggerUi` an actix `HttpServiceFactory`, so it mounts with `.service()` like
+# any other route rather than needing a static-file handler wired by hand.
+utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
-# Needed to implement `ReadStore` for the test double in `tests/health_check.rs`
-# — the store port is an async trait.
+# Needed to implement `ReadStore` for the test doubles in `tests/` — the store
+# port is an async trait.
 async-trait.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 # The tests drive a real server, so they need a runtime and `#[tokio::test]`.
 # `rt` (current-thread) is enough: actix runs its workers on their own threads,
 # and the test's runtime only has to poll the client and the server handle.
 tokio = { workspace = true, features = ["macros", "rt"] }
-# The test double implements the port, so it speaks the port's vocabulary.
-sismatic-api-types.workspace = true
+# The response-body assertions read the JSON as values rather than re-deriving
+# the DTOs, so a test pins the bytes on the wire and not just a round-trip.
+serde_json.workspace = true
+# The readings tests run the handlers over the *real* in-memory adapter rather
+# than a hand-written double. A double would have to restate the port's ordering
+# and filtering semantics, and a test of a handler over a double that drifted
+# from the adapter would pass while the server was wrong. A dev-dependency, so
+# nothing about the shipped crate's dependency cone changes.
+sismatic-store-memory = { workspace = true }
