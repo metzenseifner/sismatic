@@ -18,19 +18,19 @@ config = "0.15.25"
 serde.workspace = true
 # `toml`/`yaml` give the composition root core's extension-dispatching
 # `config::load`, so `devices_config_path` may name either format.
-sismatic-core = { version = "0.2.20", path = "../sismatic-core", features = [
+sismatic-core = { version = "0.2.21", path = "../sismatic-core", features = [
   "ssh",
   "toml",
   "yaml",
 ] }
 # The read side. It sees only the store, so linking it here does not widen the
 # composition root's cone — the root already depends on everything it joins.
-sismatic-http-api = { version = "0.2.20", path = "../sismatic-http-api" }
-sismatic-store = { version = "0.2.20", path = "../sismatic-store" }
-sismatic-store-memory = { version = "0.2.20", path = "../sismatic-store-memory" }
+sismatic-http-api = { version = "0.2.21", path = "../sismatic-http-api" }
+sismatic-store = { version = "0.2.21", path = "../sismatic-store" }
+sismatic-store-memory = { version = "0.2.21", path = "../sismatic-store-memory" }
 # The composition root drives the write side, so it needs the `driver` feature
 # (the poll loops), not just the pure `dto` seam.
-sismatic-sync = { version = "0.2.20", path = "../sismatic-sync", features = [
+sismatic-sync = { version = "0.2.21", path = "../sismatic-sync", features = [
   "driver",
 ] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
