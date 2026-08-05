@@ -389,6 +389,70 @@
               '';
               pkgs.runCommand "release-plz-config-ok" { } "touch $out";
 
+            # Guardrail for a stale internal version pin — the drift that left
+            # sismatic-api-types pinned at 0.2.19 while the workspace was at
+            # 0.2.20. Every internal dependency must carry a `version` next to
+            # its `path` (see [workspace.dependencies] for why), and release-plz
+            # only rewrites the pins it manages: a member with `release = false`
+            # is still processed, but its dependency declaration is not
+            # maintained, so its pin rots silently. Cargo's caret rule then hides
+            # the rot — ^0.2.19 matches 0.2.20 — so the workspace keeps building
+            # and the pin only breaks once the version reaches 0.3.0, during a
+            # release. Another *static* drift, so assert it statically: every
+            # internal pin equals the workspace version exactly. Exactly, not
+            # "semver-compatible with": a compatible-but-stale pin is precisely
+            # the bug this catches.
+            internal-version-pins =
+              let
+                cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+                inherit (cargoToml.workspace.package) version;
+
+                # Every table that can name an internal crate: a member's three
+                # dependency tables plus any target-scoped variants of them.
+                depTables =
+                  manifest:
+                  let
+                    direct = m: [
+                      (m.dependencies or { })
+                      (m.dev-dependencies or { })
+                      (m.build-dependencies or { })
+                    ];
+                  in
+                  direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
+
+                # A dependency is internal iff it is declared with a `path`.
+                # `foo.workspace = true` has none: it re-uses the root's entry,
+                # which this same check covers at the root.
+                pinsIn =
+                  file: table:
+                  lib.mapAttrsToList (name: dep: { inherit file name; pin = dep.version or null; }) (
+                    lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
+                  );
+
+                pins =
+                  pinsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
+                  ++ lib.concatMap (
+                    m:
+                    lib.concatMap (pinsIn "${m}/Cargo.toml") (
+                      depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
+                    )
+                  ) cargoToml.workspace.members;
+
+                stale = lib.filter (p: p.pin != version) pins;
+                describe =
+                  p: "  ${p.file}: ${p.name} -> ${if p.pin == null then "(no version field)" else p.pin}";
+              in
+              assert lib.assertMsg (stale == [ ]) ''
+                Internal version pins disagree with the workspace version (${version}):
+                ${lib.concatStringsSep "\n" (map describe stale)}
+                Every path dependency on a workspace member must pin the workspace
+                version exactly. A merely caret-compatible pin (0.2.19 against a
+                0.2.20 workspace) keeps building until the version reaches 0.3.0
+                and then fails during a release; a missing `version` breaks
+                `cargo package` under release-plz's git_only mode.
+              '';
+              pkgs.runCommand "internal-version-pins-ok" { } "touch $out";
+
             # Security advisories against the pinned advisory-db input.
             # Update with: nix flake update advisory-db
             audit = craneLib.cargoAudit {

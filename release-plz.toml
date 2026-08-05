@@ -59,11 +59,11 @@ version_group = "sismatic"
 # the bumped workspace version passively via `version.workspace = true`.
 [[package]]
 name = "sismatic-cli"
-release = false
+version_group = "sismatic"
 
 [[package]]
 name = "sismatic-web"
-release = false
+version_group = "sismatic"
 
 # The composition-root binary. Like the other binaries: internal, published
 # nowhere, inherits the bumped workspace version passively.
@@ -82,11 +82,11 @@ release = false
 # to `release = true` (or joined to the `sismatic` version_group) safely.
 [[package]]
 name = "sismatic-api-types"
-release = false
+version_group = "sismatic"
 
 [[package]]
 name = "sismatic-sync"
-release = false
+version_group = "sismatic"
 
 # The store *port* (the `ReadStore`/`WriteStore` traits) and its in-memory
 # adapter. Both are internal, `publish = false`, and nothing released depends on
