@@ -3,6 +3,19 @@ name = "sismatic-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# The composition-root binary: internal, published nowhere (release-plz.toml
+# already carries `release = false` for it). The flag is not merely
+# documentation — it is load-bearing. `cargo publish --workspace` skips
+# `publish = false` members, and the members it skips are also absent from the
+# local overlay that satisfies the other members' path+version deps. So a
+# *publishable* crate may not depend on an unpublishable one: cargo strips the
+# `path`, resolves the leftover `version` against crates.io, and fails with
+# "no matching package named `sismatic-http-api` found". Marking this crate
+# unpublishable pulls it out of the publish set entirely, which is the only way
+# it may keep depending on `sismatic-http-api` (itself `publish = false`).
+# Invariant: publish = false is contagious upward — every crate that depends on
+# an unpublished crate must be unpublished too.
+publish = false
 
 [lib]
 path = "src/lib.rs"
