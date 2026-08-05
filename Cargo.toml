@@ -30,7 +30,7 @@ license = "ECL-2.0"
 sismatic-core = { path = "crates/sismatic-core", version = "0.2.20" }
 # The wire contract. Shared by the (future) http-api and api-client; depends on
 # nothing internal, so it never widens any consumer's dependency cone.
-sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.19" }
+sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.20" }
 
 # Shared third-party
 # The read side's HTTP framework. `default-features = false` drops the response
