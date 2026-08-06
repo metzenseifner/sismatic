@@ -4,7 +4,12 @@ description = "The read side of Sismatic: an actix-web application over the stor
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+# No `publish = false`, deliberately — see the "publishable dependency" rule in
+# release-plz.toml. `sismatic-server` depends on this crate by path *with a
+# version*, so it must stay publishable for `cargo package` to resolve that
+# dependency against the local sibling instead of crates.io. Publishing is gated
+# in release-plz.toml (`publish = false` workspace-wide), not here.
+publish = true
 
 [dependencies]
 actix-web.workspace = true
@@ -13,7 +18,7 @@ actix-web.workspace = true
 # the write side already persisted, so it never needs a device, a transport or
 # an SSH session — and keeping that out of its dependency cone is what stops the
 # API (and anything that links it) from acquiring a compile path to core.
-sismatic-store = { version = "0.2.22", path = "../sismatic-store" }
+sismatic-store = { version = "0.2.23", path = "../sismatic-store" }
 
 [dev-dependencies]
 # Needed to implement `ReadStore` for the test double in `tests/health_check.rs`

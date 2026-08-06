@@ -4,7 +4,16 @@ description = "Serde DTOs defining the Sismatic HTTP API wire contract (no logic
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+# No `publish = false`, deliberately — see the "publishable dependency" rule in
+# release-plz.toml. Other members (`sismatic-store`, `-store-memory`, `-sync`,
+# and this crate's own dev-dependency in `-http-api`) depend on it by path *with
+# a version*. release-plz's git_only mode runs `cargo package` over every member,
+# and cargo will only substitute a locally packaged sibling for such a dependency
+# when that sibling is itself publishable; a `publish = false` sibling sends
+# cargo to crates.io, where no sismatic crate exists, and packaging fails.
+# Nothing actually reaches crates.io: release-plz.toml sets `publish = false`
+# workspace-wide, which is the single gate on publishing.
+publish = true
 
 [dependencies]
 # The *only* required dependency. api-types is the wire contract and nothing

@@ -1,7 +1,13 @@
 # release-plz owns the *Cargo* half of releasing. On a push to main it opens a
 # "release PR" that bumps the shared workspace version and writes CHANGELOGs from
-# conventional commits; when that PR merges it publishes sismatic-core to
-# crates.io and pushes a `v{version}` git tag.
+# conventional commits; when that PR merges it pushes a `v{version}` git tag.
+#
+# Nothing is published to crates.io — not sismatic-core, not anything else. No
+# sismatic crate has ever existed there. `publish = false` in [workspace] below
+# is the single gate that enforces that, and it is the *only* place that decision
+# is made. Do NOT re-express it as `publish = false` in a member's Cargo.toml:
+# for any member another member depends on, that breaks releases outright (see
+# the "publishable dependency" rule below).
 #
 # The PyPI half is deliberately NOT modeled here, and doesn't need to be. The
 # version has a single source of truth — `[workspace.package] version` in
@@ -17,14 +23,33 @@
 [workspace]
 # Derive versions from git tags instead of the cargo registry. This is the
 # crux of why release-plz works here at all: none of these crates are published
-# to crates.io (`publish = false` everywhere), so the default registry-based
-# version detection finds no prior version, can't compute a bump, and just
-# echoes whatever is already in Cargo.toml — never opening a release PR. With
-# `git_only`, release-plz reads the last `v{version}` tag as the baseline and
-# bumps from the conventional commits since it. (Requires the internal
-# `sismatic-core` dependency in Cargo.toml to carry a `version`, otherwise
-# `cargo package` — which git_only runs to diff each crate — refuses to
-# package a path dependency that has no version requirement.)
+# to crates.io, so the default registry-based version detection finds no prior
+# version, can't compute a bump, and just echoes whatever is already in
+# Cargo.toml — never opening a release PR. With `git_only`, release-plz reads the
+# last `v{version}` tag as the baseline and bumps from the conventional commits
+# since it.
+#
+# The "publishable dependency" rule. git_only makes release-plz run `cargo
+# package` over every member to diff it against the last tag, and that imposes
+# two constraints that together are easy to get wrong:
+#
+#   1. Every internal path dependency must carry a `version` — `cargo package`
+#      refuses a path dependency with no version requirement.
+#   2. Every member that another member depends on must be *publishable*, i.e.
+#      must NOT set `publish = false` in its own Cargo.toml. Cargo rewrites the
+#      versioned path dependency from (1) into a registry dependency and resolves
+#      it, substituting the locally packaged sibling only when that sibling is
+#      publishable. An unpublishable sibling sends cargo to crates.io, where no
+#      sismatic crate exists, and the release-pr job dies with "no matching
+#      package named <crate> found".
+#
+# Constraint (2) is counter-intuitive — the crates that must look publishable are
+# exactly the ones we never publish — and getting it wrong fails at release time,
+# not build time, on whichever member happens to be packaged first. Both
+# constraints are asserted statically by `nix flake check` (flake.nix:
+# internal-version-pins and internal-deps-publishable), so a violation surfaces
+# on the PR rather than after merge. `publish = false` is fine on leaf members
+# nothing else depends on: the CLI/web/server binaries and the pyo3 cdylib.
 git_only = true
 # Default everything OFF; the crates that should release opt in below. This
 # keeps the CLI/web binaries and the pyo3 cdylib from ever being pushed to
