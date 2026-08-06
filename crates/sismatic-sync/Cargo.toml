@@ -19,7 +19,7 @@ sismatic-api-types.workspace = true
 # `Value -> ReadingValue` translation never pulls tokio/russh/a clock into its
 # dependency cone. `driver` additionally turns on `sismatic-core/ssh`, since
 # actually reaching `Device::run` needs the real SSH transport.
-sismatic-store = { version = "0.2.21", path = "../sismatic-store", optional = true }
+sismatic-store = { version = "0.2.22", path = "../sismatic-store", optional = true }
 tokio = { workspace = true, features = [
   "macros",
   "rt",

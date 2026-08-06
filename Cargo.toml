@@ -15,7 +15,7 @@ members = [
 
 # Shared across every member so a version/edition/license bump happens once.
 [workspace.package]
-version = "0.2.21"
+version = "0.2.22"
 edition = "2024"
 license = "ECL-2.0"
 
@@ -27,10 +27,10 @@ license = "ECL-2.0"
 # succeeds under release-plz's `git_only` mode — packaging a crate errors if a
 # path dependency omits a version. release-plz keeps this in lockstep with the
 # workspace version on every bump.
-sismatic-core = { path = "crates/sismatic-core", version = "0.2.21" }
+sismatic-core = { path = "crates/sismatic-core", version = "0.2.22" }
 # The wire contract. Shared by the (future) http-api and api-client; depends on
 # nothing internal, so it never widens any consumer's dependency cone.
-sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.21" }
+sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.22" }
 
 # Shared third-party
 # The read side's HTTP framework. `default-features = false` drops the response
