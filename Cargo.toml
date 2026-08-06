@@ -15,7 +15,7 @@ members = [
 
 # Shared across every member so a version/edition/license bump happens once.
 [workspace.package]
-version = "0.2.22"
+version = "0.2.23"
 edition = "2024"
 license = "ECL-2.0"
 
@@ -26,11 +26,17 @@ license = "ECL-2.0"
 # Internal. The `version` is required (not just `path`) so that `cargo package`
 # succeeds under release-plz's `git_only` mode — packaging a crate errors if a
 # path dependency omits a version. release-plz keeps this in lockstep with the
-# workspace version on every bump.
-sismatic-core = { path = "crates/sismatic-core", version = "0.2.22" }
+# workspace version on every bump; never hand-edit these (a blind find/replace
+# across Cargo.toml + Cargo.lock is what rewrote the unrelated third-party
+# `ppv-lite86 0.2.21` to a nonexistent `0.2.22` and broke every build).
+#
+# The companion rule: because these carry a `version`, the crates they point at
+# must stay publishable — see the "publishable dependency" rule in
+# release-plz.toml, enforced by `nix flake check`.
+sismatic-core = { path = "crates/sismatic-core", version = "0.2.23" }
 # The wire contract. Shared by the (future) http-api and api-client; depends on
 # nothing internal, so it never widens any consumer's dependency cone.
-sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.22" }
+sismatic-api-types = { path = "crates/sismatic-api-types", version = "0.2.23" }
 
 # Shared third-party
 # The read side's HTTP framework. `default-features = false` drops the response
