@@ -4,6 +4,7 @@ description = "Serde DTOs defining the Sismatic HTTP API wire contract (no logic
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 # The *only* required dependency. api-types is the wire contract and nothing
