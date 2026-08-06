@@ -39,73 +39,52 @@ git_release_enable = false
 # `sismatic-core-v0.2.17` tags — this is the pattern pipeline.yml matches.
 git_tag_name = "v{{ version }}"
 
-# The only crate published to crates.io, and the one that owns the tag.
 [[package]]
 name = "sismatic-core"
 publish = false
 git_tag_enable = true
-# Lockstep: core and the Python SDK always share one version (the higher of the
-# two computed bumps), so a change to either ships both at the same number.
 version_group = "sismatic"
 
-# The wheel crate. `publish = false` in its Cargo.toml keeps it off crates.io,
-# but it must still be *processed* here so a facade-only change bumps the shared
-# version that PyPI ships. It rides core's tag; it creates none of its own.
 [[package]]
 name = "sismatic-python-sdk"
 version_group = "sismatic"
 
-# Binaries, published to neither registry. Ignore them entirely; they inherit
-# the bumped workspace version passively via `version.workspace = true`.
 [[package]]
 name = "sismatic-cli"
 version_group = "sismatic"
+release = false
 
 [[package]]
 name = "sismatic-web"
 version_group = "sismatic"
-
-# The composition-root binary. Like the other binaries: internal, published
-# nowhere, inherits the bumped workspace version passively.
-[[package]]
-name = "sismatic-server"
 release = false
 
-# The serialization-contract crate, added after the v0.2.19 tag. Under `git_only` with a
-# package-name-less shared tag (`v{{version}}`), release-plz maps every member to
-# the same `v*` tags — so it mistakes the tag matching this crate's inherited
-# workspace version (v0.2.19) for a prior release, then fails to diff because the
-# crate doesn't exist at that commit ("Failed to find package sismatic-api-types").
-# `publish = false` and nothing released depends on it yet, so skip it: it inherits
-# the bumped workspace version passively via `version.workspace = true`, like the
-# binaries above. Once a v* tag exists that *contains* this crate, it can be flipped
-# to `release = true` (or joined to the `sismatic` version_group) safely.
+[[package]]
+name = "sismatic-server"
+version_group = "sismatic"
+release = false
+
 [[package]]
 name = "sismatic-api-types"
 version_group = "sismatic"
+release = false
 
 [[package]]
 name = "sismatic-sync"
 version_group = "sismatic"
+release = false
 
-# The store *port* (the `ReadStore`/`WriteStore` traits) and its in-memory
-# adapter. Both are internal, `publish = false`, and nothing released depends on
-# them yet, so — like the crates above — they only need to be *processed* (not
-# released): they inherit the bumped workspace version passively via
-# `version.workspace = true`. Flip to `release = true` once a released crate
-# depends on them.
 [[package]]
 name = "sismatic-store"
+version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-store-memory"
+version_group = "sismatic"
 release = false
 
-# The read side (the actix-web application over the store's read port). Internal,
-# `publish = false`, and reached only by the server binary, so like the crates
-# above it is processed but not released — it inherits the bumped workspace
-# version passively via `version.workspace = true`.
 [[package]]
 name = "sismatic-http-api"
+version_group = "sismatic"
 release = false
