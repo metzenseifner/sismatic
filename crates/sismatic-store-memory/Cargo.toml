@@ -8,7 +8,7 @@ license.workspace = true
 async-trait.workspace = true
 dashmap.workspace = true
 sismatic-api-types.workspace = true
-sismatic-store = { version = "0.2.21", path = "../sismatic-store" }
+sismatic-store = { version = "0.2.22", path = "../sismatic-store" }
 
 [dev-dependencies]
 # The store trait is async, so the unit tests need a runtime and the
