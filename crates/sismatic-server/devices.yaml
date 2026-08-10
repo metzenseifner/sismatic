@@ -1,0 +1,20 @@
+---
+defaults:
+  username: "joe"
+  password: "schmoe"
+  eager: true
+  sis_keepalive_secs: 120
+  eager_retry_secs: 30
+
+devices:
+  - id: Hall A
+    host: 10.0.150.1
+  - id: Hall B
+    host: 10.0.150.2
+  - id: Hall C
+    host: 10.0.150.3
+
+# Address every hall as one: a command sent to "Halls" reaches each member.
+groups:
+  - id: Halls
+    devices: ["Hall A", "Hall B", "Hall C"]

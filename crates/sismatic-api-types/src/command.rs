@@ -17,6 +17,7 @@ use crate::{DeviceId, FieldName, GroupId};
 /// is self-describing and can gain fields (a units hint, a dry-run flag) later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterWrite {
     pub value: String,
 }
@@ -25,8 +26,12 @@ pub struct RegisterWrite {
 /// form of the web backend's `{ "device", "name", "value" }` object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceResult {
+    // See `Reading::device` for why the aliases are spelled out for utoipa.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub field: FieldName,
     pub value: ReadingValue,
 }
@@ -36,8 +41,13 @@ pub struct DeviceResult {
 /// so the JSON is deterministic (easier diffs, stable snapshot tests).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GroupResult {
+    // See `Reading::device` for why the aliases are spelled out for utoipa.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub group: GroupId,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub field: FieldName,
+    #[cfg_attr(feature = "openapi", schema(value_type = BTreeMap<String, ReadingValue>))]
     pub results: BTreeMap<DeviceId, ReadingValue>,
 }

@@ -21,8 +21,34 @@
 //! That also fixes what "the API is up" can possibly mean here. This crate can
 //! observe the store; it cannot observe a device. A route that wanted to report
 //! on a device's reachability would be reporting on the *freshness of a reading*,
-//! which is a question about stored data — see [`health_check`] for where that
+//! which is a question about stored data — see [`health_check()`] for where that
 //! line is drawn.
+//!
+//! # The routes
+//!
+//! ```text
+//! GET /health_check                               liveness; consults nothing
+//! GET /v1/devices/{id}/fields                     every field's latest value
+//! GET /v1/devices/{id}/fields/{field}             one field's latest value
+//! GET /v1/devices/{id}/fields/{field}/history     one field over a time span
+//!
+//! GET /swagger-ui/                                the routes above, browsable
+//! GET /api-docs/openapi.json                      the same, as OpenAPI 3.1
+//! ```
+//!
+//! Three routes cover every field core can query, and will still cover them
+//! after core's catalog grows, because `{field}` is a path parameter passed
+//! through to the store rather than a symbol this crate was compiled against.
+//! A field added to core's catalog is expanded by the `'*'` sync schedule,
+//! polled, and stored — and then served here with no code change in any crate.
+//! [`routes::readings`] has the argument for why that is a better property than
+//! a route generated per field would be.
+//!
+//! The last two are the same routes described to a reader: an OpenAPI document
+//! derived from the handlers and the DTOs themselves, and Swagger UI served over
+//! it so the API can be browsed and exercised from a browser with nothing
+//! installed. Both are compiled in — no CDN, no static-asset step — for the
+//! reasons in [`openapi`].
 //!
 //! # Capability, not connection
 //!
@@ -43,9 +69,11 @@
 //! [`DynReadStore`]: sismatic_store::DynReadStore
 //! [`web::Data::from`]: actix_web::web::Data
 
+pub mod openapi;
 pub mod routes;
 pub mod startup;
 
+pub use openapi::ApiDoc;
 pub use routes::health_check;
 pub use startup::run;
 

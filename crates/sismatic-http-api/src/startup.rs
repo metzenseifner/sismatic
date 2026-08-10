@@ -22,8 +22,10 @@ use std::net::TcpListener;
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
 use sismatic_store::{DynReadStore, ReadStore};
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::routes::health_check;
+use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
+use crate::routes::{field_history, health_check, list_fields, read_field};
 
 /// Build the application over `store`, serve it on `listener`, and hand the
 /// running server back.
@@ -37,20 +39,77 @@ pub fn run(listener: TcpListener, store: DynReadStore) -> Result<Server, std::io
     // the type say the API owns a store rather than shares one.
     let store: web::Data<dyn ReadStore> = web::Data::from(store);
 
+    // Built once and cloned per worker, for the same reason the store handle is:
+    // the document is identical on every worker, and assembling it inside the
+    // closure would rebuild the whole thing once per thread at startup.
+    let api_doc = ApiDoc::document();
+
     let server = HttpServer::new(move || {
         // Run once per worker thread, so everything captured here is cloned per
         // worker — hence the `Data` handle built *outside* the closure. Building
         // it inside would give each worker its own store.
-        App::new().app_data(store.clone()).service(
-            // A `resource` rather than `App::route`, which is otherwise the
-            // same thing spelled shorter: `route` hoists the method guard onto
-            // the resource, so a request with the wrong method fails to match
-            // the *path* and is answered 404. Keeping the guard on the route
-            // means the path matches and the method does not, which is what
-            // 405 with an `Allow` header says — the answer that tells a
-            // misconfigured probe what to change.
-            web::resource("/health_check").route(web::get().to(health_check)),
-        )
+        App::new()
+            .app_data(store.clone())
+            .service(
+                // A `resource` rather than `App::route`, which is otherwise the
+                // same thing spelled shorter: `route` hoists the method guard onto
+                // the resource, so a request with the wrong method fails to match
+                // the *path* and is answered 404. Keeping the guard on the route
+                // means the path matches and the method does not, which is what
+                // 405 with an `Allow` header says — the answer that tells a
+                // misconfigured probe what to change.
+                web::resource("/health_check").route(web::get().to(health_check)),
+            )
+            // The readings routes. Three resources cover every queryable field
+            // of every device, because `{field}` is a path parameter carried
+            // through to the store rather than a symbol compiled in — see
+            // `routes::readings` for why this is not a generated route per
+            // field.
+            //
+            // Registered longest-path-first. actix matches in registration
+            // order, and `/fields/{field}` would otherwise be tried against
+            // `/fields/FIRMWARE/history` first; it does not match (a path
+            // parameter stops at the `/`), so the order is not load-bearing
+            // today — but it is the order that stays correct if a segment ever
+            // becomes a tail match.
+            // Grouping the versioned API paths under a "/v1" scope
+            .service(
+                web::scope("v1")
+                    // TODO .wrap(YourAuthMiddleware::default())
+                    .service(
+                        web::resource("/devices/{id}/fields/{field}/history")
+                            .route(web::get().to(field_history)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/fields/{field}")
+                            .route(web::get().to(read_field)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/fields").route(web::get().to(list_fields)),
+                    ),
+            )
+            // Registered last, and this time the order *is* load-bearing: the
+            // UI is mounted on a tail match (`/swagger-ui/{_:.*}`), which is
+            // precisely the kind of resource the note above says the ordering
+            // exists to protect against. It is also unversioned and outside the
+            // scope, because a document that described only `/v1` from a `/v1`
+            // path could not describe the route that lists the versions.
+            .service(SwaggerUi::new(SWAGGER_UI_PATH).url(OPENAPI_JSON_PATH, api_doc.clone()))
+            // `/swagger-ui` without the trailing slash, sent to `/swagger-ui/`.
+            //
+            // The pattern above is `/swagger-ui/{_:.*}`, whose literal prefix
+            // *includes* the slash, so the slashless form matches no resource
+            // and falls through to a bare 404. That is the URL a person types —
+            // this is the one route in the application reached by someone typing
+            // rather than by a program following a contract — so the trailing
+            // slash cannot be a thing they are expected to know.
+            //
+            // A redirect rather than `NormalizePath` middleware: that would fold
+            // the slash on *every* path, quietly making `/health_check/` a
+            // working alias for `/health_check` and turning the deliberate 404s
+            // and 405s above into a set of near-misses that all resolve. The
+            // problem is one path's, and so is the fix.
+            .service(web::redirect("/swagger-ui", "/swagger-ui/"))
     })
     .listen(listener)?
     // The composition root owns the process's shutdown signal (it has a sync

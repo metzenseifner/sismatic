@@ -5,21 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# The two subgraphs `sync` is the intended intersection of (design note §4):
-# the device model (source of `Value`) and the wire contract (target DTOs). The
-# `core::Value -> ReadingValue` translation lives here because this is the one
-# crate already allowed to see both. Only the pure `protocol` layer is needed,
-# so no `ssh` feature — no tokio/russh in the conversion's dependency cone.
-sismatic-core.workspace = true
-sismatic-api-types.workspace = true
-
-# --- Write-side driver (feature `driver`) ---------------------------------
-# The `dto` seam above is pure; the poll-loop driver is not. Everything below is
-# optional and activated only by `driver`, so a consumer that wants just the
-# `Value -> ReadingValue` translation never pulls tokio/russh/a clock into its
-# dependency cone. `driver` additionally turns on `sismatic-core/ssh`, since
-# actually reaching `Device::run` needs the real SSH transport.
-sismatic-store = { version = "0.2.23", path = "../sismatic-store", optional = true }
+sismatic-core = { workspace = true }
+sismatic-api-types = { workspace = true }
+sismatic-store = { workspace = true, optional = true }
+# Third-party dependencies
 tokio = { workspace = true, features = [
   "macros",
   "rt",

@@ -15,7 +15,7 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{DeviceId, Reading, TimeSpan};
+use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 use sismatic_store::{DynReadStore, ReadError, ReadStore};
 
 /// A store that fails the test if it is read at all.
@@ -26,11 +26,24 @@ struct UnreachableStore;
 
 #[async_trait::async_trait]
 impl ReadStore for UnreachableStore {
-    async fn latest(&self, _dev: DeviceId) -> Result<Option<Reading>, ReadError> {
+    async fn latest(
+        &self,
+        _dev: DeviceId,
+        _field: FieldName,
+    ) -> Result<Option<Reading>, ReadError> {
         panic!("the health check must not read from the store")
     }
 
-    async fn between(&self, _dev: DeviceId, _span: TimeSpan) -> Result<Vec<Reading>, ReadError> {
+    async fn latest_all(&self, _dev: DeviceId) -> Result<Vec<Reading>, ReadError> {
+        panic!("the health check must not read from the store")
+    }
+
+    async fn between(
+        &self,
+        _dev: DeviceId,
+        _field: FieldName,
+        _span: TimeSpan,
+    ) -> Result<Vec<Reading>, ReadError> {
         panic!("the health check must not read from the store")
     }
 }

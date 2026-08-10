@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 /// the same as the core `Display` impl and is trivial to match on in a browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RecordingState {
     Stopped,
@@ -38,6 +39,11 @@ pub enum RecordingState {
 /// bare string, not `{ "0": [...] }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(as = "String"))]
+#[cfg_attr(
+    feature = "openapi",
+    derive(utoipa::ToSchema),
+    schema(value_type = String, example = "00-05-A6-1B-2C-3D")
+)]
 #[serde(transparent)]
 pub struct MacAddr(pub String);
 
@@ -50,6 +56,7 @@ pub struct MacAddr(pub String);
 /// client's own risk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Alarm {
     pub name: String,
     pub level: String,
@@ -67,6 +74,7 @@ pub struct Alarm {
 /// externally tagged default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ReadingValue {
     /// Free-form text (names, metadata registers, SNMP strings, model info).

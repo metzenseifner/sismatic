@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// the variants the current web backend maps onto status codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// No device or group has the requested id (HTTP 404).
@@ -27,6 +28,7 @@ pub enum ErrorCode {
 /// absent, staying compatible with the current backend's error shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiError {
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +56,7 @@ impl ApiError {
 /// Liveness of the read-side service, returned by `GET /health`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceStatus {
     Ok,
@@ -63,6 +66,7 @@ pub enum ServiceStatus {
 /// The `GET /health` body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Health {
     pub status: ServiceStatus,
 }
