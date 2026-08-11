@@ -1,0 +1,78 @@
+# Initial state of the simulated Extron SMP.
+#
+# Every key is a field name from the instruction catalogs
+# (`Query` ∪ `Register`), matched case- and `-`/`_`-insensitively through the
+# same `FromStr` the client uses. `simulator_config.rs` asserts this file covers
+# the catalog exactly, so adding an instruction fails the build until a value
+# lands here.
+#
+# Values are the device's *wire text* — what it would put on the channel, minus
+# the CR LF terminator. There is no per-field type table; a value is well-formed
+# iff the production parser accepts it, which is what the round-trip test
+# checks. YAML integers and booleans are accepted and normalised
+# (`true` -> "1"), so flags and ports read naturally.
+#
+# This is the starting state only. Register writes and recording commands
+# mutate it at runtime.
+#
+# Check it without starting a server:
+#   cargo run -p sismatic-core --features simulator --bin simulated-device -- --check-config
+
+username: admin
+password: extron
+
+fields:
+  # --- identity, read-only ------------------------------------------------
+  FIRMWARE: "3.06"
+  MODEL_NAME: SMP 351
+  MODEL_DESCRIPTION: Streaming Media Processor
+  PART_NUMBER: 60-1324-01
+  MAC_ADDRESS: 00-05-a6-01-02-03
+  UNIT_NAME: Main Hall SMP
+
+  # --- recording ----------------------------------------------------------
+  # 0 stopped, 1 started, 2 paused. Rewritten by START/STOP/PAUSE at runtime.
+  RUNNING_STATE: 0
+  # Empty list. Populate as `<name:video_loss,level:critical>*<name:...>`.
+  ACTIVE_ALARMS: ""
+
+  # --- network ------------------------------------------------------------
+  TELNET_PORT: 23
+  SSH_PORT: 22023
+  HTTP_PORT: 80
+  HTTPS_PORT: 443
+  SNMP_PORT: 161
+  DHCP_MODE: false
+  TIMEZONE: Europe/Vienna
+  # Tens of seconds: 30 => 300 seconds.
+  PORT_TIMEOUT: 30
+  GLOBAL_PORT_TIMEOUT: 30
+
+  # --- SNMP ---------------------------------------------------------------
+  SNMP_STATE: true
+  SNMP_UNIT_LOCATION: Main Hall, Building A
+  SNMP_UNIT_CONTACT: av-team@example.edu
+  SNMP_PUBLIC_COMMUNITY_STRING: public
+  SNMP_PRIVATE_COMMUNITY_STRING: private
+
+  # --- metadata registers -------------------------------------------------
+  # Read/write: in both catalogs, so one cell serves the write and the read.
+  CONTRIBUTOR: A. Contributor
+  COURSE: PHYS 101
+  COVERAGE: Semester 1
+  DESCRIPTION: Simulated recording for integration tests
+  FORMAT: video/mp4
+  LANGUAGE: en
+  PRESENTER: A. Presenter
+  PUBLISHER: Example University
+  RELATION: ""
+  RIGHTS: CC BY 4.0
+  SOURCE: Main Hall camera
+  SUBJECT: Physics
+  SYSTEMNAME: sim-smp-351
+  TITLE: Lecture 1
+  TYPE: MovingImage
+
+  # Read-only: in `Query` but not `Register`.
+  DATE: 2026-08-11
+  IDENTIFIER: urn:sismatic:sim-001
