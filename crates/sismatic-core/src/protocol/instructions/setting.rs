@@ -326,7 +326,11 @@ impl Setting {
         }
     }
 
-    /// The SIS verb this setting writes through.
+    /// The SIS verb this setting writes through. Crate-visible so the simulator
+    /// can build its write echo from the same verb the client addressed, rather
+    /// than re-spelling the token in a second place — as
+    /// [`Register::reg`](super::register::Register::reg) and
+    /// [`Command::verb`](super::commands::Command::verb) already are.
     ///
     /// Every verb below is the *read* verb attested in `query.rs`. The write
     /// form is the same verb with the value in front — verify per model against
@@ -360,6 +364,63 @@ impl Setting {
             | Setting::RTMPStream1BackupPublishURL
             | Setting::RTMPStream2BackupPublishURL
             | Setting::RTMPStream3BackupPublishURL => "RTMP",
+        }
+    }
+
+    /// The fixed bytes a write puts before and after its value.
+    ///
+    /// Built from the same [`form`](Self::form) and [`verb`](Self::verb) that
+    /// [`instruction`](Self::instruction) frames with, so the two cannot
+    /// disagree — `write_frame_brackets_every_setting_instruction` pins that.
+    ///
+    /// Crate-visible for the simulator, which has to run the encoding backwards:
+    /// recognise an inbound write and recover the value out of it. The
+    /// alternative is to re-spell `ESC`, the `*` and the verb over there, which
+    /// is exactly the second copy of the protocol this catalog exists to
+    /// prevent.
+    ///
+    /// # Why not find the value by encoding a probe and searching for it
+    ///
+    /// Because nothing is unambiguously searchable. A flag encodes to a single
+    /// digit, and [`Form::Addressed`] carries digits of its own (`N1`, `U1*1`),
+    /// so a probe of `1` is found in the *address* first and cuts the payload in
+    /// the wrong place. Widening the probe does not help: every legal `Url`
+    /// value starts with `rtmp`, so that prefix is common to all of them and
+    /// cannot be told from the frame either. The frame is knowable here and only
+    /// guessable from outside, so it is published rather than inferred.
+    pub(crate) fn write_frame(self) -> (String, String) {
+        let tail = format!("{}{CR}", self.verb());
+        match self.form() {
+            Form::Prefixed => (ESC.to_string(), tail),
+            Form::Addressed(addr) => (format!("{ESC}{addr}*"), tail),
+        }
+    }
+
+    /// The reply a device sends back after accepting a write of `value`.
+    ///
+    /// The other direction of [`write_frame`](Self::write_frame), and
+    /// crate-visible for the same consumer: the simulator has to *answer* a
+    /// write, and an echo it spelled itself would be a second opinion about the
+    /// protocol. Built from the same [`form`](Self::form) and
+    /// [`verb`](Self::verb) the parsers are, and
+    /// `every_setting_parses_its_own_echo` feeds the result to each setting's
+    /// own production parser — so this cannot drift from what the client
+    /// accepts without failing a test.
+    ///
+    /// The two forms differ in more than the address. A `Prefixed` echo repeats
+    /// the verb as written (`CN`), while an `Addressed` one capitalises it the
+    /// way the device does (`STRC` comes back as `Strc`) and re-states the
+    /// address ahead of the value. Which is why this is one function and not a
+    /// `format!` at the call site.
+    pub(crate) fn echo(self, value: &str) -> String {
+        match self.form() {
+            Form::Prefixed => format!("{}{value}\r\n", self.verb()),
+            // The address is emitted in its request spelling. The device is
+            // free to zero-pad it and `addressed_echo` matches each index by
+            // value, so the unpadded form is one of the shapes it accepts.
+            Form::Addressed(addr) => {
+                format!("{}{addr}*{value}\r\n", echoed(self.verb()))
+            }
         }
     }
 
@@ -521,6 +582,70 @@ fn setting_echo(verb: &'static str) -> ParseFn {
 
 #[cfg(test)]
 mod tests {
+    /// The strongest check available on [`Setting::echo`]: every setting's echo
+    /// is fed to that setting's *own* production parser, which is the parser the
+    /// client will run on it. Covers both forms and every address shape,
+    /// including the compound RTMP ones.
+    #[test]
+    fn every_setting_parses_its_own_echo() {
+        use crate::protocol::Step;
+
+        for &s in Setting::ALL {
+            let value = ["1", "rtmp://cdn.example.edu/live/probe"]
+                .into_iter()
+                .find(|v| s.instruction(v).is_ok())
+                .unwrap_or_else(|| panic!("no probe value for {s}: extend the ladder"));
+
+            let instruction = s.instruction(value).expect("the probe is legal");
+            let echo = s.echo(value);
+            assert_eq!(
+                instruction.parse_step(&echo),
+                Step::Done(Value::Text(value.to_owned())),
+                "{s}: its own parser rejected the echo {echo:?}"
+            );
+        }
+    }
+
+    /// [`Setting::write_frame`] and [`Setting::instruction`] must agree, since
+    /// the simulator recovers a value by stripping the first off a payload the
+    /// second built. Checked for every setting against a value of its own shape,
+    /// so the frame cannot be right for the flags and wrong for the URLs.
+    ///
+    /// Asserted as `head + value + tail == payload` rather than by comparing
+    /// the frame to a literal: a literal here would be the third copy of the
+    /// framing, and the point is that there is one.
+    #[test]
+    fn write_frame_brackets_every_setting_instruction() {
+        for &s in Setting::ALL {
+            // The encoder normalises (`on` → `1`), so the value asserted is the
+            // encoded one — which is what the frame actually brackets.
+            let value = ["1", "rtmp://cdn.example.edu/live/probe"]
+                .into_iter()
+                .find(|v| s.instruction(v).is_ok())
+                .unwrap_or_else(|| panic!("no probe value for {s}: extend the ladder"));
+
+            let payload = s.instruction(value).expect("the probe is legal").payload;
+            let (head, tail) = s.write_frame();
+            assert_eq!(
+                format!("{head}{value}{tail}"),
+                payload,
+                "{s}: write_frame does not bracket the value instruction() framed"
+            );
+        }
+    }
+
+    /// An empty value is framed too, which is how an RTMP target is cleared.
+    /// The probe-based recovery this replaced could not see it at all.
+    #[test]
+    fn write_frame_brackets_an_empty_value() {
+        let payload = Setting::RTMPStream1PublishURL
+            .instruction("")
+            .expect("an empty URL clears the target")
+            .payload;
+        let (head, tail) = Setting::RTMPStream1PublishURL.write_frame();
+        assert_eq!(format!("{head}{tail}"), payload);
+    }
+
     use super::*;
     use crate::protocol::Step;
 

@@ -63,8 +63,10 @@ impl Register {
         }
     }
 
-    /// `M`-prefixed register address, derived from [`index`].
-    fn reg(self) -> String {
+    /// `M`-prefixed register address, derived from [`index`](Self::index).
+    /// Crate-visible so the simulator can build its write echo from the same
+    /// address the client addressed.
+    pub(crate) fn reg(self) -> String {
         format!("M{}", self.index())
     }
 
