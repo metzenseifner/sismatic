@@ -138,7 +138,7 @@ jobs:
         include:
           - { runner: ubuntu-latest, target: x86_64-linux }
           - { runner: ubuntu-24.04-arm, target: aarch64-linux }
-          - { runner: macos-15-intel, target: x86_64-darwin }
+          # - { runner: macos-15-intel, target: x86_64-darwin }
           - { runner: macos-14, target: aarch64-darwin }
     steps:
       - uses: actions/checkout@v4
@@ -171,7 +171,10 @@ jobs:
       matrix:
         # ubuntu = x86_64 linux, macos-15-intel = x86_64 macOS,
         # macos-14 = aarch64 macOS.
-        runner: [ubuntu-latest, macos-15-intel, macos-14]
+        runner: 
+          - ubuntu-latest
+          # - macos-15-intel
+          - macos-14
     steps:
       - uses: actions/checkout@v4
       # Restore-only: the `binaries` job owns this family's cache on each of
