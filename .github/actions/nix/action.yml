@@ -1,8 +1,40 @@
 name: Nix setup
 description: >
   Install Nix with flakes enabled and restore the shared Nix store cache.
-  The cache key is scoped by OS *and* arch so the two macOS runners
-  (Intel macos-13 / Apple-silicon macos-14) don't clobber each other.
+
+  Cache keys are scoped by family *and* by OS+arch. The arch scoping keeps the
+  four runner architectures from clobbering each other; the family scoping
+  keeps closures that barely overlap (the check suite's tarpaulin/nextest/deny
+  tools vs. the release builds' musl and zig toolchains) in separate entries,
+  so neither is evicted to make room for the other.
+
+  Exactly one job per (family, arch) may pass `save: true`. Everything else
+  restores read-only, so a matrix fan-out cannot race on the same key.
+
+inputs:
+  family:
+    description: >
+      Cache namespace. Jobs that build overlapping closures should share one;
+      jobs that build unrelated ones should not.
+    required: true
+  save:
+    description: >
+      Write the Nix store back to the Actions cache when the job ends. Set on
+      the single designated seeding job for this (family, arch).
+    default: "false"
+  max-store-size:
+    description: >
+      Size to shrink the Nix store to (`nix store gc`) before saving. This must
+      exceed the closure the job just built, or the cache is saved nearly empty
+      and every later run rebuilds from scratch — which is exactly what a 1G cap
+      did to the Linux check cache (118 MB saved, ~16 min rebuilt every run).
+      Only meaningful together with `save: true`.
+    default: "6G"
+
+outputs:
+  system:
+    description: The Nix system double for this runner, e.g. x86_64-linux.
+    value: ${{ steps.system.outputs.system }}
 
 runs:
   using: composite
@@ -11,13 +43,25 @@ runs:
       with:
         extra_nix_config: |
           experimental-features = nix-command flakes
+          max-jobs = auto
 
     - uses: nix-community/cache-nix-action@v6
       with:
-        primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.nix', '**/flake.lock', '**/Cargo.lock') }}
-        restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
-        gc-max-store-size-linux: 1G
-        purge: true
-        purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-
+        primary-key: nix-${{ inputs.family }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.nix', '**/flake.lock', '**/Cargo.lock', 'rust-toolchain.toml') }}
+        restore-prefixes-first-match: nix-${{ inputs.family }}-${{ runner.os }}-${{ runner.arch }}-
+        save: ${{ inputs.save }}
+        gc-max-store-size: ${{ inputs.max-store-size }}
+        # Deleting superseded entries needs `actions: write` on the calling
+        # workflow; without it the delete API 403s and stale caches pile up
+        # until the repo's 10 GB budget starts evicting live ones. Only the
+        # saving job purges — a restore-only job has nothing to supersede.
+        purge: ${{ inputs.save }}
+        purge-prefixes: nix-${{ inputs.family }}-${{ runner.os }}-${{ runner.arch }}-
         purge-created: 0
         purge-primary-key: never
+
+    # Lets callers address `.#checks.<system>.<name>` without hardcoding a
+    # double per runner.
+    - id: system
+      shell: bash
+      run: echo "system=$(nix eval --impure --raw --expr builtins.currentSystem)" >> "$GITHUB_OUTPUT"

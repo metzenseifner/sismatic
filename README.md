@@ -17,6 +17,37 @@ There are several reasons why this library is worthwhile:
 - [python](./crates/sismatic-python-sdk/README.md)
 - [server](./crates/sismatic-server/README.md)
 
+## Server Binaries
+
+Every tagged release attaches a prebuilt `sismatic-server` for four targets,
+each with a `.sha256` beside it:
+
+| Target                        | Runs on                                    |
+| ----------------------------- | ------------------------------------------ |
+| `x86_64-unknown-linux-musl`   | any x86_64 Linux — statically linked        |
+| `aarch64-unknown-linux-musl`  | any arm64 Linux — statically linked         |
+| `x86_64-apple-darwin`         | Intel macOS                                 |
+| `aarch64-apple-darwin`        | Apple-silicon macOS                         |
+
+The Linux builds are static, so there is no glibc floor and no runtime
+dependency to install. The macOS builds link only against system libraries.
+
+```sh
+tar -xzf sismatic-server-<version>-<target>.tar.gz
+./sismatic-server-<version>-<target>/sismatic-server --help
+```
+
+The same artifact is one command away locally — CI runs exactly this, and
+nothing about the build lives in the workflow:
+
+```sh
+nix build .#server-release   # -> result/sismatic-server-<version>-<target>.tar.gz
+nix run .#server -- --help   # or just run it straight out of the flake
+```
+
+Each architecture is built on its own native runner, so `nix build
+.#server-release` produces the artifact for the machine you run it on.
+
 ## Configuration Example
 
 ```toml

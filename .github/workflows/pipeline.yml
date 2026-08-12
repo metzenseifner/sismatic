@@ -1,13 +1,19 @@
 name: Build & Release
 
-# Every step below is defined in flake.nix and runs identically on a laptop:
-#   nix flake check          # fmt, clippy, tests, audit, deny, coverage
-#   nix build .#             # the crate
-#   nix build .#wheel        # hermetic (nixpkgs-linked) wheel
-#   nix run .#build-wheel    # portable wheel (manylinux_2_28 via zig on Linux)
-#   nix run .#build-sdist    # source distribution
+# Every step below is an output of flake.nix and runs identically on a laptop:
+#   nix build .#deps                    # the shared dependency layer
+#   nix build .#checks.<system>.<name>  # one check (`nix flake check` = all)
+#   nix build .#server-release          # publishable sismatic-server tarball
+#   nix run   .#build-wheel             # portable wheel (manylinux_2_28 via zig)
+#   nix run   .#build-sdist             # source distribution
 # This workflow is only a dispatcher: it installs Nix (./.github/actions/nix)
 # and invokes those outputs. No build logic lives here.
+#
+# Shape: `nix flake check` builds every check sequentially on one machine, which
+# is why it grew to ~16 minutes. Here the dependency layer is built once by the
+# `deps` job and the checks then fan out one-per-runner, turning that sum into a
+# max. The matrix is read out of the flake itself, so adding a check to
+# flake.nix adds a CI job with no edit to this file.
 
 on:
   pull_request:
@@ -18,6 +24,10 @@ on:
 
 permissions:
   contents: read
+  # cache-nix-action deletes superseded Nix store caches by prefix. Without this
+  # the delete API 403s, stale entries accumulate, and the repo's 10 GB budget
+  # starts evicting the caches that are actually load-bearing.
+  actions: write
 
 # Supersede in-flight PR runs on a new push; never cancel main/tag builds
 # (those may be producing a release).
@@ -26,18 +36,79 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # nix flake check + the crate build — the whole validation suite, all from
-  # the flake. Uses default features, so aws-lc-sys is not compiled here.
-  checks:
-    name: Checks + crate
+  # Seeds the x86_64-linux Nix store cache and enumerates the check set.
+  # Everything in the `check` matrix restores that cache read-only, so the
+  # expensive Cargo.lock-keyed dependency layer is compiled at most once per
+  # lockfile change rather than once per job.
+  deps:
+    name: Dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      checks: ${{ steps.enumerate.outputs.checks }}
+      system: ${{ steps.nix.outputs.system }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix
+        id: nix
+        with:
+          family: check
+          save: "true"
 
-      - name: nix flake check
-        run: nix flake check --print-build-logs
+      # Evaluation-only sweep of every flake output. The matrix below builds
+      # the checks but never looks at packages, apps or devShells, so this is
+      # what catches an output that no longer evaluates.
+      - name: Evaluate flake
+        run: nix flake check --no-build --print-build-logs
+
+      # Both layers, so no matrix cell below has to compile one itself. They
+      # build concurrently, and on an unchanged Cargo.lock this is a cache hit
+      # and a no-op.
+      - name: Build dependency layers
+        run: nix build .#deps .#server-deps --no-link --print-build-logs
+
+      - name: Enumerate checks
+        id: enumerate
+        run: |
+          checks=$(nix eval --json ".#checks.${{ steps.nix.outputs.system }}" \
+            --apply builtins.attrNames)
+          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+          echo "$checks"
+
+  # One runner per check, restoring the store the `deps` job just seeded.
+  check:
+    name: ${{ matrix.check }}
+    needs: deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.deps.outputs.checks) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+        with:
+          family: check
+      - name: nix build .#checks.${{ matrix.check }}
+        run: |
+          nix build ".#checks.${{ needs.deps.outputs.system }}.${{ matrix.check }}" \
+            --no-link --print-build-logs
+
+  # The default package (the `sismatic` CLI) as a release asset, unchanged from
+  # the pre-split pipeline. Kept in its own job rather than folded into `deps`
+  # so it stays off the critical path the check matrix waits on; it restores
+  # the store `deps` seeded, so the build itself is just the CLI crate.
+  crate:
+    name: Crate
+    needs: deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+        with:
+          family: check
 
       - name: Build crate
         run: nix build .# --out-link result-crate --print-build-logs
@@ -52,6 +123,42 @@ jobs:
           path: out/crate/**
           if-no-files-found: error
 
+  # Publishable sismatic-server binaries: one native runner per architecture, so
+  # nothing is cross-compiled and aws-lc-sys keeps its native cmake path. What
+  # "portable" means per platform (statically linked musl on Linux, a rewritten
+  # libiconv load command on macOS), what the tarball is called and what goes
+  # in it are all decided by `.#server-release` — this job only uploads it.
+  binaries:
+    name: Server ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-linux }
+          - { runner: ubuntu-24.04-arm, target: aarch64-linux }
+          # - { runner: macos-15-intel, target: x86_64-darwin }
+          - { runner: macos-14, target: aarch64-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      # One job per architecture in this family, so each is its own seeder and
+      # no two jobs ever race on the same key.
+      - uses: ./.github/actions/nix
+        with:
+          family: dist
+          save: "true"
+          max-store-size: 4G
+
+      - name: Build server release
+        run: nix build .#server-release --out-link result-server --print-build-logs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.target }}
+          path: result-server/*
+          if-no-files-found: error
+
   # Portable wheels: one native runner per platform, each running the same
   # `nix run .#build-wheel`. The cargo cache below keeps repeat runs from
   # recompiling aws-lc-sys (pulled in by russh) from scratch.
@@ -64,10 +171,18 @@ jobs:
       matrix:
         # ubuntu = x86_64 linux, macos-15-intel = x86_64 macOS,
         # macos-14 = aarch64 macOS.
-        runner: [ubuntu-latest, macos-15-intel, macos-14]
+        runner: 
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          # - macos-15-intel
+          - macos-14
     steps:
       - uses: actions/checkout@v4
+      # Restore-only: the `binaries` job owns this family's cache on each of
+      # these architectures, and the two run concurrently.
       - uses: ./.github/actions/nix
+        with:
+          family: dist
 
       # Nix caches the toolchain/maturin/zig/cmake; this caches the *cargo*
       # build (crates + target/), so aws-lc-sys is only compiled once per
@@ -101,6 +216,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix
+        with:
+          family: dist
 
       - name: Build sdist
         run: nix run .#build-sdist
@@ -115,7 +232,7 @@ jobs:
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [checks, wheels, sdist]
+    needs: [check, crate, binaries, wheels, sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -125,10 +242,14 @@ jobs:
         with:
           path: artifacts
 
+      # The server tarballs already carry their version and target triple (the
+      # flake names them) and ship next to a .sha256, so they are copied
+      # through untouched.
       - name: Collect release files
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) \
+          find artifacts -type f \
+            \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.sha256' \) \
             -exec cp -n {} release/ \;
           if [ -d artifacts/crate ]; then
             tar -czf "release/sismatic-crate-${GITHUB_REF_NAME}.tar.gz" \
@@ -152,7 +273,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [checks, wheels, sdist]
+    needs: [check, wheels, sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -169,13 +290,15 @@ jobs:
         with:
           path: artifacts
 
-      # Gather only the Python distributions. The pipeline also uploads a crate
-      # tarball (sismatic-crate-*.tar.gz), which is not a PyPI artifact.
+      # Gather only the Python distributions. The pipeline also uploads the
+      # sismatic-server tarballs and a crate tarball, neither of which is a
+      # PyPI artifact.
       - name: Collect wheels + sdist
         run: |
           mkdir -p dist
           find artifacts \( -name '*.whl' -o -name '*.tar.gz' \) \
-            -not -name '*crate*' -exec cp -n {} dist/ \;
+            -not -name 'sismatic-server-*' -not -name '*crate*' \
+            -exec cp -n {} dist/ \;
           echo "Files to publish:"
           ls -l dist
 

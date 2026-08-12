@@ -169,6 +169,183 @@
             }
           );
 
+          # The composition-root binary (`sismatic-server`) — the deployable
+          # artifact, wired up from core, the HTTP API, the store and sync.
+          #
+          # Unlike cli and web this one gets a dependency layer of its own,
+          # scoped exactly the way the build is scoped. The shared
+          # `cargoArtifacts` is resolved workspace-wide, and for
+          # `utoipa-swagger-ui` that lands on a different feature variant than
+          # `-p sismatic-server` does: the shared layer carries only an .rmeta
+          # for the variant this build wants, so cargo recompiles the crate
+          # while reusing the *cached* output of its build script. That script
+          # writes an embed.rs holding an absolute path to the Swagger bundle
+          # it unpacked, which no longer exists in this sandbox, so rust-embed
+          # silently emits a `SwaggerUiDist` with no `Embed` impl and the build
+          # dies on "no function or associated item named `get`". Scoping the
+          # layer means the .rlib is already present and nothing recompiles.
+          #
+          # This only ever bites on macOS: Linux builds are sandboxed into a
+          # build dir that is always /build, so the stale absolute path happens
+          # to resolve and the bug stays invisible.
+          serverDeps = craneLib.buildDepsOnly (
+            commonArgs
+            // {
+              pname = "sismatic-server-deps";
+              cargoExtraArgs = "-p sismatic-server";
+            }
+          );
+
+          server = craneLib.buildPackage (
+            commonArgs
+            // {
+              pname = "sismatic-server";
+              cargoArtifacts = serverDeps;
+              cargoExtraArgs = "-p sismatic-server";
+              # Tests run in the dedicated nextest check.
+              doCheck = false;
+              meta.mainProgram = "sismatic-server";
+            }
+          );
+
+          #------------------------------------------------------------------#
+          #                 Publishable sismatic-server binaries              #
+          #------------------------------------------------------------------#
+          # `server` above is hermetic but NOT portable, and in two different
+          # ways: on Linux its ELF interpreter is an absolute /nix/store glibc
+          # path, on macOS it carries a /nix/store load command for libiconv.
+          # Either way the binary only runs on a machine that has this exact
+          # store, which is useless for something downloaded off a GitHub
+          # release page. The outputs below fix that per platform.
+          #
+          # Both are built natively — CI runs one runner per architecture — so
+          # nothing here is a cross-compile. That matters for aws-lc-sys
+          # (pulled in by russh via core's `ssh` feature), which drives its own
+          # cmake build of vendored C: it stays on the well-trodden native path
+          # and only sees a different libc, not a different machine.
+
+          # Rust target triple of the published artifact, and the name the
+          # release tarball is keyed by.
+          releaseTarget =
+            let
+              arch = pkgs.stdenv.hostPlatform.parsed.cpu.name; # x86_64 | aarch64
+            in
+            if pkgs.stdenv.isDarwin then "${arch}-apple-darwin" else "${arch}-unknown-linux-musl";
+
+          # Linux: statically linked against musl. `crt-static` leaves no ELF
+          # interpreter and no runtime libc at all, so the artifact runs on any
+          # kernel of the same architecture — distro, glibc version and
+          # /nix/store all stop mattering.
+          serverStatic =
+            let
+              # Same channel and components as rust-toolchain.toml (still the
+              # single source of truth), plus the musl std for this arch.
+              muslToolchain = p: (rustToolchain p).override { targets = [ releaseTarget ]; };
+              craneLibMusl = (crane.mkLib pkgs).overrideToolchain muslToolchain;
+
+              # Rust ships its own musl libc.a for the pure-Rust half of the
+              # link; this C toolchain is only for aws-lc-sys' vendored C.
+              cc = pkgs.pkgsStatic.stdenv.cc;
+              ccBin = "${cc}/bin/${cc.targetPrefix}cc";
+
+              # cargo spells per-target variables with the triple upper-cased
+              # and dashes turned into underscores; the `cc` crate (and through
+              # it aws-lc-sys' cmake invocation) spells them verbatim.
+              screamingTarget = lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] releaseTarget);
+
+              muslArgs = commonArgs // {
+                pname = "sismatic-server-static";
+                # Scoped on the deps layer too, for the same reason `server`
+                # above needs its own — see the comment there.
+                cargoExtraArgs = "-p sismatic-server";
+
+                CARGO_BUILD_TARGET = releaseTarget;
+                CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+                "CARGO_TARGET_${screamingTarget}_LINKER" = ccBin;
+                "CC_${releaseTarget}" = ccBin;
+                "CXX_${releaseTarget}" = "${cc}/bin/${cc.targetPrefix}c++";
+                "AR_${releaseTarget}" = "${cc.bintools}/bin/${cc.targetPrefix}ar";
+                # Build scripts and proc macros run on the build machine, so
+                # they keep the native compiler.
+                HOST_CC = "${pkgs.stdenv.cc.nativePrefix}cc";
+
+                depsBuildBuild = [ cc ];
+              };
+            in
+            craneLibMusl.buildPackage (
+              muslArgs
+              // {
+                # A different target means a different dependency layer: the
+                # glibc `cargoArtifacts` above cannot be reused here.
+                cargoArtifacts = craneLibMusl.buildDepsOnly muslArgs;
+                doCheck = false;
+                meta.mainProgram = "sismatic-server";
+              }
+            );
+
+          # macOS: the only non-system library the binary picks up is nixpkgs'
+          # libiconv, and macOS ships its own copy at the stock path, so
+          # repoint the load command there. Rewriting a Mach-O invalidates its
+          # signature — fatal on arm64, where the kernel refuses to exec an
+          # unsigned binary — so re-sign ad-hoc afterwards.
+          serverPortableDarwin =
+            pkgs.runCommand "sismatic-server-portable-${version}"
+              {
+                nativeBuildInputs = [
+                  pkgs.cctools
+                  pkgs.darwin.sigtool
+                ];
+                meta.mainProgram = "sismatic-server";
+              }
+              ''
+                mkdir -p $out/bin
+                cp ${server}/bin/sismatic-server $out/bin/
+                chmod u+w $out/bin/sismatic-server
+
+                # `otool -L` leads with the binary's own path, which is a
+                # /nix/store path by construction; the load commands are the
+                # indented lines after it, so every read below skips line 1.
+                loadCommands() {
+                  otool -L $out/bin/sismatic-server | tail -n +2
+                }
+
+                for dep in $(loadCommands | awk '/\/nix\/store\// { print $1 }'); do
+                  install_name_tool -change "$dep" "/usr/lib/$(basename "$dep")" \
+                    $out/bin/sismatic-server
+                done
+                codesign --force --sign - $out/bin/sismatic-server
+
+                # Fail the build rather than ship something that only runs on
+                # a machine with this store.
+                if loadCommands | grep -q /nix/store/; then
+                  echo "error: binary still links against /nix/store:" >&2
+                  loadCommands >&2
+                  exit 1
+                fi
+              '';
+
+          serverPortable = if pkgs.stdenv.isDarwin then serverPortableDarwin else serverStatic;
+
+          # The published artifact. Naming, contents and checksum live here so
+          # the workflow stays a dispatcher — `nix build .#server-release`
+          # produces byte-identical output on a laptop and on a runner.
+          serverRelease =
+            pkgs.runCommand "sismatic-server-release-${version}-${releaseTarget}" { }
+              ''
+                name="sismatic-server-${version}-${releaseTarget}"
+                mkdir -p "$name" "$out"
+                cp ${serverPortable}/bin/sismatic-server "$name/"
+                cp ${./LICENSE} "$name/LICENSE"
+                cp ${./README.md} "$name/README.md"
+                chmod -R u+w "$name"
+
+                # Reproducible archive: sorted entries, fixed mtime, no owner
+                # names, and gzip -n so the header carries no timestamp either.
+                tar --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner \
+                  -cf - "$name" | gzip -9n > "$out/$name.tar.gz"
+                ( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+              '';
+
           # Source for the wheel: the cargo sources crane already filters,
           # plus the packaging files maturin reads (pyproject.toml and the
           # readme/license it points at, which cleanCargoSource drops) and the
@@ -317,7 +494,10 @@
           # this keeps working even if the checks projection is disabled.
           checks = {
             # The member binaries building at all is itself a check.
-            inherit cli web;
+            # `serverRelease` is deliberately not here: it would drag the musl
+            # toolchain into every `nix flake check`, and the release matrix in
+            # CI builds it on each architecture anyway.
+            inherit cli web server;
 
             # Clippy as a separate derivation: CI blocks on lints, but
             # downstream consumers can still build the package without
@@ -573,10 +753,25 @@
 
           packages = {
             default = cli;
-            # `nix build .#cli` / `.#web` -> the front-end binaries.
-            inherit cli web;
+            # `nix build .#cli` / `.#web` / `.#server` -> the binaries.
+            inherit cli web server;
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
+
+            # The dependency layers on their own. Nothing consumes these
+            # directly — they exist so one machine (locally, or one CI job) can
+            # compile the expensive Cargo.lock-keyed layers once and populate a
+            # store the checks then hit instead of rebuilding. `server-deps` is
+            # separate because sismatic-server needs its own scoped layer; see
+            # the comment on `serverDeps`.
+            deps = cargoArtifacts;
+            server-deps = serverDeps;
+
+            # `nix build .#server-portable` -> a sismatic-server that runs on
+            # a machine with no Nix; `.#server-release` -> that binary packed
+            # as sismatic-server-<version>-<target>.tar.gz plus its SHA-256.
+            server-portable = serverPortable;
+            server-release = serverRelease;
           };
 
           # Plain app definition (flake-utils.mkApp without flake-utils).
@@ -591,6 +786,11 @@
             web = {
               type = "app";
               program = pkgs.lib.getExe web;
+            };
+            # `nix run .#server` starts the composition root.
+            server = {
+              type = "app";
+              program = pkgs.lib.getExe server;
             };
             # Pipeline steps, callable identically here and in CI:
             #   nix run .#build-wheel
