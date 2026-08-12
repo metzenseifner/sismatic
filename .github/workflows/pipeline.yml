@@ -209,6 +209,64 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  # The purge cache-nix-action performs for its own families, done by hand for
+  # the one cache that is plain actions/cache. actions/cache never deletes
+  # anything: every Cargo.lock change mints a new key and the superseded entry
+  # sits there until GitHub's 10 GB LRU evicts *something* — quite possibly one
+  # of the multi-gigabyte Nix caches instead, turning a stale 300 MB cargo
+  # directory into a 15-minute rebuild somewhere else.
+  #
+  # Runs as its own job rather than a step inside `wheels` because `needs`
+  # waits for the whole job including post steps, which is where actions/cache
+  # writes. By the time this runs the current key is already saved, so it
+  # cannot delete the entry the run just produced. For the same reason it must
+  # NOT be `if: always()` — actions/cache does not save on a failed job, so
+  # pruning after a failure would delete the old entry and leave nothing.
+  prune-cargo-cache:
+    name: Prune cargo caches
+    needs: wheels
+    # Forks get a read-only GITHUB_TOKEN, so they can neither write caches nor
+    # delete them. Nothing to prune, and the API would 403.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Step-level so it evaluates after checkout — hashFiles reads the
+      # workspace, and at job level there is nothing there yet.
+      - name: Delete superseded wheel-cargo caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Must match the wheels job's key suffix exactly. Every runner shares
+          # this hash (same two files), so one value covers the whole matrix.
+          KEEP: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+        run: |
+          set -euo pipefail
+
+          # Scoped to this run's ref, and that scoping is load-bearing: caches
+          # belong to a ref (refs/heads/<branch>, or refs/pull/<n>/merge for a
+          # PR) and keys differ per lockfile, so an unscoped prefix sweep run
+          # from a PR would happily delete main's live caches.
+          gh cache list --key wheel-cargo- --ref "$GITHUB_REF" --limit 100 \
+            --json id,key --jq '.[] | [.id, .key] | @tsv' > caches.tsv
+
+          while IFS=$'\t' read -r id key; do
+            case "$key" in
+              *"$KEEP")
+                echo "keep    $key"
+                ;;
+              *)
+                echo "delete  $key"
+                # Non-fatal: concurrent runs on the same ref can race and turn
+                # this into a 404. Losing a janitor's delete is not worth
+                # failing a green pipeline over.
+                gh cache delete "$id" \
+                  || echo "::warning::could not delete cache $key"
+                ;;
+            esac
+          done < caches.tsv
+
   sdist:
     name: Source distribution
     runs-on: ubuntu-latest
