@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.25](https://github.com/metzenseifner/sismatic/compare/v0.2.24...v0.2.25) - 2026-08-14
+
+### Other
+
+- release tooling: internal path dependencies carry a version requirement again
+  (`version = "0"`), without which release-plz cannot package the workspace. Cut
+  by hand to move the release baseline off the v0.2.24 tag, whose tree cannot be
+  packaged; no library changes since 0.2.24.
+
 ## [0.2.19](https://github.com/metzenseifner/sismatic/releases/tag/v0.2.19) - 2026-07-21
 
 ### Added
