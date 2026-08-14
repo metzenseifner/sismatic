@@ -19,6 +19,21 @@ jobs:
   release-plz-pr:
     name: Release PR
     runs-on: ubuntu-latest
+    # Ordered *after* the release job, which is the one that pushes the
+    # `v{version}` tag this job needs: under git_only, release-plz diffs each
+    # member against a worktree checked out at the last tag. Upstream's example
+    # workflow leaves the two jobs parallel, and on the one push where it matters
+    # — the merge of a release PR, when a new tag is being created — they race.
+    # It bit us on the 0.2.25 merge: this job read v0.2.24, packaged that tree,
+    # and died one second before the release job pushed v0.2.25. When the stale
+    # tag does package, the race is quieter but not harmless: the diff baseline
+    # is one release behind, so this job can re-propose changes that just
+    # shipped. `fetch-depth: 0` below then picks up the tag the release job made.
+    #
+    # Note this skips the job if the release job fails — deliberate: a release PR
+    # computed off a failed release is worse than no PR. It cannot skip a
+    # *release*, since that job still runs first and unconditionally.
+    needs: release-plz-release
     # Never run two release-PR updates concurrently against the same branch.
     concurrency:
       group: release-plz-pr-${{ github.ref }}
