@@ -569,69 +569,141 @@
               '';
               pkgs.runCommand "release-plz-config-ok" { } "touch $out";
 
-            # Guardrail for a stale internal version pin — the drift that left
-            # sismatic-api-types pinned at 0.2.19 while the workspace was at
-            # 0.2.20. Every internal dependency must carry a `version` next to
-            # its `path` (see [workspace.dependencies] for why), and release-plz
-            # only rewrites the pins it manages: a member with `release = false`
-            # is still processed, but its dependency declaration is not
-            # maintained, so its pin rots silently. Cargo's caret rule then hides
-            # the rot — ^0.2.19 matches 0.2.20 — so the workspace keeps building
-            # and the pin only breaks once the version reaches 0.3.0, during a
-            # release. Another *static* drift, so assert it statically: every
-            # internal pin equals the workspace version exactly. Exactly, not
-            # "semver-compatible with": a compatible-but-stale pin is precisely
-            # the bug this catches.
-            # internal-version-pins =
-            #   let
-            #     cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-            #     inherit (cargoToml.workspace.package) version;
+            # Guardrail for the release-blocking regression in 0d16892: internal
+            # path dependencies were reduced to `path`-only, and every release-plz
+            # run since died in `cargo package`, which refuses a path dependency
+            # with no version requirement. release-plz packages the *whole*
+            # workspace under git_only (`cargo package --allow-dirty --workspace`),
+            # so `release = false` exempts nothing and one bare `path` is enough to
+            # stop the release job — on whichever member happens to be packaged
+            # first, far from the line that caused it. The requirement is static,
+            # so assert it statically.
             #
-            #     # Every table that can name an internal crate: a member's three
-            #     # dependency tables plus any target-scoped variants of them.
-            #     depTables =
-            #       manifest:
-            #       let
-            #         direct = m: [
-            #           (m.dependencies or { })
-            #           (m.dev-dependencies or { })
-            #           (m.build-dependencies or { })
-            #         ];
-            #       in
-            #       direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
-            #
-            #     # A dependency is internal iff it is declared with a `path`.
-            #     # `foo.workspace = true` has none: it re-uses the root's entry,
-            #     # which this same check covers at the root.
-            #     pinsIn =
-            #       file: table:
-            #       lib.mapAttrsToList (name: dep: { inherit file name; pin = dep.version or null; }) (
-            #         lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
-            #       );
-            #
-            #     pins =
-            #       pinsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
-            #       ++ lib.concatMap (
-            #         m:
-            #         lib.concatMap (pinsIn "${m}/Cargo.toml") (
-            #           depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
-            #         )
-            #       ) cargoToml.workspace.members;
-            #
-            #     stale = lib.filter (p: p.pin != version) pins;
-            #     describe =
-            #       p: "  ${p.file}: ${p.name} -> ${if p.pin == null then "(no version field)" else p.pin}";
-            #   in
-            #   assert lib.assertMsg (stale == [ ]) ''
-            #     Internal version pins disagree with the workspace version (${version}):
-            #     ${lib.concatStringsSep "\n" (map describe stale)}
-            #     Every path dependency on a workspace member must pin the workspace
-            #     version exactly. A merely caret-compatible pin (0.2.19 against a
-            #     0.2.20 workspace) keeps building until the version reaches 0.3.0
-            #     and then fails during a release; a missing `version` breaks
-            #     `cargo package` under release-plz's git_only mode.
-            #   '';
-            #   pkgs.runCommand "internal-version-pins-ok" { } "touch $out";
+            # The assertion is "the workspace version satisfies the requirement",
+            # not the older "the pin equals the workspace version exactly". Exact
+            # pins are what [workspace.dependencies] deliberately stopped using:
+            # release-plz only rewrites the pins of packages it releases, so the
+            # rest rotted (api-types sat at 0.2.19 against a 0.2.20 workspace) and
+            # every release needed a hand-fix. A requirement like `0` covers every
+            # 0.x and never needs maintaining. What this catches is therefore the
+            # regression that actually breaks releases — a missing or unsatisfiable
+            # requirement — not pin freshness, which the `0` form makes moot. (One
+            # consequence worth naming: an exact `0.2.24` against a 0.2.25
+            # workspace still satisfies ^0.2.24, so re-introducing exact pins buys
+            # back the old rot, invisible here until the 0.3.0 boundary.)
+            internal-dep-versions =
+              let
+                cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+                inherit (cargoToml.workspace.package) version;
+
+                # [ major minor patch ]. A prerelease suffix is dropped rather
+                # than ordered — this workspace has never cut one, and getting it
+                # wrong should not be a silent pass.
+                triple = v: map lib.toInt (lib.splitString "." (lib.head (lib.splitString "-" v)));
+                workspace = triple version;
+
+                # The components a requirement spells out: "^0.2" -> [ 0 2 ].
+                # Only cargo's default (caret) form is understood; a range like
+                # ">=0.2, <0.4" needs a real semver parser, so it is reported as
+                # unsupported instead of being waved through.
+                reqParts =
+                  req:
+                  if builtins.match "\\^?[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?" req == null then
+                    null
+                  else
+                    triple (lib.removePrefix "^" req);
+
+                # Caret semantics: the range runs up to the next increment of the
+                # leftmost component the requirement spells out that is nonzero.
+                # ^0 := <1.0.0, ^0.2 := <0.3.0, ^0.0.3 := <0.0.4, ^1.2 := <2.0.0.
+                upper =
+                  parts:
+                  let
+                    c = i: lib.elemAt parts i;
+                    n = lib.length parts;
+                  in
+                  if c 0 != 0 then
+                    [ (c 0 + 1) 0 0 ]
+                  else if n == 1 then
+                    [ 1 0 0 ]
+                  else if c 1 != 0 then
+                    [ 0 (c 1 + 1) 0 ]
+                  else if n == 2 then
+                    [ 0 1 0 ]
+                  else
+                    [ 0 0 (c 2 + 1) ];
+
+                # a >= b, on [ major minor patch ].
+                atLeast =
+                  a: b:
+                  if lib.elemAt a 0 != lib.elemAt b 0 then
+                    lib.elemAt a 0 > lib.elemAt b 0
+                  else if lib.elemAt a 1 != lib.elemAt b 1 then
+                    lib.elemAt a 1 > lib.elemAt b 1
+                  else
+                    lib.elemAt a 2 >= lib.elemAt b 2;
+
+                satisfies =
+                  parts:
+                  let
+                    lower = parts ++ lib.genList (_: 0) (3 - lib.length parts);
+                  in
+                  atLeast workspace lower && !(atLeast workspace (upper parts));
+
+                # Every table that can name an internal crate: a member's three
+                # dependency tables plus any target-scoped variants of them.
+                depTables =
+                  manifest:
+                  let
+                    direct = m: [
+                      (m.dependencies or { })
+                      (m.dev-dependencies or { })
+                      (m.build-dependencies or { })
+                    ];
+                  in
+                  direct manifest ++ lib.concatMap direct (lib.attrValues (manifest.target or { }));
+
+                # A dependency is internal iff it is declared with a `path`.
+                # `foo.workspace = true` has none: it re-uses the root's entry,
+                # which this same check covers at the root.
+                depsIn =
+                  file: table:
+                  lib.mapAttrsToList (name: dep: { inherit file name; req = dep.version or null; }) (
+                    lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
+                  );
+
+                deps =
+                  depsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
+                  ++ lib.concatMap (
+                    m:
+                    lib.concatMap (depsIn "${m}/Cargo.toml") (
+                      depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
+                    )
+                  ) cargoToml.workspace.members;
+
+                # `*` imposes no bound at all, so the workspace version satisfies
+                # it by construction; cargo packages it happily.
+                ok =
+                  d:
+                  d.req == "*"
+                  || (d.req != null && reqParts d.req != null && satisfies (reqParts d.req));
+
+                offenders = lib.filter (d: !(ok d)) deps;
+                describe =
+                  d: "  ${d.file}: ${d.name} -> ${if d.req == null then "(no version field)" else d.req}";
+              in
+              assert lib.assertMsg (offenders == [ ]) ''
+                Internal path dependencies without a usable version requirement
+                (workspace version ${version}):
+                ${lib.concatStringsSep "\n" (map describe offenders)}
+                Every path dependency on a workspace member needs a `version` that
+                the workspace version satisfies, or release-plz's `cargo package
+                --workspace` fails and no release can be cut. Use `version = "0"`,
+                which covers every 0.x and never needs updating — see the note in
+                [workspace.dependencies]. Requirements other than the caret form
+                (`0`, `0.2`, `^0.2.3`) or `*` are not understood by this check.
+              '';
+              pkgs.runCommand "internal-dep-versions-ok" { } "touch $out";
 
             # Guardrail for the publish/dependency incoherence that blocked every
             # release from 0.2.21 on and produced five consecutive "fix:" commits.
