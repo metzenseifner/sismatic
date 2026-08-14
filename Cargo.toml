@@ -23,14 +23,35 @@ license = "ECL-2.0"
 # `foo.workspace = true` and add only the extra features they need, so e.g. the
 # web tree never leaks into the wheel build and pyo3 never leaks into the CLI.
 [workspace.dependencies]
-# Internal crates. All are `publish = false`, so path-only: no version to
-# keep in lockstep with the shared `workspace.package.version`.
-sismatic-api-types = { path = "crates/sismatic-api-types" }
-sismatic-core = { path = "crates/sismatic-core" }
-sismatic-http-api = { path = "crates/sismatic-http-api" }
-sismatic-store = { path = "crates/sismatic-store" }
-sismatic-store-memory = { path = "crates/sismatic-store-memory" }
-sismatic-sync = { path = "crates/sismatic-sync" }
+# Internal crates. The `version` next to the `path` is mandatory even though
+# none of these is ever published: release-plz runs in `git_only` mode, which
+# packages the *whole* workspace (`cargo package --allow-dirty --workspace`, in a
+# worktree checked out at the last release tag) to diff each member against its
+# last release, and cargo refuses to package any crate whose path dependency
+# carries no version requirement — "all dependencies must have a version
+# requirement specified when packaging". Dropping these to path-only is what
+# broke the v0.2.24 release; `release = false` in release-plz.toml does not
+# exempt a member, because `--workspace` has no per-package filter.
+#
+# `"0"` — not the workspace version — is the requirement, and the distinction is
+# the whole point. `^0` matches every 0.x, so there is nothing here to keep in
+# lockstep and nothing to rot; release-plz's `upgrade_requirement` only reassigns
+# the components a requirement spells out, so `0` rewrites to `0`, compares
+# equal, and is left alone. Every bump therefore lands in exactly one place —
+# `[workspace.package] version` above — which the members inherit. (At a 1.0
+# bump release-plz rewrites these to `1` on its own, which is what we'd want.)
+#
+# So do not "tidy" these into exact pins. Exact pins are the older design and
+# they rotted: release-plz maintains only the pins of packages it actually
+# releases, so `sismatic-api-types` sat at 0.2.19 against a 0.2.20 workspace,
+# and cargo's caret rule hid it until the next release broke. And do not drop
+# the `version` again — that is the failure above.
+sismatic-api-types = { path = "crates/sismatic-api-types", version = "0" }
+sismatic-core = { path = "crates/sismatic-core", version = "0" }
+sismatic-http-api = { path = "crates/sismatic-http-api", version = "0" }
+sismatic-store = { path = "crates/sismatic-store", version = "0" }
+sismatic-store-memory = { path = "crates/sismatic-store-memory", version = "0" }
+sismatic-sync = { path = "crates/sismatic-sync", version = "0" }
 
 # Shared third-party
 # The read side's HTTP framework. `default-features = false` drops the response
