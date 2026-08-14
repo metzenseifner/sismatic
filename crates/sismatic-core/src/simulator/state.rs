@@ -181,7 +181,7 @@ pub struct DeviceState {
 impl DeviceState {
     /// Parse a YAML config into a device.
     ///
-    /// Keys are canonicalised through the catalog's own `FromStr`, so the file
+    /// Keys are canonicalized through the catalog's own `FromStr`, so the file
     /// inherits its case- and `-`/`_`-insensitivity and its aliases for free:
     /// `ssh-port`, `SSH_PORT` and `Ssh_Port` all name the same field.
     /// Unrecognised keys are retained and reported by [`check`](Self::check).

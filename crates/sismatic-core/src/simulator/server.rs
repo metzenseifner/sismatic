@@ -101,7 +101,7 @@ pub async fn bind(
     let mut methods = MethodSet::empty();
     methods.push(MethodKind::KeyboardInteractive);
 
-    let config = Arc::new(server::Config {
+    let ssh_server_config = Arc::new(server::Config {
         methods,
         // Default is a 1s constant-time rejection delay; shorten it so the
         // password -> keyboard-interactive fallback isn't paced by a full second.
@@ -111,12 +111,12 @@ pub async fn bind(
         ..Default::default()
     });
 
-    let mut smp = SmpServer {
+    let mut device = DeviceServer {
         state: Arc::clone(&state),
         reply,
     };
     let task = tokio::spawn(async move {
-        let _ = smp.run_on_socket(config, &listener).await;
+        let _ = device.run_on_socket(ssh_server_config, &listener).await;
     });
 
     Ok(SimulatedDevice {
@@ -126,33 +126,33 @@ pub async fn bind(
     })
 }
 
-/// The server side: one [`SmpHandler`] per connection, all sharing one
+/// The server side: one [`DeviceHandler`] per connection, all sharing one
 /// [`DeviceState`] so writes persist across sessions.
-struct SmpServer {
+struct DeviceServer {
     state: Arc<DeviceState>,
     reply: ReplyStream,
 }
 
-impl Server for SmpServer {
-    type Handler = SmpHandler;
+impl Server for DeviceServer {
+    type Handler = DeviceHandler;
 
-    fn new_client(&mut self, _peer: Option<SocketAddr>) -> SmpHandler {
-        SmpHandler {
+    fn new_client(&mut self, _peer: Option<SocketAddr>) -> DeviceHandler {
+        DeviceHandler {
             state: Arc::clone(&self.state),
             reply: self.reply,
         }
     }
 }
 
-/// Reproduces the SMP auth handshake: `password` is never accepted, and
+/// Reproduces the Device auth handshake: `password` is never accepted, and
 /// `keyboard-interactive` sends one "Password:" prompt whose answer must match
 /// the configured credential.
-struct SmpHandler {
+struct DeviceHandler {
     state: Arc<DeviceState>,
     reply: ReplyStream,
 }
 
-impl Handler for SmpHandler {
+impl Handler for DeviceHandler {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {

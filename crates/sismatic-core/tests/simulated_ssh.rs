@@ -56,7 +56,7 @@ fn init_tracing() {
 
 /// Bind the simulated SMP on a random loopback port, seeded from the checked-in
 /// config. Returns once it is listening.
-async fn spawn_smp(reply: ReplyStream) -> SimulatedDevice {
+async fn spawn_device(reply: ReplyStream) -> SimulatedDevice {
     init_tracing();
     let state = DeviceState::from_yaml_str(CONFIG).expect("the checked-in config parses");
     bind(("127.0.0.1", 0), Arc::new(state), reply)
@@ -64,12 +64,12 @@ async fn spawn_smp(reply: ReplyStream) -> SimulatedDevice {
         .expect("bind loopback")
 }
 
-/// A device config pointed at `smp`, authenticating with `password`.
-fn device_config(smp: &SimulatedDevice, password: &str) -> DeviceConfig {
+/// A device config pointed at `simulated_device`, authenticating with `password`.
+fn device_config(simulated_device: &SimulatedDevice, password: &str) -> DeviceConfig {
     DeviceConfig {
         id: "sim".into(),
         host: "127.0.0.1".into(),
-        port: smp.port(),
+        port: simulated_device.port(),
         username: USERNAME.into(),
         password: password.into(),
         connect_timeout: Duration::from_secs(5),
@@ -83,26 +83,29 @@ fn device_config(smp: &SimulatedDevice, password: &str) -> DeviceConfig {
 
 /// Drive an instruction through the same `Device` stack production uses, so the
 /// whole path — RusshConnector, Controller, the real parser — runs over SSH.
-async fn connected(smp: &SimulatedDevice) -> Device {
-    Device::new(device_config(smp, PASSWORD), Arc::new(RusshConnector))
+async fn connected(simulated_device: &SimulatedDevice) -> Device {
+    Device::new(
+        device_config(simulated_device, PASSWORD),
+        Arc::new(RusshConnector),
+    )
 }
 
 #[tokio::test]
 async fn keyboard_interactive_auth_succeeds() {
-    let smp = spawn_smp(ReplyStream::Stdout).await;
+    let simulated_device = spawn_device(ReplyStream::Stdout).await;
 
     RusshConnector
-        .connect(&device_config(&smp, PASSWORD))
+        .connect(&device_config(&simulated_device, PASSWORD))
         .await
         .expect("keyboard-interactive auth should succeed");
 }
 
 #[tokio::test]
 async fn wrong_password_is_rejected() {
-    let smp = spawn_smp(ReplyStream::Stdout).await;
+    let simulated_device = spawn_device(ReplyStream::Stdout).await;
 
     match RusshConnector
-        .connect(&device_config(&smp, "not-the-password"))
+        .connect(&device_config(&simulated_device, "not-the-password"))
         .await
     {
         Err(ConnectError::Failed(_)) => {}
@@ -113,8 +116,8 @@ async fn wrong_password_is_rejected() {
 
 #[tokio::test]
 async fn unit_name_query_round_trips() {
-    let smp = spawn_smp(ReplyStream::Stdout).await;
-    let device = connected(&smp).await;
+    let simulated_device = spawn_device(ReplyStream::Stdout).await;
+    let device = connected(&simulated_device).await;
 
     let value = device
         .run(&Query::UnitName.instruction())
@@ -129,8 +132,8 @@ async fn unit_name_query_over_stderr_round_trips() {
     // Regression: real Extron SMP devices reply on the SSH extended-data
     // (stderr) stream. The transport must read stderr as well as stdout, or the
     // query times out (see the `into_stream` note in the ssh transport).
-    let smp = spawn_smp(ReplyStream::Stderr).await;
-    let device = connected(&smp).await;
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
 
     let value = device
         .run(&Query::UnitName.instruction())
@@ -145,8 +148,8 @@ async fn unit_name_query_over_stderr_round_trips() {
 /// `simulator_config.rs`.
 #[tokio::test]
 async fn a_typed_query_decodes_over_the_wire() {
-    let smp = spawn_smp(ReplyStream::Stderr).await;
-    let device = connected(&smp).await;
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
 
     let value = device
         .run(&Query::SshPort.instruction())
@@ -167,8 +170,8 @@ async fn a_typed_query_decodes_over_the_wire() {
 async fn set_then_get_round_trips_every_register() {
     use std::str::FromStr;
 
-    let smp = spawn_smp(ReplyStream::Stderr).await;
-    let device = connected(&smp).await;
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
 
     for &register in Register::ALL {
         // `every_settable_register_has_a_read_path` guarantees this resolves.
@@ -201,8 +204,8 @@ async fn set_then_get_round_trips_every_register() {
 /// two could drift apart.
 #[tokio::test]
 async fn commands_mutate_the_running_state() {
-    let smp = spawn_smp(ReplyStream::Stderr).await;
-    let device = connected(&smp).await;
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
 
     // The config starts the device stopped.
     assert_eq!(

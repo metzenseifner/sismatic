@@ -69,7 +69,7 @@ actix-web = { version = "4.13", default-features = false }
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6.2.1"
 # `abi3-py39` builds against CPython's stable ABI, so one wheel covers 3.9+
 # instead of one wheel per interpreter version. (3.9 is the floor because the

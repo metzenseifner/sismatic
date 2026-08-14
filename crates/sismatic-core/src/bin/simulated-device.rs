@@ -1,4 +1,4 @@
-//! A standalone simulated Extron SMP: an SSH server whose behaviour is
+//! A standalone simulated Extron SMP: an SSH server whose behavior is
 //! declared by a YAML config file.
 //!
 //! ```text
@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use sismatic_core::simulator::{DeviceState, ReplyStream, bind};
+use tracing_subscriber::EnvFilter;
 
 /// Default config path, relative to the workspace root — where `cargo run`
 /// puts the working directory.
@@ -50,18 +51,19 @@ struct Args {
     /// Extron hardware uses.
     #[arg(long)]
     stdout: bool,
+
+    #[arg(short, long, env = "RUST_LOG", default_value = "info")]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
+
+    // Build EnvFilter from the CLI argument string (falls back to "info" on parse error)
+    let filter = EnvFilter::try_new(&args.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let text = match std::fs::read_to_string(&args.config) {
         Ok(text) => text,
