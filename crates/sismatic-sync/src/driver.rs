@@ -388,7 +388,7 @@ mod tests {
     use sismatic_core::devices::connector::{ConnectError, Connector};
     use sismatic_core::devices::transport::Transport;
     use sismatic_core::devices::transport::fake::FakeTransport;
-    use sismatic_store::outbox::{CommandDrain, Outcome};
+    use sismatic_store::outbox::{Claim, CommandDrain, Outcome};
     use sismatic_store::{WriteError, WriteStore};
 
     use super::*;
@@ -439,7 +439,7 @@ mod tests {
             &self,
             _device: DeviceId,
             _at: Timestamp,
-        ) -> Result<Option<CommandRecord>, WriteError> {
+        ) -> Result<Option<Claim>, WriteError> {
             Ok(None)
         }
 

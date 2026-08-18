@@ -76,8 +76,10 @@ async fn spawn_app() -> String {
     // make it depend on the very routing it is checking.
     outbox
         .submit(Submission {
-            id: COMMAND.to_owned(),
-            device: DEVICE.to_owned(),
+            ids: vec![COMMAND.to_owned()],
+            targets: vec![DEVICE.to_owned()],
+            batch: None,
+            barrier: None,
             intent: Intent::SetSetting {
                 field: "TIMEZONE".to_owned(),
                 value: "UTC".to_owned(),
@@ -259,6 +261,24 @@ async fn the_error_envelope_is_documented_where_it_can_be_returned() {
     assert!(
         schema["properties"]["code"].is_object(),
         "ApiError should carry the machine-readable code, got {schema}"
+    );
+    // The second machine-readable field, and the `Rejection` schema it refs.
+    // A generated client gets a real union to switch on rather than four
+    // values buried in `ErrorCode` with nothing saying which pair with a 409.
+    assert!(
+        schema["properties"]["rejection"].is_object(),
+        "ApiError should carry the rejection, got {schema}"
+    );
+    let rejection = &doc["components"]["schemas"]["Rejection"];
+    assert_eq!(
+        rejection["enum"],
+        serde_json::json!([
+            "metadata_frozen",
+            "already_recording",
+            "already_paused",
+            "not_recording"
+        ]),
+        "got {rejection}"
     );
 }
 

@@ -18,7 +18,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sismatic_api_types::{ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
+use sismatic_api_types::{Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
 use sismatic_http_api::Stamp;
 use sismatic_store::outbox::{DynCommandLog, DynCommandSubmit};
 use sismatic_store::{DynDeviceCatalog, DynReadStore};
@@ -65,6 +65,8 @@ pub fn catalog() -> MemoryCatalog {
         vec![GroupSummary {
             id: GROUP.to_owned(),
             members: vec![DEVICE.to_owned()],
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
         }],
     )
 }

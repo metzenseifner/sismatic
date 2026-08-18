@@ -100,12 +100,31 @@ impl From<WriteError> for ApiError {
 impl From<SubmitError> for ApiError {
     fn from(e: SubmitError) -> Self {
         match e {
-            SubmitError::Rejected { rejection, phase } => ApiError::coded(
-                ErrorCode::Conflict,
-                // The phase is named as well as the rejection because it is
-                // what the caller would have to change: "not_recording" alone
-                // does not say that a start has to come first.
-                format!("{rejection} (device phase: {})", phase_name(phase)),
+            SubmitError::Rejected {
+                device,
+                rejection,
+                phase,
+            } => ApiError::rejected(
+                rejection,
+                // The prose stays, and stays complete, even though the
+                // rejection is now a field: this is the string that lands in a
+                // log, and a reader there has no other way to learn which
+                // device refused. The device because a group submission is
+                // refused as a whole by one member, and "which one" is the
+                // first thing an operator needs; the phase because it is what
+                // the caller would have to change — "not_recording" alone does
+                // not say a start has to come first.
+                format!(
+                    "{rejection} (device '{device}', phase: {})",
+                    phase_name(phase)
+                ),
+            ),
+            SubmitError::Malformed(msg) => ApiError::coded(
+                // The caller built a nonsensical submission, so this is a bug
+                // in the server rather than in the request — no wording of the
+                // request could have avoided it.
+                ErrorCode::Internal,
+                format!("malformed submission: {msg}"),
             ),
             SubmitError::Backend(msg) => ApiError::coded(ErrorCode::Internal, msg),
         }

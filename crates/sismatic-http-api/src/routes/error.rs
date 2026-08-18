@@ -131,22 +131,28 @@ mod tests {
     #[test]
     fn a_refused_submission_is_a_conflict_and_a_backend_failure_is_ours() {
         let refused = ApiFailure::Submit(SubmitError::Rejected {
+            device: "atrium-101".to_owned(),
             rejection: Rejection::MetadataFrozen,
             phase: Phase::Recording,
         });
         assert_eq!(refused.status_code(), StatusCode::CONFLICT);
         assert_eq!(refused.body().code, Some(ErrorCode::Conflict));
-        // The message names both halves: what was refused, and the state that
-        // refused it.
+        // The typed field is what a client branches on; the prose is what a
+        // log reader reads. Both are asserted, because the two could drift.
+        assert_eq!(refused.body().rejection, Some(Rejection::MetadataFrozen));
         assert!(
             refused.to_string().contains("metadata_frozen")
-                && refused.to_string().contains("recording"),
+                && refused.to_string().contains("atrium-101"),
             "got: {refused}"
         );
 
         let broken = ApiFailure::Submit(SubmitError::Backend("disk full".into()));
         assert_eq!(broken.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(broken.body().code, Some(ErrorCode::Internal));
+        // Not a rejection, so the field is absent — and therefore not even
+        // serialized. A client that sees `rejection` knows it was refused by a
+        // precondition and not by a broken disk.
+        assert_eq!(broken.body().rejection, None);
     }
 
     /// Every rejection reaches a caller as a 409 — none of the four is a
@@ -161,6 +167,7 @@ mod tests {
             Rejection::NotRecording,
         ] {
             let failure = ApiFailure::Submit(SubmitError::Rejected {
+                device: "atrium-101".to_owned(),
                 rejection,
                 phase: Phase::Idle,
             });
@@ -169,6 +176,8 @@ mod tests {
                 StatusCode::CONFLICT,
                 "{rejection:?} did not read as a conflict"
             );
+            // ...and reaches the caller as itself, not flattened into the code.
+            assert_eq!(failure.body().rejection, Some(rejection));
         }
     }
 }

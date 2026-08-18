@@ -29,8 +29,10 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
-use sismatic_api_types::{ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
-use sismatic_core::devices::config::{DeviceConfig, Resolved};
+use sismatic_api_types::{
+    Barrier as ApiBarrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp,
+};
+use sismatic_core::devices::config::{Barrier, DeviceConfig, GroupConfig, Resolved};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
@@ -74,14 +76,7 @@ pub async fn run(
     // see `sismatic_api_types::device`.
     let catalog: DynDeviceCatalog = Arc::new(MemoryCatalog::new(
         devices.devices.iter().map(summarize).collect(),
-        devices
-            .groups
-            .iter()
-            .map(|group| GroupSummary {
-                id: group.id.clone(),
-                members: group.device_ids.clone(),
-            })
-            .collect(),
+        devices.groups.iter().map(summarize_group).collect(),
     ));
 
     let registry = Arc::new(Registry::build(
@@ -186,6 +181,29 @@ fn summarize(config: &DeviceConfig) -> DeviceSummary {
         port: config.port,
         eager: config.eager,
         status: ConnectionStatus::Unknown,
+    }
+}
+
+/// Project a group's config onto the summary the API serves and the outbox
+/// arms its barrier from.
+///
+/// The barrier policy crosses the seam here, and this is the only place the two
+/// spellings of it meet: `core` parses the config into its own [`Barrier`] and
+/// the outbox enforces the wire [`ApiBarrier`], because neither crate can see
+/// the other. The match below is wildcard-free, so a third policy is a build
+/// error at this seam rather than a silent mapping onto an existing one — the
+/// same drift sentinel `sismatic_sync::dto` uses for the read direction.
+///
+/// [`ApiBarrier`]: sismatic_api_types::Barrier
+fn summarize_group(config: &GroupConfig) -> GroupSummary {
+    GroupSummary {
+        id: config.id.clone(),
+        members: config.device_ids.clone(),
+        barrier_timeout_secs: config.barrier_timeout.as_secs(),
+        barrier: match config.barrier {
+            Barrier::DispatchReady => ApiBarrier::DispatchReady,
+            Barrier::FailBatch => ApiBarrier::FailBatch,
+        },
     }
 }
 

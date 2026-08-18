@@ -64,8 +64,8 @@ pub type GroupId = String;
 pub type FieldName = String;
 
 pub use command::{
-    Accepted, CommandId, CommandList, CommandRecord, CommandStatus, Intent, Phase, RecordingPhase,
-    Rejection,
+    Acceptance, Accepted, Barrier, BatchId, CommandId, CommandList, CommandRecord, CommandStatus,
+    Intent, Phase, RecordingPhase, Rejection,
 };
 pub use device::{
     ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,

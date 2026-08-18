@@ -51,15 +51,17 @@
 //! `sismatic-intent-relay` at dispatch and surfaces as a `failed` command
 //! rather than as a `400`.
 
+use std::time::Duration;
+
 use actix_web::{HttpResponse, web};
 use serde::Deserialize;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes — the
 // handlers return `ApiFailure` and let it render.
 use sismatic_api_types::{
-    Accepted, ApiError, CommandList, CommandRecord, DeviceId, Intent, RecordingPhase,
+    Acceptance, ApiError, CommandList, CommandRecord, DeviceId, Intent, RecordingPhase,
 };
 use sismatic_store::catalog::DeviceCatalog;
-use sismatic_store::outbox::{CommandLog, CommandSubmit, Submission};
+use sismatic_store::outbox::{BarrierPolicy, CommandLog, CommandSubmit, Submission};
 
 use crate::routes::error::ApiFailure;
 use crate::routes::readings::normalize_field;
@@ -112,44 +114,96 @@ impl actix_web::FromRequest for IdempotencyKey {
     }
 }
 
+/// Whether this intent needs the members of a group to act *together*.
+///
+/// The three lifecycle verbs do: a room whose recorders start seconds apart has
+/// produced takes that do not line up, which is the whole reason a group is
+/// addressable as one thing. The two writes do not — setting the same title on
+/// two recorders is the same result whenever each one happens — so batching
+/// them would buy nothing and cost them a barrier they could time out against.
+///
+/// Wildcard-free, so a new [`Intent`] variant is a build error here until
+/// someone decides which kind it is. That decision is not one a default should
+/// make: guessing "no rendezvous" would silently ship a lifecycle verb that
+/// stopped keeping a room in step.
+const fn needs_rendezvous(intent: &Intent) -> bool {
+    match intent {
+        Intent::StartRecording | Intent::StopRecording | Intent::PauseRecording => true,
+        Intent::SetMetadata { .. } | Intent::SetSetting { .. } => false,
+    }
+}
+
 /// The one path from an [`Intent`] to a response. Every route below is this
 /// function plus an `Intent` constructor.
+///
+/// `target` is a device id or a group id — the two share one namespace, and
+/// which it is decides only how many rows the submission expands into.
 async fn submit(
     catalog: &dyn DeviceCatalog,
     port: &dyn CommandSubmit,
     stamp: &Stamp,
-    device: DeviceId,
+    target: DeviceId,
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
-    // Checked before anything is recorded. The outbox holds what was submitted
-    // and no list of what exists, so without this it would admit a command for
-    // a mistyped device against a fresh idle phase and answer `202` — a promise
-    // that cannot be kept, which the caller discovers only by polling a command
-    // that fails at dispatch. See `sismatic_store::catalog` for why this
-    // deliberately diverges from the read side's empty-list answer.
-    if !catalog.contains(&device).await {
+    // Expansion doubles as the existence check. The outbox holds what was
+    // submitted and no list of what exists, so without this it would admit a
+    // command for a mistyped id against a fresh idle phase and answer `202` — a
+    // promise that cannot be kept, which the caller discovers only by polling a
+    // command that fails at dispatch. See `sismatic_store::catalog` for why
+    // this deliberately diverges from the read side's empty-list answer.
+    let Some(targets) = catalog.members(&target).await else {
         return Err(ApiFailure::NotFound(format!(
-            "no device or group '{device}' is configured"
+            "no device or group '{target}' is configured"
         )));
-    }
+    };
 
-    let (id, at) = stamp.next();
-    let accepted: Accepted = port
+    // Expanded *here* rather than at dispatch, because admission is per device:
+    // a room where one recorder is already running and one is idle has to be
+    // decided against both phases, and only a submission that names both can be.
+    // See the design note's group section for the alternative that was weighed.
+    let group = catalog.group(&target).await;
+    let batch = group
+        .as_ref()
+        .filter(|_| needs_rendezvous(&intent) && targets.len() > 1)
+        .map(|_| stamp.next().0);
+    let barrier = group.as_ref().map(|group| BarrierPolicy {
+        timeout: Duration::from_secs(group.barrier_timeout_secs),
+        on_timeout: group.barrier,
+    });
+
+    let mut ids = Vec::with_capacity(targets.len());
+    let mut at = None;
+    for _ in &targets {
+        let (id, minted_at) = stamp.next();
+        ids.push(id);
+        // One instant for the whole submission, not one per row: the members
+        // were accepted together, and a barrier armed at the *first* id's
+        // instant is the one an operator's stopwatch agrees with.
+        at.get_or_insert(minted_at);
+    }
+    let at = at.expect("members is non-empty");
+
+    let accepted: Acceptance = port
         .submit(Submission {
-            id,
-            device,
+            ids,
+            targets,
+            batch,
+            barrier,
             intent,
             at,
             idempotency_key,
         })
         .await?;
-    Ok(HttpResponse::Accepted()
-        // The id is in the body as well, but a `Location` is what makes the
-        // `202` self-describing to a client that follows headers rather than
-        // parsing one more body shape.
-        .insert_header(("Location", format!("/v1/commands/{}", accepted.id)))
-        .json(accepted))
+
+    let mut response = HttpResponse::Accepted();
+    // Only when there is one command to point at. A group produced several, and
+    // a header naming an arbitrary one of them would be worse than none — the
+    // body carries every id.
+    if let [only] = accepted.commands.as_slice() {
+        response.insert_header(("Location", format!("/v1/commands/{}", only.id)));
+    }
+    Ok(response.json(accepted))
 }
 
 #[utoipa::path(
@@ -165,7 +219,7 @@ async fn submit(
     ),
     responses(
         (status = 202, description = "Recorded. No device has been contacted yet; \
-             follow the `Location` header for the outcome.", body = Accepted),
+             follow the `Location` header for the outcome.", body = Acceptance),
         (status = 409, description = "This device is already recording.", body = ApiError),
         (status = 404, description = "No device or group has this id. The catalog \
              is the configured set, so this is a claim about the devices file.",
@@ -201,7 +255,7 @@ pub async fn start_recording(
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
     ),
     responses(
-        (status = 202, body = Accepted),
+        (status = 202, body = Acceptance),
         (status = 409, description = "No recording is in progress.", body = ApiError),
         (status = 404, description = "No device or group has this id. The catalog \
              is the configured set, so this is a claim about the devices file.",
@@ -237,7 +291,7 @@ pub async fn stop_recording(
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
     ),
     responses(
-        (status = 202, body = Accepted),
+        (status = 202, body = Acceptance),
         (status = 409, description = "Nothing is recording, or it is already paused.",
          body = ApiError),
         (status = 404, description = "No device or group has this id. The catalog \
@@ -278,7 +332,7 @@ pub async fn pause_recording(
     ),
     request_body = ValueWrite,
     responses(
-        (status = 202, body = Accepted),
+        (status = 202, body = Acceptance),
         (status = 409, description = "A recording is in progress, so this device's \
              metadata is sealed for the current epoch. Stop the recording, or write \
              the field before the next one starts.", body = ApiError),
@@ -321,7 +375,7 @@ pub async fn set_metadata(
     request_body = ValueWrite,
     responses(
         (status = 202, description = "Recorded. Settings carry no recording freeze, so \
-             this is accepted in every phase.", body = Accepted),
+             this is accepted in every phase.", body = Acceptance),
         (status = 404, description = "No device or group has this id. The catalog \
              is the configured set, so this is a claim about the devices file.",
          body = ApiError),

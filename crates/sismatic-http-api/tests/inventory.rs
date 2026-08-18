@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use sismatic_api_types::{
-    ConnectionStatus, DeviceSummary, GroupSummary, Reading, ReadingValue, Timestamp,
+    Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Reading, ReadingValue, Timestamp,
 };
 use sismatic_store::{DynReadStore, WriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryStore};
@@ -128,6 +128,8 @@ async fn the_group_index_lists_members_in_configured_order() {
             // Not alphabetical: the operator wrote this sequence and a fan-out
             // has to address the room the way it reads.
             members: vec!["atrium".to_owned(), "annex".to_owned()],
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
         }],
     );
     let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), catalog);
@@ -137,7 +139,12 @@ async fn the_group_index_lists_members_in_configured_order() {
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        serde_json::json!({"groups": [{"id": "room", "members": ["atrium", "annex"]}]})
+        serde_json::json!({"groups": [{
+            "id": "room",
+            "members": ["atrium", "annex"],
+            "barrier_timeout_secs": 15,
+            "barrier": "fail_batch",
+        }]})
     );
 }
 
@@ -193,7 +200,15 @@ async fn one_group_resolves_by_id() {
     let (status, body) = get(format!("{address}/v1/groups/{GROUP}")).await;
 
     assert_eq!(status, 200);
-    assert_eq!(body, serde_json::json!({"id": GROUP, "members": [DEVICE]}));
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "id": GROUP,
+            "members": [DEVICE],
+            "barrier_timeout_secs": 15,
+            "barrier": "fail_batch",
+        })
+    );
 }
 
 /// Devices and groups share one id namespace, so naming a device on the group
@@ -298,4 +313,178 @@ async fn a_group_id_passes_the_guard() {
         .as_u16();
 
     assert_eq!(status, 202);
+}
+
+// ---- group-addressed writes -------------------------------------------
+
+/// A room of two, so a group submission expands into something worth counting.
+fn room_of_two() -> MemoryCatalog {
+    MemoryCatalog::new(
+        vec![
+            summary("front", "10.0.0.1", false),
+            summary("back", "10.0.0.2", false),
+        ],
+        vec![GroupSummary {
+            id: "room-5".to_owned(),
+            members: vec!["front".to_owned(), "back".to_owned()],
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
+        }],
+    )
+}
+
+/// The expansion, through the HTTP surface: one request, one row per member,
+/// all under one batch.
+#[tokio::test]
+async fn a_group_start_expands_into_one_command_per_member() {
+    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+
+    let response = reqwest::Client::new()
+        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .send()
+        .await
+        .expect("issuing the request");
+
+    assert_eq!(response.status().as_u16(), 202);
+    // No `Location`: a group produced several commands, and a header naming an
+    // arbitrary one of them would be worse than none.
+    assert!(response.headers().get("location").is_none());
+
+    let body: serde_json::Value = response.json().await.expect("a body");
+    assert!(
+        body["batch"].as_str().is_some(),
+        "a lifecycle verb over a group needs a rendezvous: {body}"
+    );
+    let rows: Vec<(&str, &str)> = body["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|c| {
+            (
+                c["device"].as_str().expect("device"),
+                c["id"].as_str().expect("id"),
+            )
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "one row per member: {body}");
+    assert_eq!(
+        rows.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
+        ["front", "back"]
+    );
+}
+
+/// A group *write* is expanded without a batch: setting the same title on two
+/// recorders is the same result whenever each one happens, so making them wait
+/// on each other would only expose them to a barrier they have no use for.
+#[tokio::test]
+async fn a_group_metadata_write_expands_without_a_rendezvous() {
+    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .put(format!("{address}/v1/devices/room-5/metadata/title"))
+        .json(&serde_json::json!({"value": "Week 4"}))
+        .send()
+        .await
+        .expect("issuing the request")
+        .json()
+        .await
+        .expect("a body");
+
+    assert_eq!(body["batch"], serde_json::Value::Null, "got {body}");
+    assert_eq!(body["commands"].as_array().expect("commands").len(), 2);
+}
+
+/// Admission is across every member at once, so one member's refusal refuses
+/// the whole request — and, the part that matters, records nothing for the
+/// other member.
+#[tokio::test]
+async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
+    let (address, outbox) = {
+        let (a, o, _) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+        (a, o)
+    };
+    let client = reqwest::Client::new();
+
+    // `back` is started on its own first.
+    let status = client
+        .post(format!("{address}/v1/devices/back/recording/start"))
+        .send()
+        .await
+        .expect("issuing the request")
+        .status()
+        .as_u16();
+    assert_eq!(status, 202);
+
+    let response = client
+        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .send()
+        .await
+        .expect("issuing the request");
+    assert_eq!(response.status().as_u16(), 409);
+
+    let body: serde_json::Value = response.json().await.expect("a body");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("already_recording") && message.contains("back"),
+        "the refusing member must be named: {message}"
+    );
+
+    // `front` never learned about it — the group was refused as a whole.
+    use sismatic_store::outbox::CommandLog;
+    assert!(
+        outbox
+            .commands_for("front".to_owned())
+            .await
+            .expect("reading the log")
+            .is_empty(),
+        "a refused group must record nothing for its other members"
+    );
+}
+
+/// Every row of a group start carries the batch, so a caller polling one
+/// command can tell it is part of a rendezvous rather than a lone request.
+#[tokio::test]
+async fn every_row_of_a_group_start_carries_the_batch() {
+    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .send()
+        .await
+        .expect("issuing the request")
+        .json()
+        .await
+        .expect("a body");
+    let batch = body["batch"].as_str().expect("a batch id").to_owned();
+
+    for command in body["commands"].as_array().expect("commands") {
+        let id = command["id"].as_str().expect("id");
+        let (status, record) = get(format!("{address}/v1/commands/{id}")).await;
+        assert_eq!(status, 200);
+        assert_eq!(record["batch"], batch);
+        assert_eq!(record["status"]["state"], "pending");
+    }
+}
+
+/// The barrier policy reaches a client, because it is the one configured number
+/// that changes what a `202` means: a fifteen-second barrier can leave a
+/// command pending that long before anything reaches a device.
+#[tokio::test]
+async fn a_groups_barrier_policy_is_visible_on_the_inventory_route() {
+    let catalog = MemoryCatalog::new(
+        vec![summary("front", "10.0.0.1", false)],
+        vec![GroupSummary {
+            id: "hall".to_owned(),
+            members: vec!["front".to_owned()],
+            barrier_timeout_secs: 30,
+            barrier: Barrier::DispatchReady,
+        }],
+    );
+    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), catalog);
+
+    let (status, body) = get(format!("{address}/v1/groups/hall")).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["barrier_timeout_secs"], 30);
+    assert_eq!(body["barrier"], "dispatch_ready");
 }

@@ -16,6 +16,31 @@ use crate::{DeviceId, FieldName, Timestamp};
 /// server mints a v4 UUID.
 pub type CommandId = String;
 
+/// Ties together the rows one group-addressed request was expanded into.
+///
+/// A `String` for the same reason [`CommandId`] is, and a *separate* id rather
+/// than the group's: a group can be addressed many times, and "these rows are
+/// one take's worth" is a statement about one request, not about the room.
+pub type BatchId = String;
+
+/// What to do when a batch's barrier does not fill within its timeout.
+///
+/// The wire mirror of `sismatic_core::devices::config::Barrier`, declared here
+/// for the same reason [`RecordingState`](crate::RecordingState) is: the outbox
+/// enforces this policy and the outbox cannot see `core`. The composition root
+/// maps between the two with a wildcard-free match, so a third variant is a
+/// build error at the seam rather than a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Barrier {
+    /// Run the members that arrived. One recorder is better than none.
+    DispatchReady,
+    /// Fail every row in the batch. Two recordings or neither.
+    FailBatch,
+}
+
 /// What a caller wants done.
 ///
 /// Internally tagged (`{"kind": "set_metadata", "field": "TITLE", ...}`) rather
@@ -60,15 +85,22 @@ pub enum Phase {
     Paused,
 }
 
-/// Why a submission was refused.
+/// Why a submission was refused. Carried in the `409 Conflict` body as
+/// [`ApiError::rejection`](crate::ApiError::rejection), so a client branches on
+/// a value rather than on prose.
 ///
-/// Reaches a client inside the `409 Conflict` body's message, under the single
-/// [`ErrorCode::Conflict`](crate::ErrorCode::Conflict). That is weaker than
-/// branching on a code: [`ApiError`](crate::ApiError) carries one `code` and no
-/// slot for a rejection, so telling `metadata_frozen` from `already_recording`
-/// over the wire means matching prose. Closing that needs either a field on
-/// `ApiError` or one `ErrorCode` per variant here, and both change the envelope
-/// every client shares — so it is left stated rather than decided.
+/// A field of its own rather than four more [`ErrorCode`](crate::ErrorCode)
+/// variants, because all four are conflicts and differ only in which
+/// precondition refused — one axis is "what kind of failure and what status",
+/// the other is "which rule". See [`ApiError`](crate::ApiError) for the whole
+/// argument.
+///
+/// The distinction earns its keep: three of these four say the device is
+/// already in the state that was asked for, which a caller can often treat as
+/// benign, while [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was
+/// discarded and something has to be done about it. A client that could not
+/// tell them apart would either treat every `409` as an error or silently lose
+/// metadata edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -149,6 +181,15 @@ pub struct CommandRecord {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
     pub intent: Intent,
+    /// The batch this row belongs to, when the request that produced it was
+    /// addressed to a group *and* the intent needs the members to act together.
+    ///
+    /// `None` covers both a device-addressed request and a group-addressed
+    /// metadata or setting write: those are idempotent per device and gain
+    /// nothing from a rendezvous, so making them wait would only expose them to
+    /// a barrier timeout they have no use for.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub batch: Option<BatchId>,
     /// The recording epoch this command was admitted against.
     pub epoch: u64,
     pub status: CommandStatus,
@@ -159,15 +200,39 @@ pub struct CommandRecord {
     pub not_before: Timestamp,
 }
 
-/// The `202 Accepted` body. `epoch` is returned so a caller writing several
-/// metadata fields can check that all of them landed on one recording.
+/// One command a submission produced. `epoch` is returned so a caller writing
+/// several metadata fields can check that all of them landed on one recording.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Accepted {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub id: CommandId,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub device: DeviceId,
     pub epoch: u64,
+}
+
+/// The `202 Accepted` body.
+///
+/// Always a list, even for a device-addressed request that can only ever
+/// produce one command. The alternative — a bare [`Accepted`] for a device and
+/// a list for a group — would make the response shape depend on which kind of
+/// id the caller happened to use, so every client would need both parsers and
+/// the generated document would carry a `oneOf` for a route that does one
+/// thing. One shape costs a wrapper object and buys a contract that does not
+/// branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Acceptance {
+    /// Set when the members were expanded under a rendezvous, so a caller can
+    /// tell "these five will act together" from "these five were merely
+    /// submitted at the same moment".
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub batch: Option<BatchId>,
+    /// One entry per target, in the order the group lists its members.
+    pub commands: Vec<Accepted>,
 }
 
 /// A page of commands, wrapped for the same reason

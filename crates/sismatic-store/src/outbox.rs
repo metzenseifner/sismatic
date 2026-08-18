@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use sismatic_api_types::{
-    Accepted, CommandId, CommandRecord, DeviceId, Intent, Phase, ReadingValue, RecordingPhase,
-    RecordingState, Rejection, Timestamp,
+    Acceptance, Barrier, BatchId, CommandId, CommandRecord, DeviceId, Intent, Phase, ReadingValue,
+    RecordingPhase, RecordingState, Rejection, Timestamp,
 };
 
 use crate::{ReadError, WriteError};
@@ -11,15 +12,30 @@ pub type DynCommandSubmit = Arc<dyn CommandSubmit>;
 pub type DynCommandLog = Arc<dyn CommandLog>;
 pub type DynCommandDrain = Arc<dyn CommandDrain>;
 
-/// Everything one submission carries, grouped because the five values are only
+/// Everything one submission carries, grouped because the values are only
 /// meaningful together and an adapter needs all of them inside one critical
-/// section. Passing them as five arguments would let a caller reorder the two
-/// `String`s silently.
+/// section. Passing them as arguments would let a caller reorder the `String`s
+/// silently.
+///
+/// `targets` is a list rather than a single id because a group-addressed
+/// request is admitted across every member *at once*. A device-addressed
+/// request is the one-element case, so there is one code path and no branch on
+/// "is this a group" inside the critical section — which matters, because that
+/// branch would be the place a group's atomicity quietly stopped holding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
-    /// Minted by the caller so a retry can carry the same id.
-    pub id: CommandId,
-    pub device: DeviceId,
+    /// One id per target, in the same order, minted by the caller so a retry
+    /// can carry the same ids. An adapter must reject a length mismatch rather
+    /// than zipping the shorter of the two.
+    pub ids: Vec<CommandId>,
+    pub targets: Vec<DeviceId>,
+    /// `Some` when the members must act together — a rendezvous is armed and no
+    /// row is dispatched until every one is ready. `None` for a single device,
+    /// and for a group write that gains nothing from acting in unison.
+    pub batch: Option<BatchId>,
+    /// What to do if the rendezvous does not fill in time. Read only when
+    /// `batch` is `Some`.
+    pub barrier: Option<BarrierPolicy>,
     pub intent: Intent,
     pub at: Timestamp,
     /// When present, a repeat submission with the same `(device, key)` returns
@@ -27,12 +43,31 @@ pub struct Submission {
     pub idempotency_key: Option<String>,
 }
 
+/// The barrier, as the outbox needs it: a policy and the bound it applies at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarrierPolicy {
+    pub timeout: Duration,
+    pub on_timeout: Barrier,
+}
+
 /// Why a submission did not become a queued command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
-    /// The admission table refused it. Carries the phase that refused, so the
-    /// response can say what the caller would have to change.
-    Rejected { rejection: Rejection, phase: Phase },
+    /// The admission table refused it.
+    ///
+    /// Carries the phase that refused *and* the device whose phase it was: a
+    /// group submission is admitted across every member, so "already
+    /// recording" is not actionable without knowing which member said it.
+    Rejected {
+        device: DeviceId,
+        rejection: Rejection,
+        phase: Phase,
+    },
+    /// The caller handed a `Submission` that does not describe anything: no
+    /// targets, or a different number of ids than targets. A programming error
+    /// rather than a storage failure, kept distinct so it cannot be read as a
+    /// transient backend problem and retried.
+    Malformed(String),
     /// The storage backend failed.
     Backend(String),
 }
@@ -43,10 +78,13 @@ pub trait CommandSubmit: Send + Sync {
     /// Admit `submission` against the device's current phase and, if admitted,
     /// append it to that device's queue.
     ///
-    /// **Atomicity is part of this contract.** The admission decision and the
-    /// append are one unit; an implementation that reads the phase, releases
-    /// its lock, and then appends does not satisfy this trait.
-    async fn submit(&self, submission: Submission) -> Result<Accepted, SubmitError>;
+    /// **Atomicity is part of this contract**, and for a group it is atomicity
+    /// across *every* target. The admission decision and the append are one
+    /// unit: an implementation that reads one member's phase, releases its
+    /// lock, and then appends does not satisfy this trait, and neither does one
+    /// that admits member A, finds member B refuses, and leaves A's row behind.
+    /// A refused submission records nothing at all.
+    async fn submit(&self, submission: Submission) -> Result<Acceptance, SubmitError>;
 }
 
 /// Reading what was submitted. Absence is never an error, matching
@@ -85,17 +123,61 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// What a claim yielded.
+///
+/// Two cases rather than always a `Vec`, because the caller does genuinely
+/// different things with them: a lone command goes to `Device::run`, a batch
+/// goes to `DeviceGroup::run` so the members act in unison. Collapsing them
+/// into a one-element list would put the "is this really a group" branch back
+/// in the relay, decided by a length rather than by the outbox that armed the
+/// rendezvous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// One command for the device that asked. The ordinary path.
+    One(CommandRecord),
+    /// A whole batch, handed to the member whose arrival completed the barrier
+    /// (or whose tick found it timed out under [`Barrier::DispatchReady`]).
+    ///
+    /// Exactly one member's task ever receives this for a given batch — the
+    /// others find their row already claimed and move on — so the group run
+    /// happens once, from one task, and the members go out together.
+    Batch {
+        id: BatchId,
+        /// One record per member being dispatched, ordered by device id.
+        ///
+        /// Sorted rather than in the group's configured order, because the
+        /// barrier tracks membership as a set. Nothing downstream depends on
+        /// the order — `DeviceGroup::run` spawns every member's exchange before
+        /// awaiting any, so the members act in unison regardless — and a stable
+        /// order makes a batch's records comparable between runs.
+        ///
+        /// Under `DispatchReady` after a timeout this is a *subset* of the
+        /// batch: the members that never arrived are not included.
+        records: Vec<CommandRecord>,
+    },
+}
+
 /// Draining the queue. Held only by `sismatic-intent-relay`.
 #[async_trait::async_trait]
 pub trait CommandDrain: Send + Sync {
-    /// Take the oldest `Pending` command for `device`, mark it `InFlight`, and
-    /// return it. FIFO order per device is part of this contract: a metadata
-    /// write submitted before a start must be claimed before it.
+    /// Take the oldest claimable command for `device`, mark it `InFlight`, and
+    /// return it.
+    ///
+    /// FIFO order per device is part of this contract: a metadata write
+    /// submitted before a start must be claimed before it.
+    ///
+    /// A batched row at the head of a device's queue is *not* claimable until
+    /// every sibling has reached the head of its own queue. Until then this
+    /// answers `None` — and it must leave that row where it is rather than
+    /// setting it aside, because the command behind it would otherwise
+    /// overtake, which is the exact reordering per-device FIFO exists to
+    /// prevent. When the last member arrives, that member's call returns
+    /// [`Claim::Batch`] carrying every row.
     async fn claim_next(
         &self,
         device: DeviceId,
         at: Timestamp,
-    ) -> Result<Option<CommandRecord>, WriteError>;
+    ) -> Result<Option<Claim>, WriteError>;
 
     /// Record what happened. A `Failed` outcome on a command whose recorded
     /// transition moved the phase rolls that phase back, so a start that never

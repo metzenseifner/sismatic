@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::command::Barrier;
 use crate::reading::Reading;
 use crate::{DeviceId, GroupId};
 
@@ -74,6 +75,17 @@ pub struct GroupSummary {
     pub id: GroupId,
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub members: Vec<DeviceId>,
+    /// How long a command addressed to this group waits for every member to be
+    /// ready before [`barrier`] decides, in seconds.
+    ///
+    /// Reported because it is the one configured number that changes what a
+    /// caller should expect from a `202`: a group with a fifteen-second barrier
+    /// can leave a command pending that long before anything reaches a device,
+    /// and a client showing a spinner needs to know which.
+    ///
+    /// [`barrier`]: GroupSummary::barrier
+    pub barrier_timeout_secs: u64,
+    pub barrier: Barrier,
 }
 
 /// The group index.

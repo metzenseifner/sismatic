@@ -21,13 +21,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::BTreeMap;
+
 use chrono::{SecondsFormat, Utc};
-use sismatic_api_types::{Intent, ReadingValue, Timestamp};
+use sismatic_api_types::{BatchId, CommandId, CommandRecord, Intent, ReadingValue, Timestamp};
 use sismatic_core::devices::device::Device;
+use sismatic_core::devices::group::DeviceGroup;
 use sismatic_core::devices::registry::Registry;
-use sismatic_core::protocol::RecordingState;
 use sismatic_core::protocol::instructions::query::Query;
-use sismatic_store::outbox::{CommandDrain, DynCommandDrain, Outcome};
+use sismatic_core::protocol::{RecordingState, Value};
+use sismatic_store::outbox::{Claim, CommandDrain, DynCommandDrain, Outcome};
 use sismatic_sync::dto;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -67,7 +70,13 @@ pub fn spawn(registry: Arc<Registry>, drain: DynCommandDrain, cfg: RelayConfig) 
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
     for device in registry.devices() {
-        tasks.spawn(relay_loop(device, drain.clone(), cfg.poll, cancel.clone()));
+        tasks.spawn(relay_loop(
+            device,
+            Arc::clone(&registry),
+            drain.clone(),
+            cfg.poll,
+            cancel.clone(),
+        ));
     }
     info!(tasks = tasks.len(), "intent relay started");
     RelayHandle { tasks, cancel }
@@ -76,6 +85,7 @@ pub fn spawn(registry: Arc<Registry>, drain: DynCommandDrain, cfg: RelayConfig) 
 #[instrument(name = "intent_relay", skip_all, fields(device = %device.id()))]
 async fn relay_loop(
     device: Arc<Device>,
+    registry: Arc<Registry>,
     drain: DynCommandDrain,
     poll: Duration,
     cancel: CancellationToken,
@@ -91,20 +101,32 @@ async fn relay_loop(
             _ = ticker.tick() => {
                 // Drain the whole queue rather than one per tick, so a burst of
                 // six metadata writes plus a start does not take seven ticks.
-                while !cancel.is_cancelled() && dispatch_one(&device, drain.as_ref()).await {}
+                while !cancel.is_cancelled()
+                    && dispatch_one(&device, &registry, drain.as_ref()).await {}
             }
         }
     }
     info!("relay loop stopped");
 }
 
-/// Claim one command, run it, settle it. Returns whether there was work, so the
-/// caller knows whether to look again immediately.
-async fn dispatch_one(device: &Device, drain: &dyn CommandDrain) -> bool {
-    let Ok(Some(record)) = drain.claim_next(device.id().to_string(), now()).await else {
+/// Claim whatever is next for this device, run it, settle it. Returns whether
+/// there was work, so the caller knows whether to look again immediately.
+async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn CommandDrain) -> bool {
+    let Ok(Some(claim)) = drain.claim_next(device.id().to_string(), now()).await else {
         return false;
     };
 
+    match claim {
+        Claim::One(record) => dispatch_alone(device, drain, record).await,
+        // This task completed the barrier, so it owns the whole batch. Every
+        // other member's loop found its row already claimed and moved on.
+        Claim::Batch { id, records } => dispatch_batch(registry, drain, &id, records).await,
+    }
+    true
+}
+
+/// One command against one device.
+async fn dispatch_alone(device: &Device, drain: &dyn CommandDrain, record: CommandRecord) {
     // The one place a stale phase can still do damage: a recording started from
     // the front panel between admission and now. Re-read the device before a
     // metadata write, and only before a metadata write — every other intent is
@@ -117,7 +139,7 @@ async fn dispatch_one(device: &Device, drain: &dyn CommandDrain) -> bool {
         let _ = drain
             .settle(record.id, Outcome::Failed(reason.into()), now())
             .await;
-        return true;
+        return;
     }
 
     let outcome = match translate::to_instruction(&record.intent) {
@@ -127,14 +149,123 @@ async fn dispatch_one(device: &Device, drain: &dyn CommandDrain) -> bool {
             Err(err) => Outcome::Failed(err.to_string()),
         },
     };
+    report(drain, record.id, outcome).await;
+}
 
-    if let Outcome::Failed(ref reason) = outcome {
-        warn!(command = %record.id, reason, "command failed");
+/// Every member of a batch, as one group run.
+///
+/// This is the whole point of the rendezvous. [`DeviceGroup::run`] spawns every
+/// member's exchange before awaiting any, so the members act *in unison* — which
+/// is a stronger property than "each was dispatched at about the same time", and
+/// the one a room full of recorders needs. Running the members from one task,
+/// through one group, is what makes it true; N tasks each running their own row
+/// would go out in whatever order the scheduler chose.
+///
+/// The group is built ad hoc from the records rather than looked up by id,
+/// because the batch is not the group: a group can be addressed many times, and
+/// a batch may be a *subset* of one when `DispatchReady` fired on a partial
+/// room. What must be dispatched is exactly the rows that were claimed.
+async fn dispatch_batch(
+    registry: &Registry,
+    drain: &dyn CommandDrain,
+    batch: &BatchId,
+    records: Vec<CommandRecord>,
+) {
+    let Some(first) = records.first() else {
+        return;
+    };
+
+    // Translated once: every row of a batch carries the same intent, because
+    // they were expanded from one request. A per-record translation would be
+    // the same work N times and would leave open the question of what to do if
+    // two of them disagreed.
+    let instruction = match translate::to_instruction(&first.intent) {
+        Ok(instruction) => instruction,
+        Err(err) => {
+            warn!(%batch, %err, "a batch could not be translated");
+            settle_all(drain, &records, |_| Outcome::Failed(err.to_string())).await;
+            return;
+        }
+    };
+
+    let mut members = Vec::with_capacity(records.len());
+    for record in &records {
+        match registry.device(&record.device) {
+            Some(device) => members.push(device),
+            None => {
+                // The catalog admitted a member the registry does not hold, so
+                // the two disagree about the device set. Failing the batch is
+                // the only honest answer: dispatching the rest would start a
+                // partial room under a policy that may well have been
+                // `FailBatch`.
+                let reason = format!("member '{}' is not in the registry", record.device);
+                warn!(%batch, reason, "a batch names a device the registry does not hold");
+                settle_all(drain, &records, |_| Outcome::Failed(reason.clone())).await;
+                return;
+            }
+        }
     }
-    if let Err(err) = drain.settle(record.id, outcome, now()).await {
+
+    let group = DeviceGroup::new(batch.clone(), members);
+    match group.run(&instruction).await {
+        Ok(values) => {
+            let by_device: BTreeMap<&str, &Value> =
+                values.iter().map(|(id, v)| (id.as_str(), v)).collect();
+            settle_all(drain, &records, |record| {
+                match by_device.get(record.device.as_str()) {
+                    Some(value) => Outcome::Succeeded(dto::to_dto((*value).clone())),
+                    // `run` promises one value per member on success, so this
+                    // is unreachable rather than a case with a right answer.
+                    None => Outcome::Failed("the group returned no value for this member".into()),
+                }
+            })
+            .await;
+        }
+        Err(error) => {
+            // A partial failure is surfaced per member, not collapsed: the
+            // members that succeeded *did* run, and reporting them as failed
+            // would tell an operator to restart a recorder that is already
+            // recording.
+            warn!(%batch, %error, "a group command failed for at least one member");
+            let failed: BTreeMap<&str, String> = error
+                .failures
+                .iter()
+                .map(|(id, e)| (id.as_str(), e.to_string()))
+                .collect();
+            settle_all(drain, &records, |record| {
+                match failed.get(record.device.as_str()) {
+                    Some(reason) => Outcome::Failed(reason.clone()),
+                    None => Outcome::Succeeded(ReadingValue::Ack(format!(
+                        "{} accepted as part of batch {batch}",
+                        record.device
+                    ))),
+                }
+            })
+            .await;
+        }
+    }
+}
+
+/// Settle every row of a batch, deciding each one's outcome from the record.
+async fn settle_all(
+    drain: &dyn CommandDrain,
+    records: &[CommandRecord],
+    outcome_for: impl Fn(&CommandRecord) -> Outcome,
+) {
+    for record in records {
+        report(drain, record.id.clone(), outcome_for(record)).await;
+    }
+}
+
+/// Record one outcome, warning about the failure and about a failure to record
+/// it — two different problems that would otherwise share a line.
+async fn report(drain: &dyn CommandDrain, id: CommandId, outcome: Outcome) {
+    if let Outcome::Failed(ref reason) = outcome {
+        warn!(command = %id, reason, "command failed");
+    }
+    if let Err(err) = drain.settle(id, outcome, now()).await {
         warn!(%err, "could not record the outcome of a command");
     }
-    true
 }
 
 /// Decide what to do with commands a previous process left `InFlight`.

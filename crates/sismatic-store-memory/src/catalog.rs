@@ -61,7 +61,7 @@ impl DeviceCatalog for MemoryCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::ConnectionStatus;
+    use sismatic_api_types::{Barrier, ConnectionStatus};
 
     fn device(id: &str) -> DeviceSummary {
         DeviceSummary {
@@ -77,6 +77,8 @@ mod tests {
         GroupSummary {
             id: id.to_owned(),
             members: members.iter().map(|m| (*m).to_owned()).collect(),
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
         }
     }
 

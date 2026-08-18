@@ -5,72 +5,79 @@
 //!
 //! ```text
 //! logs:    device -> DeviceLog { phase, epoch, queue, history, keys }
+//! batches: batch_id -> Batch { members, ready, armed_at, barrier }
 //! records: command_id -> CommandRecord
 //! ```
 //!
-//! Two maps rather than one because the two lookups are different questions.
-//! `GET /v1/commands/{id}` names a command and nothing else, so it must not
-//! have to scan a fleet to find which device's log holds it; the admission
-//! decision names a device and nothing else, so it must not have to scan
-//! commands. Each map answers its own question in one lookup.
+//! `records` is separate from `logs` because the two lookups are different
+//! questions. `GET /v1/commands/{id}` names a command and nothing else, so it
+//! must not have to scan a fleet to find which device's log holds it; the
+//! admission decision names devices and nothing else, so it must not have to
+//! scan commands.
 //!
-//! # The critical section
+//! # One lock, not a sharded map
 //!
-//! Locking follows the device, as it already does for readings:
+//! `logs` and `batches` live under one `Mutex`, and this is the load-bearing
+//! choice in the file.
 //!
-//! > Locking follows the outer key, so writers contend per *device*, not per
-//! > `(device, field)`.
+//! Atomic admission across a group means holding every member's state at once,
+//! and `DashMap` cannot promise that. Two member ids may hash into the same
+//! shard, and a shard's `RwLock` is not reentrant, so a group submission that
+//! took one entry guard per member would deadlock against itself on exactly the
+//! id pairs that collide — a bug no small test fixture reproduces, because
+//! whether it fires depends on the hash of the operator's device names.
+//! Acquiring in sorted order does not help: the collision is one lock taken
+//! twice, not two locks taken out of order.
 //!
-//! For readings that is an optimisation. Here it is the correctness mechanism.
-//! The port says the admission decision and the append are one unit, and a
-//! `DashMap` entry guard held across both is what makes that true: two requests
-//! that both read `phase = Idle` and both pass would let a metadata write be
-//! dispatched into a recording that a concurrent start had already begun.
-//! `submit` therefore holds one guard from the check to the last mutation, and
-//! `concurrent_starts_admit_exactly_one` below is the test that fails if that
-//! is ever split.
+//! The cost is that submissions to unrelated devices now serialise. That is
+//! affordable because submissions arrive at *operator* rate — a handful per
+//! minute, one per button press — while the work each one does under the lock
+//! is a few map inserts and no I/O. Sharding buys throughput this workload has
+//! no use for and charges an unreproducible deadlock for it.
+//!
+//! `records` stays a `DashMap`: it is read by the API on every status poll and
+//! written outside the admission critical section, so it is the one map where
+//! contention is real and where nothing needs to be atomic with anything else.
 //!
 //! # Lock order
 //!
-//! Every method that touches both maps takes `logs` **before** `records`, and
-//! never the reverse. Two `DashMap`s are two independent sets of shard locks,
-//! so a method that took them the other way round could deadlock against
-//! `submit` under concurrency. [`MemoryOutbox::settle`] is the one place this
-//! is not free: it is handed a command id and has to learn the device before it
-//! can take the right guard, which it does with a separate short-lived read.
+//! `state` (the mutex) is always taken before `records`, never the reverse.
+//! [`MemoryOutbox::settle`] is the one place that is not free: it is handed a
+//! command id and has to learn the device before it can take the right guard,
+//! which it does with a separate short-lived `records` read that is released
+//! first.
 //!
 //! # What it is not
 //!
-//! `records` and each log's `history` grow without bound, for the same reason
-//! `MemoryStore::history` does and with the same consequence: fine for a test
-//! and a development server, not the deployment story. The outbox adds a second
-//! reason to want a durable adapter — a pending command is lost on restart, so
-//! the delivery guarantee holds only for a process that stays up. Neither limit
-//! is part of the port, so a SQL adapter is a drop-in.
+//! `records`, each log's `history`, and settled `batches` grow without bound,
+//! for the same reason `MemoryStore::history` does and with the same
+//! consequence: fine for a test and a development server, not the deployment
+//! story. The outbox adds a second reason to want a durable adapter — a pending
+//! command is lost on restart, so the delivery guarantee holds only for a
+//! process that stays up. Neither limit is part of the port.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
 use sismatic_api_types::{
-    Accepted, CommandId, CommandRecord, CommandStatus, DeviceId, Phase, RecordingPhase,
-    RecordingState, Timestamp,
+    Acceptance, Accepted, Barrier, BatchId, CommandId, CommandRecord, CommandStatus, DeviceId,
+    Phase, RecordingPhase, RecordingState, Timestamp,
 };
 use sismatic_store::outbox::{
-    CommandDrain, CommandLog, CommandSubmit, Outcome, Submission, SubmitError, Verb, admit,
-    epoch_of, opens_recording, reconcile, rollback,
+    BarrierPolicy, Claim, CommandDrain, CommandLog, CommandSubmit, Outcome, Submission,
+    SubmitError, Verb, admit, epoch_of, opens_recording, reconcile, rollback,
 };
 use sismatic_store::{ReadError, WriteError};
 
-/// One device's write-side state and queue, held under one entry so the five
-/// fields cannot be read or updated out of step.
+/// One device's write-side state and queue.
 ///
 /// Invariant: every `CommandId` in `queue` or `history` names a record already
 /// present in [`MemoryOutbox::records`]. Insert the record first, push the id
-/// second — the two maps are separate, so a reader walking a queue mid-append
-/// would otherwise meet an id with nothing behind it.
+/// second — the two live under different locks, so a reader walking a queue
+/// mid-append would otherwise meet an id with nothing behind it.
 #[derive(Debug)]
 struct DeviceLog {
     phase: Phase,
@@ -107,9 +114,61 @@ impl Default for DeviceLog {
     }
 }
 
+/// A batch's readiness, held alongside the queues so the barrier can be
+/// evaluated inside the same critical section that claims a row.
+#[derive(Debug, Clone)]
+struct Batch {
+    /// Every member the batch was expanded across.
+    members: BTreeSet<DeviceId>,
+    /// Members whose row has reached the head of their own queue and whose
+    /// device is otherwise claimable.
+    ///
+    /// Recomputed from the live queues on every tick rather than accumulated as
+    /// members announce themselves. A member that reached the head and was then
+    /// overtaken — by the `push_front` a retry of the command *ahead* of it
+    /// performs — is no longer ready, and an accumulated set would not notice:
+    /// the batch would release and claim whatever now sat at that member's
+    /// head, which is a different command entirely. Kept as a field rather than
+    /// a local because it is the one piece of barrier state worth reading back.
+    ready: BTreeSet<DeviceId>,
+    /// When the barrier was armed, so a stuck member cannot hold it forever.
+    armed_at: Timestamp,
+    barrier: BarrierPolicy,
+    gate: Gate,
+}
+
+/// Where a batch's rendezvous has got to.
+///
+/// Three states rather than a `released: bool`, because a member arriving after
+/// the barrier resolved has to know *how* it resolved. Under
+/// [`Barrier::DispatchReady`] a straggler should go out on its own — the room
+/// has already started without it and one more recorder is still better than
+/// one fewer. Under [`Barrier::FailBatch`] it must not: the take was abandoned,
+/// and dispatching now would produce exactly the lone recording that policy
+/// exists to rule out. A boolean cannot tell those apart, and the member that
+/// asks is by definition not the one that was there when it was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    /// Still filling.
+    Waiting,
+    /// Resolved by dispatch. Later arrivals dispatch alone.
+    Open,
+    /// Resolved by timeout under `FailBatch`. Later arrivals are failed.
+    Abandoned,
+}
+
+/// Everything the mutex guards. One struct rather than two `Mutex`es, because
+/// arming a batch and queueing its members' rows is one atomic step and two
+/// locks would be two chances to interleave.
+#[derive(Debug, Default)]
+struct State {
+    logs: BTreeMap<DeviceId, DeviceLog>,
+    batches: BTreeMap<BatchId, Batch>,
+}
+
 #[derive(Clone)]
 pub struct MemoryOutbox {
-    logs: Arc<DashMap<DeviceId, DeviceLog>>,
+    state: Arc<Mutex<State>>,
     records: Arc<DashMap<CommandId, CommandRecord>>,
     max_attempts: u32,
     backoff: Duration,
@@ -131,7 +190,7 @@ impl MemoryOutbox {
     /// `1`, since "try it zero times" is not a thing a caller can mean.
     pub fn with_max_attempts(max_attempts: u32) -> Self {
         Self {
-            logs: Arc::default(),
+            state: Arc::default(),
             records: Arc::default(),
             max_attempts: max_attempts.max(1),
             backoff: Self::DEFAULT_BACKOFF,
@@ -148,8 +207,16 @@ impl MemoryOutbox {
         self
     }
 
-    /// The device a command belongs to, read and released before any log guard
-    /// is taken. Exists to keep the `logs`-before-`records` order in `settle`,
+    /// The one lock. A poisoned mutex means a previous holder panicked while
+    /// the maps were half-updated; the guard is taken anyway rather than
+    /// propagating, because every mutation under it is a small infallible map
+    /// operation and there is no partial state a panic could plausibly leave.
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The device a command belongs to, read and released before the state lock
+    /// is taken. Exists to keep the `state`-before-`records` order in `settle`,
     /// which is handed an id and has to learn the device from it.
     fn device_of(&self, id: &CommandId) -> Option<DeviceId> {
         self.records.get(id).map(|r| r.device.clone())
@@ -173,66 +240,189 @@ fn delay_from(at: &Timestamp, delay: Duration) -> Timestamp {
     Timestamp((parsed.with_timezone(&Utc) + delay).to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
+/// Whether `deadline` has passed by `now`.
+///
+/// `false` when either timestamp is unparseable, which is the conservative
+/// answer: an unreadable clock should leave the barrier waiting for a real
+/// member rather than fire the timeout policy on a parsing accident.
+fn elapsed_past(armed_at: &Timestamp, timeout: Duration, now: &Timestamp) -> bool {
+    let (Ok(armed), Ok(now)) = (
+        DateTime::parse_from_rfc3339(armed_at.as_str()),
+        DateTime::parse_from_rfc3339(now.as_str()),
+    ) else {
+        return false;
+    };
+    let Ok(timeout) = chrono::Duration::from_std(timeout) else {
+        return false;
+    };
+    now > armed + timeout
+}
+
 #[async_trait::async_trait]
 impl CommandSubmit for MemoryOutbox {
-    async fn submit(&self, s: Submission) -> Result<Accepted, SubmitError> {
-        // The whole critical section. This guard is an exclusive hold on the
-        // device's shard for as long as `log` is alive, so no concurrent
-        // submission for the same device can observe the phase this one is
-        // about to change. Devices contend on nothing.
-        let mut log = self.logs.entry(s.device.clone()).or_default();
+    async fn submit(&self, s: Submission) -> Result<Acceptance, SubmitError> {
+        if s.targets.is_empty() {
+            return Err(SubmitError::Malformed("no targets".into()));
+        }
+        if s.ids.len() != s.targets.len() {
+            return Err(SubmitError::Malformed(format!(
+                "{} ids for {} targets",
+                s.ids.len(),
+                s.targets.len()
+            )));
+        }
+
+        // The whole critical section, and for a group it spans every member.
+        // Nothing between the first admission check and the last queue push can
+        // observe a half-applied submission — which is what makes "the room
+        // starts or nothing does" true of the *decision* as well as the
+        // dispatch.
+        let mut state = self.state();
 
         // Idempotent Receiver: a client whose POST timed out and was retried
-        // gets the original command back, rather than a second start that the
+        // gets the original commands back, rather than a second start that the
         // admission table would then refuse with a 409 for something the client
         // believes never landed.
+        //
+        // Keyed off the first target: a repeat of the same request names the
+        // same targets in the same order, so one member's key answers for all
+        // of them, and a batch is returned whole.
         if let Some(key) = &s.idempotency_key
-            && let Some(existing) = log.keys.get(key)
-            && let Some(record) = self.records.get(existing)
+            && let Some(existing) = state
+                .logs
+                .get(&s.targets[0])
+                .and_then(|log| log.keys.get(key))
+                .cloned()
+            && let Some(first) = self.records.get(&existing).map(|r| r.clone())
         {
-            return Ok(Accepted {
-                id: record.id.clone(),
-                epoch: record.epoch,
+            let commands = match &first.batch {
+                // Every row of the batch, so a retry of a group request sees
+                // the same set it was first told about.
+                Some(batch) => self.batch_acceptances(&state, batch),
+                None => vec![Accepted {
+                    id: first.id.clone(),
+                    device: first.device.clone(),
+                    epoch: first.epoch,
+                }],
+            };
+            return Ok(Acceptance {
+                batch: first.batch.clone(),
+                commands,
             });
         }
 
-        let before = log.phase;
-        let after =
-            admit(before, Verb::of(&s.intent)).map_err(|rejection| SubmitError::Rejected {
-                rejection,
-                phase: before,
-            })?;
-        let epoch = epoch_of(before, after, log.epoch);
+        // Admit every target *before* recording anything. A group refused by
+        // its second member must leave the first member's queue untouched, so
+        // the decision is taken in full and only then applied.
+        let mut admitted = Vec::with_capacity(s.targets.len());
+        for device in &s.targets {
+            let log = state.logs.entry(device.clone()).or_default();
+            let before = log.phase;
+            let after =
+                admit(before, Verb::of(&s.intent)).map_err(|rejection| SubmitError::Rejected {
+                    device: device.clone(),
+                    rejection,
+                    phase: before,
+                })?;
+            admitted.push((before, after, epoch_of(before, after, log.epoch)));
+        }
 
-        let record = CommandRecord {
-            id: s.id.clone(),
-            device: s.device.clone(),
-            intent: s.intent,
-            epoch,
-            status: CommandStatus::Pending,
-            attempts: 0,
-            enqueued_at: s.at.clone(),
-            updated_at: s.at.clone(),
-            // Due immediately: the backoff exists to space out *retries*, and a
-            // first attempt has nothing to back off from.
-            not_before: s.at,
+        // Past this point nothing can fail, so nothing needs unwinding.
+        let mut commands = Vec::with_capacity(s.targets.len());
+        for (i, device) in s.targets.iter().enumerate() {
+            let (before, after, epoch) = admitted[i];
+            let id = s.ids[i].clone();
+
+            let record = CommandRecord {
+                id: id.clone(),
+                device: device.clone(),
+                intent: s.intent.clone(),
+                batch: s.batch.clone(),
+                epoch,
+                status: CommandStatus::Pending,
+                attempts: 0,
+                enqueued_at: s.at.clone(),
+                updated_at: s.at.clone(),
+                // Due immediately: the backoff exists to space out *retries*,
+                // and a first attempt has nothing to back off from.
+                not_before: s.at.clone(),
+            };
+
+            // Record before queue, so a reader walking the queue never meets an
+            // id with no record behind it.
+            self.records.insert(id.clone(), record);
+
+            let log = state.logs.entry(device.clone()).or_default();
+            log.queue.push_back(id.clone());
+            log.history.push(id.clone());
+            log.phase = after;
+            if opens_recording(before, after) {
+                log.epoch = epoch;
+            }
+            if let Some(key) = &s.idempotency_key {
+                log.keys.insert(key.clone(), id.clone());
+            }
+
+            commands.push(Accepted {
+                id,
+                device: device.clone(),
+                epoch,
+            });
+        }
+
+        if let Some(batch_id) = &s.batch {
+            // Armed here rather than on first arrival, so `armed_at` measures
+            // the wait from when the request was accepted — which is the
+            // interval an operator experiences — rather than from whenever the
+            // first relay task happened to tick.
+            state.batches.insert(
+                batch_id.clone(),
+                Batch {
+                    members: s.targets.iter().cloned().collect(),
+                    ready: BTreeSet::new(),
+                    armed_at: s.at.clone(),
+                    barrier: s.barrier.unwrap_or(BarrierPolicy {
+                        timeout: Duration::from_secs(15),
+                        on_timeout: Barrier::FailBatch,
+                    }),
+                    gate: Gate::Waiting,
+                },
+            );
+        }
+
+        Ok(Acceptance {
+            batch: s.batch,
+            commands,
+        })
+    }
+}
+
+impl MemoryOutbox {
+    /// Every row of `batch`, as acceptances. Used by the idempotency path so a
+    /// retried group request is answered with the whole batch rather than the
+    /// one member whose key matched.
+    fn batch_acceptances(&self, state: &State, batch: &BatchId) -> Vec<Accepted> {
+        let Some(entry) = state.batches.get(batch) else {
+            return Vec::new();
         };
-
-        // Record before queue, so a reader walking the queue never meets an id
-        // with no record behind it.
-        self.records.insert(s.id.clone(), record);
-        log.queue.push_back(s.id.clone());
-        log.history.push(s.id.clone());
-
-        log.phase = after;
-        if opens_recording(before, after) {
-            log.epoch = epoch;
-        }
-        if let Some(key) = s.idempotency_key {
-            log.keys.insert(key, s.id.clone());
-        }
-
-        Ok(Accepted { id: s.id, epoch })
+        entry
+            .members
+            .iter()
+            .filter_map(|device| {
+                state.logs.get(device).and_then(|log| {
+                    log.history
+                        .iter()
+                        .rev()
+                        .filter_map(|id| self.records.get(id).map(|r| r.clone()))
+                        .find(|r| r.batch.as_ref() == Some(batch))
+                })
+            })
+            .map(|r| Accepted {
+                id: r.id,
+                device: r.device,
+                epoch: r.epoch,
+            })
+            .collect()
     }
 }
 
@@ -243,7 +433,8 @@ impl CommandLog for MemoryOutbox {
     }
 
     async fn commands_for(&self, device: DeviceId) -> Result<Vec<CommandRecord>, ReadError> {
-        let Some(log) = self.logs.get(&device) else {
+        let state = self.state();
+        let Some(log) = state.logs.get(&device) else {
             return Ok(Vec::new());
         };
         Ok(log
@@ -255,12 +446,27 @@ impl CommandLog for MemoryOutbox {
     }
 
     async fn phase(&self, device: DeviceId) -> Result<RecordingPhase, ReadError> {
-        let (phase, epoch) = self
+        let state = self.state();
+        let (phase, epoch) = state
             .logs
             .get(&device)
             .map_or((Phase::Idle, 0), |log| (log.phase, log.epoch));
         Ok(RecordingPhase { phase, epoch })
     }
+}
+
+/// What evaluating a batched head decided.
+enum BatchStep {
+    /// Not everyone is here and the barrier has not expired. Leave the row
+    /// where it is and try again next tick.
+    Wait,
+    /// Dispatch these members as one group run.
+    Release(Vec<DeviceId>),
+    /// Dispatch this member on its own: the barrier already resolved by
+    /// dispatch, and this is a straggler under `DispatchReady`.
+    Alone,
+    /// Fail these members' rows without contacting anything.
+    Fail(Vec<DeviceId>),
 }
 
 #[async_trait::async_trait]
@@ -269,30 +475,62 @@ impl CommandDrain for MemoryOutbox {
         &self,
         device: DeviceId,
         at: Timestamp,
-    ) -> Result<Option<CommandRecord>, WriteError> {
-        let mut log = self.logs.entry(device).or_default();
-        let Some(id) = log.queue.front().cloned() else {
+    ) -> Result<Option<Claim>, WriteError> {
+        let mut state = self.state();
+
+        // Peek rather than pop: a batched row at the head must stay there until
+        // every sibling has arrived, because popping it would let the command
+        // behind it overtake — the exact reordering per-device FIFO exists to
+        // prevent.
+        let Some(head) = state
+            .logs
+            .get(&device)
+            .and_then(|log| log.queue.front().cloned())
+        else {
             return Ok(None);
         };
-
-        let mut record = self
-            .records
-            .get_mut(&id)
-            .ok_or_else(|| WriteError::backend("a queued id has no record behind it"))?;
+        let Some(record) = self.records.get(&head).map(|r| r.clone()) else {
+            return Err(WriteError::backend("a queued id has no record behind it"));
+        };
 
         // A command still serving its backoff blocks the queue rather than
         // being skipped over. Skipping would let a later command overtake the
-        // retry of an earlier one, which is exactly the reordering that puts a
-        // metadata write after the start it was meant to precede.
+        // retry of an earlier one.
         if at.as_str() < record.not_before.as_str() {
             return Ok(None);
         }
 
-        log.queue.pop_front();
-        record.status = CommandStatus::InFlight;
-        record.attempts += 1;
-        record.updated_at = at;
-        Ok(Some(record.clone()))
+        let Some(batch_id) = record.batch.clone() else {
+            // Unbatched: the existing path, unchanged.
+            let claimed = self.claim_head(&mut state, &device, &at)?;
+            return Ok(claimed.map(Claim::One));
+        };
+
+        match self.step_batch(&mut state, &batch_id, &device, &at) {
+            BatchStep::Wait => Ok(None),
+            BatchStep::Alone => Ok(self.claim_head(&mut state, &device, &at)?.map(Claim::One)),
+            BatchStep::Release(members) => {
+                let mut records = Vec::with_capacity(members.len());
+                for member in &members {
+                    if let Some(record) = self.claim_head(&mut state, member, &at)? {
+                        records.push(record);
+                    }
+                }
+                Ok(Some(Claim::Batch {
+                    id: batch_id,
+                    records,
+                }))
+            }
+            BatchStep::Fail(members) => {
+                // Failed here rather than handed to the relay to fail: there is
+                // no device to contact and no exchange to report the failure
+                // of, so routing it through a dispatch would only invent one.
+                for member in &members {
+                    self.fail_head(&mut state, member, &at);
+                }
+                Ok(None)
+            }
+        }
     }
 
     async fn settle(
@@ -302,11 +540,11 @@ impl CommandDrain for MemoryOutbox {
         at: Timestamp,
     ) -> Result<(), WriteError> {
         // Read the device and release, so the guards below are taken in the
-        // `logs`-then-`records` order every other method uses.
+        // `state`-then-`records` order every other method uses.
         let device = self
             .device_of(&id)
             .ok_or_else(|| WriteError::backend("settling an unknown command"))?;
-        let mut log = self.logs.entry(device).or_default();
+        let mut state = self.state();
         let mut record = self
             .records
             .get_mut(&id)
@@ -318,6 +556,7 @@ impl CommandDrain for MemoryOutbox {
             ));
         }
 
+        let log = state.logs.entry(device.clone()).or_default();
         match outcome {
             Outcome::Succeeded(value) => {
                 record.status = CommandStatus::Succeeded { value };
@@ -331,6 +570,13 @@ impl CommandDrain for MemoryOutbox {
                 // three attempts against a device that is down do not all land
                 // inside one poll interval and exhaust the budget in a moment.
                 record.not_before = delay_from(&at, self.backoff * record.attempts);
+
+                // A retried batch member re-enters the rendezvous: it is no
+                // longer at the head *and ready*, so its siblings must wait for
+                // it again rather than dispatching without it.
+                if let Some(batch) = record.batch.as_ref().and_then(|b| state.batches.get_mut(b)) {
+                    batch.ready.remove(&device);
+                }
             }
             Outcome::Failed(reason) => {
                 record.status = CommandStatus::Failed { reason };
@@ -338,6 +584,13 @@ impl CommandDrain for MemoryOutbox {
                 // moved is rolled back, so a start that never reached the
                 // device stops freezing this device's metadata.
                 log.phase = rollback(log.phase, Verb::of(&record.intent));
+                if let Some(batch) = record.batch.as_ref().and_then(|b| state.batches.get_mut(b)) {
+                    // Terminally gone: drop it from the set the barrier waits
+                    // on, or a `DispatchReady` batch would keep waiting for a
+                    // member that will never arrive.
+                    batch.members.remove(&device);
+                    batch.ready.remove(&device);
+                }
             }
         }
         record.updated_at = at;
@@ -345,7 +598,8 @@ impl CommandDrain for MemoryOutbox {
     }
 
     async fn observe(&self, device: DeviceId, observed: RecordingState) -> Result<(), WriteError> {
-        let mut log = self.logs.entry(device).or_default();
+        let mut state = self.state();
+        let log = state.logs.entry(device).or_default();
         let before = log.phase;
         let after = reconcile(before, observed);
         // A recording started from the front panel opens a take this process
@@ -359,7 +613,8 @@ impl CommandDrain for MemoryOutbox {
     }
 
     async fn in_flight(&self, device: DeviceId) -> Result<Vec<CommandRecord>, WriteError> {
-        let Some(log) = self.logs.get(&device) else {
+        let state = self.state();
+        let Some(log) = state.logs.get(&device) else {
             return Ok(Vec::new());
         };
         Ok(log
@@ -371,20 +626,169 @@ impl CommandDrain for MemoryOutbox {
     }
 }
 
+impl MemoryOutbox {
+    /// Pop `device`'s head and mark it in flight. The caller has already
+    /// established that the head is due and claimable.
+    fn claim_head(
+        &self,
+        state: &mut State,
+        device: &DeviceId,
+        at: &Timestamp,
+    ) -> Result<Option<CommandRecord>, WriteError> {
+        let Some(log) = state.logs.get_mut(device) else {
+            return Ok(None);
+        };
+        let Some(id) = log.queue.pop_front() else {
+            return Ok(None);
+        };
+        let mut record = self
+            .records
+            .get_mut(&id)
+            .ok_or_else(|| WriteError::backend("a queued id has no record behind it"))?;
+        record.status = CommandStatus::InFlight;
+        record.attempts += 1;
+        record.updated_at = at.clone();
+        Ok(Some(record.clone()))
+    }
+
+    /// Fail `device`'s head row outright, without a dispatch and without
+    /// spending a retry.
+    ///
+    /// Deliberately not routed through `settle`'s retry arm: a barrier expiry
+    /// is not a transient device failure, and re-queueing the row would only
+    /// have it arrive at a rendezvous that has already resolved. The phase is
+    /// rolled back for the same reason `settle` rolls it back — a start that
+    /// never reached a device must stop freezing that device's metadata.
+    fn fail_head(&self, state: &mut State, device: &DeviceId, at: &Timestamp) {
+        let Some(log) = state.logs.get_mut(device) else {
+            return;
+        };
+        let Some(id) = log.queue.pop_front() else {
+            return;
+        };
+        let Some(mut record) = self.records.get_mut(&id) else {
+            return;
+        };
+        record.status = CommandStatus::Failed {
+            reason: "the group barrier expired before every member was ready".to_owned(),
+        };
+        record.updated_at = at.clone();
+        log.phase = rollback(log.phase, Verb::of(&record.intent));
+    }
+
+    /// Re-evaluate the barrier and decide what this tick does.
+    ///
+    /// Readiness is recomputed from the live queues rather than accumulated,
+    /// for the reason on [`Batch::ready`]: a member can stop being ready
+    /// between ticks, and a set that only ever grows would release the batch
+    /// against a queue head that had moved on.
+    fn step_batch(
+        &self,
+        state: &mut State,
+        batch_id: &BatchId,
+        device: &DeviceId,
+        at: &Timestamp,
+    ) -> BatchStep {
+        let Some(batch) = state.batches.get(batch_id).cloned() else {
+            // No batch behind the id. "Wait" rather than "dispatch alone": a
+            // batched row whose rendezvous has vanished must not go out on its
+            // own, because acting alone is what the batch exists to prevent.
+            return BatchStep::Wait;
+        };
+
+        match batch.gate {
+            // Resolved by dispatch; this is a straggler. Under `DispatchReady`
+            // that is the whole point — the room started without it and one
+            // more recorder still beats one fewer.
+            Gate::Open => return BatchStep::Alone,
+            // Resolved by timeout under `FailBatch`. The take was abandoned,
+            // so this row goes with it — this member and no other, since the
+            // ones that were present were already failed when it resolved.
+            Gate::Abandoned => return BatchStep::Fail(vec![device.clone()]),
+            Gate::Waiting => {}
+        }
+
+        let ready: BTreeSet<DeviceId> = batch
+            .members
+            .iter()
+            .filter(|member| self.is_ready_for(state, member, batch_id, at))
+            .cloned()
+            .collect();
+
+        let complete = ready == batch.members;
+        let expired = !complete && elapsed_past(&batch.armed_at, batch.barrier.timeout, at);
+
+        let step = if complete {
+            BatchStep::Release(ready.iter().cloned().collect())
+        } else if !expired {
+            // Not everyone is here. Try again next tick.
+            BatchStep::Wait
+        } else {
+            match batch.barrier.on_timeout {
+                Barrier::DispatchReady => BatchStep::Release(ready.iter().cloned().collect()),
+                Barrier::FailBatch => BatchStep::Fail(ready.iter().cloned().collect()),
+            }
+        };
+
+        let entry = state.batches.get_mut(batch_id).expect("just read");
+        entry.ready = ready;
+        entry.gate = match step {
+            BatchStep::Wait => Gate::Waiting,
+            BatchStep::Release(_) | BatchStep::Alone => Gate::Open,
+            BatchStep::Fail(_) => Gate::Abandoned,
+        };
+        step
+    }
+
+    /// Whether `member`'s batched row is at the head of its queue and due.
+    ///
+    /// This *is* the definition of ready, and it is asked of the live queue so
+    /// it cannot be stale. A member whose head is some other command — because
+    /// a retry of the command ahead was pushed back to the front — is not
+    /// ready, however recently it was.
+    fn is_ready_for(
+        &self,
+        state: &State,
+        member: &DeviceId,
+        batch_id: &BatchId,
+        at: &Timestamp,
+    ) -> bool {
+        let Some(head) = state
+            .logs
+            .get(member)
+            .and_then(|log| log.queue.front().cloned())
+        else {
+            return false;
+        };
+        let Some(record) = self.records.get(&head) else {
+            return false;
+        };
+        record.batch.as_deref() == Some(batch_id.as_str())
+            && at.as_str() >= record.not_before.as_str()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sismatic_api_types::{Intent, ReadingValue, Rejection};
 
-    const T0: &str = "2026-08-17T00:00:00.000Z";
+    pub(super) const T0: &str = "2026-08-17T00:00:00.000Z";
+    const DEV: &str = "sim";
 
-    fn at(s: &str) -> Timestamp {
+    pub(super) fn at(s: &str) -> Timestamp {
         Timestamp(s.to_owned())
     }
 
-    fn outbox() -> MemoryOutbox {
+    /// `T0` plus `secs`, for the barrier tests. Written out rather than
+    /// computed so the expected instants read at a glance.
+    pub(super) fn at_plus(secs: u32) -> Timestamp {
+        at(&format!("2026-08-17T00:00:{secs:02}.000Z"))
+    }
+
+    pub(super) fn outbox() -> MemoryOutbox {
         // Zero backoff by default: the tests that are not about retry timing
-        // should not have to wait for it, and the one that is sets its own.
+        // should not have to wait for it, and the ones that are set their own.
         MemoryOutbox::with_max_attempts(3).with_backoff(Duration::ZERO)
     }
 
@@ -395,29 +799,37 @@ mod tests {
         }
     }
 
+    /// A one-device submission — the shape every non-group test uses.
+    fn one(id: &str, intent: Intent) -> Submission {
+        Submission {
+            ids: vec![id.to_owned()],
+            targets: vec![DEV.to_owned()],
+            batch: None,
+            barrier: None,
+            intent,
+            at: at(T0),
+            idempotency_key: None,
+        }
+    }
+
     async fn submit(
         outbox: &MemoryOutbox,
         id: &str,
         intent: Intent,
-    ) -> Result<Accepted, SubmitError> {
-        outbox
-            .submit(Submission {
-                id: id.to_owned(),
-                device: "sim".to_owned(),
-                intent,
-                at: at(T0),
-                idempotency_key: None,
-            })
-            .await
+    ) -> Result<Acceptance, SubmitError> {
+        outbox.submit(one(id, intent)).await
     }
 
     /// Claim, then settle with `outcome`. The pair the relay always performs
     /// together.
     async fn dispatch(outbox: &MemoryOutbox, outcome: Outcome) -> Option<CommandId> {
-        let record = outbox
-            .claim_next("sim".to_owned(), at(T0))
+        let claimed = outbox
+            .claim_next(DEV.to_owned(), at(T0))
             .await
             .expect("claim")?;
+        let Claim::One(record) = claimed else {
+            panic!("expected a lone command, got a batch");
+        };
         outbox
             .settle(record.id.clone(), outcome, at(T0))
             .await
@@ -425,8 +837,44 @@ mod tests {
         Some(record.id)
     }
 
-    async fn phase_of(outbox: &MemoryOutbox) -> RecordingPhase {
-        outbox.phase("sim".to_owned()).await.expect("phase")
+    pub(super) async fn phase_of(outbox: &MemoryOutbox, device: &str) -> RecordingPhase {
+        outbox.phase(device.to_owned()).await.expect("phase")
+    }
+
+    pub(super) async fn status_of(outbox: &MemoryOutbox, id: &str) -> CommandStatus {
+        outbox
+            .command(id.to_owned())
+            .await
+            .expect("read")
+            .expect("the command exists")
+            .status
+    }
+
+    // ---- malformed submissions -------------------------------------------
+
+    #[tokio::test]
+    async fn a_submission_with_no_targets_is_refused_as_malformed() {
+        let outbox = outbox();
+        let mut s = one("cmd", title("a"));
+        s.targets.clear();
+        s.ids.clear();
+        assert_eq!(
+            outbox.submit(s).await.unwrap_err(),
+            SubmitError::Malformed("no targets".into())
+        );
+    }
+
+    /// Zipping the shorter of the two would silently drop a member — a group
+    /// that started one recorder short and reported success.
+    #[tokio::test]
+    async fn a_submission_whose_ids_and_targets_disagree_is_refused() {
+        let outbox = outbox();
+        let mut s = one("cmd", title("a"));
+        s.targets.push("other".to_owned());
+        assert!(matches!(
+            outbox.submit(s).await.unwrap_err(),
+            SubmitError::Malformed(_)
+        ));
     }
 
     // ---- admission and the freeze ----------------------------------------
@@ -441,6 +889,7 @@ mod tests {
         assert_eq!(
             submit(&outbox, "c", title("during")).await.unwrap_err(),
             SubmitError::Rejected {
+                device: DEV.to_owned(),
                 rejection: Rejection::MetadataFrozen,
                 phase: Phase::Recording,
             }
@@ -449,13 +898,10 @@ mod tests {
         assert!(submit(&outbox, "e", title("after")).await.is_ok());
     }
 
-    /// The freeze applies to metadata and not to settings, which is the whole
-    /// reason the two are separate `Intent` variants.
     #[tokio::test]
     async fn a_setting_is_writable_during_a_recording() {
         let outbox = outbox();
         submit(&outbox, "a", Intent::StartRecording).await.unwrap();
-
         assert!(
             submit(
                 &outbox,
@@ -472,9 +918,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_device_is_idle_at_epoch_zero() {
-        let outbox = outbox();
         assert_eq!(
-            outbox.phase("never-heard-of".to_owned()).await.unwrap(),
+            phase_of(&outbox(), "never-heard-of").await,
             RecordingPhase {
                 phase: Phase::Idle,
                 epoch: 0
@@ -484,15 +929,12 @@ mod tests {
 
     // ---- the epoch --------------------------------------------------------
 
-    /// The worked example from the design note, as one sequence: the writes
-    /// that prepare a take carry the epoch of the take that then starts, and a
-    /// write after it stops cannot be confused with them.
     #[tokio::test]
     async fn metadata_prepared_for_a_take_shares_that_takes_epoch() {
         let outbox = outbox();
+        let epoch = |a: Acceptance| a.commands[0].epoch;
 
-        let epoch_of = |a: Accepted| a.epoch;
-        let first_title = submit(&outbox, "a", title("Week 4")).await.map(epoch_of);
+        let first = submit(&outbox, "a", title("Week 4")).await.map(epoch);
         let presenter = submit(
             &outbox,
             "b",
@@ -502,38 +944,34 @@ mod tests {
             },
         )
         .await
-        .map(epoch_of);
+        .map(epoch);
         let start = submit(&outbox, "c", Intent::StartRecording)
             .await
-            .map(epoch_of);
-
-        assert_eq!((first_title, presenter, start), (Ok(1), Ok(1), Ok(1)));
+            .map(epoch);
+        assert_eq!((first, presenter, start), (Ok(1), Ok(1), Ok(1)));
 
         submit(&outbox, "d", Intent::StopRecording).await.unwrap();
-        let next_title = submit(&outbox, "e", title("Week 5")).await.map(epoch_of);
-        assert_eq!(next_title, Ok(2), "a new take must get a new epoch");
+        assert_eq!(
+            submit(&outbox, "e", title("Week 5")).await.map(epoch),
+            Ok(2),
+            "a new take must get a new epoch"
+        );
     }
 
-    /// A resume is not a new take, so the metadata already sealed by the first
-    /// start stays sealed to it rather than being re-stamped.
     #[tokio::test]
     async fn pausing_and_resuming_stays_in_one_epoch() {
         let outbox = outbox();
         submit(&outbox, "a", Intent::StartRecording).await.unwrap();
         submit(&outbox, "b", Intent::PauseRecording).await.unwrap();
         let resumed = submit(&outbox, "c", Intent::StartRecording).await.unwrap();
-
-        assert_eq!(resumed.epoch, 1);
-        assert_eq!(phase_of(&outbox).await.epoch, 1);
+        assert_eq!(resumed.commands[0].epoch, 1);
+        assert_eq!(phase_of(&outbox, DEV).await.epoch, 1);
     }
 
     // ---- atomicity --------------------------------------------------------
 
-    /// The race the atomicity contract exists for, and the one test that fails
-    /// if the critical section in `submit` is ever split. Fifty concurrent
-    /// starts against one idle device: exactly one may be admitted, because the
-    /// first to take the device's entry moves the phase before any other can
-    /// read it.
+    /// The race the atomicity contract exists for, and the test that fails if
+    /// the critical section in `submit` is ever split.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_starts_admit_exactly_one() {
         let outbox = outbox();
@@ -557,44 +995,6 @@ mod tests {
         );
     }
 
-    /// The same guard from the other side: a metadata write and a start racing
-    /// must not both be admitted, because that is the interleaving that puts a
-    /// title on a recording that had already begun.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn a_metadata_write_racing_a_start_cannot_both_win_twice_over() {
-        for round in 0..200 {
-            let outbox = outbox();
-            let a = outbox.clone();
-            let b = outbox.clone();
-            let write = tokio::spawn(async move { submit(&a, "w", title("racy")).await });
-            let start = tokio::spawn(async move { submit(&b, "s", Intent::StartRecording).await });
-            let (write, start) = (write.await.unwrap(), start.await.unwrap());
-
-            // Both orders are legitimate; what is not is a write admitted
-            // against a phase the start had already moved.
-            match (write, start) {
-                (Ok(write), Ok(start)) => assert_eq!(
-                    write.epoch, start.epoch,
-                    "round {round}: a write admitted alongside a start must belong to it"
-                ),
-                // The start is unopposed — nothing in the table refuses one
-                // against an idle device — so the write is the only submission
-                // that can lose, and it must lose for the stated reason.
-                (Err(refused), Ok(_)) => assert_eq!(
-                    refused,
-                    SubmitError::Rejected {
-                        rejection: Rejection::MetadataFrozen,
-                        phase: Phase::Recording,
-                    },
-                    "round {round}: unexpected grounds for refusing the write"
-                ),
-                (write, start) => {
-                    panic!("round {round}: the start cannot be refused, got {write:?} / {start:?}")
-                }
-            }
-        }
-    }
-
     // ---- claim, settle, order --------------------------------------------
 
     #[tokio::test]
@@ -615,17 +1015,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_queue_claims_nothing() {
-        let outbox = outbox();
         assert_eq!(
-            outbox.claim_next("sim".to_owned(), at(T0)).await.unwrap(),
+            outbox().claim_next(DEV.to_owned(), at(T0)).await.unwrap(),
             None
         );
     }
 
-    /// The ordering property a retry could break. A failed command goes back to
-    /// the front, so it is re-dispatched before the command submitted after it
-    /// — otherwise a re-tried metadata write could land after the start it was
-    /// meant to precede.
     #[tokio::test]
     async fn a_retry_is_re_dispatched_before_later_commands() {
         let outbox = outbox();
@@ -634,12 +1029,16 @@ mod tests {
             .await
             .unwrap();
 
-        let failed = dispatch(&outbox, Outcome::Failed("ssh died".into())).await;
-        assert_eq!(failed.as_deref(), Some("write"));
-
-        let retried = dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true))).await;
         assert_eq!(
-            retried.as_deref(),
+            dispatch(&outbox, Outcome::Failed("ssh died".into()))
+                .await
+                .as_deref(),
+            Some("write")
+        );
+        assert_eq!(
+            dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true)))
+                .await
+                .as_deref(),
             Some("write"),
             "the retry must not be overtaken by the start behind it"
         );
@@ -649,16 +1048,13 @@ mod tests {
     async fn attempts_are_counted_and_exhausted() {
         let outbox = outbox();
         submit(&outbox, "cmd", title("a")).await.unwrap();
-
         for _ in 0..3 {
             dispatch(&outbox, Outcome::Failed("down".into())).await;
         }
-        // The fourth claim finds nothing: three attempts is the budget.
         assert_eq!(
-            outbox.claim_next("sim".to_owned(), at(T0)).await.unwrap(),
+            outbox.claim_next(DEV.to_owned(), at(T0)).await.unwrap(),
             None
         );
-
         let record = outbox.command("cmd".to_owned()).await.unwrap().unwrap();
         assert_eq!(record.attempts, 3);
         assert_eq!(
@@ -669,8 +1065,6 @@ mod tests {
         );
     }
 
-    /// A command still serving its backoff is not claimable yet, and — the part
-    /// that matters — it blocks the queue behind it rather than being skipped.
     #[tokio::test]
     async fn a_backing_off_command_holds_the_queue() {
         let outbox = MemoryOutbox::with_max_attempts(3).with_backoff(Duration::from_secs(60));
@@ -678,24 +1072,17 @@ mod tests {
         submit(&outbox, "start", Intent::StartRecording)
             .await
             .unwrap();
-
         dispatch(&outbox, Outcome::Failed("down".into())).await;
 
-        // One second later the retry is not yet due, and the start must not
-        // overtake it.
         assert_eq!(
-            outbox
-                .claim_next("sim".to_owned(), at("2026-08-17T00:00:01.000Z"))
-                .await
-                .unwrap(),
+            outbox.claim_next(DEV.to_owned(), at_plus(1)).await.unwrap(),
             None
         );
-        // A minute later it is.
         let due = outbox
-            .claim_next("sim".to_owned(), at("2026-08-17T00:01:00.000Z"))
+            .claim_next(DEV.to_owned(), at("2026-08-17T00:01:00.000Z"))
             .await
             .unwrap();
-        assert_eq!(due.map(|r| r.id).as_deref(), Some("write"));
+        assert!(matches!(due, Some(Claim::One(r)) if r.id == "write"));
     }
 
     #[tokio::test]
@@ -703,7 +1090,6 @@ mod tests {
         let outbox = outbox();
         submit(&outbox, "cmd", title("a")).await.unwrap();
         dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true))).await;
-
         assert_eq!(
             outbox
                 .settle("cmd".to_owned(), Outcome::Failed("late".into()), at(T0))
@@ -715,56 +1101,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settling_an_unknown_command_is_refused() {
-        let outbox = outbox();
-        assert_eq!(
-            outbox
-                .settle("nope".to_owned(), Outcome::Failed("x".into()), at(T0))
-                .await,
-            Err(WriteError::backend("settling an unknown command"))
-        );
-    }
-
-    /// The failure the rollback exists for: one unreachable recorder must not
-    /// leave its own metadata permanently unwritable.
-    #[tokio::test]
     async fn a_start_that_never_reached_the_device_unfreezes_metadata() {
         let outbox = MemoryOutbox::with_max_attempts(1).with_backoff(Duration::ZERO);
         submit(&outbox, "start", Intent::StartRecording)
             .await
             .unwrap();
-        assert_eq!(phase_of(&outbox).await.phase, Phase::Recording);
+        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Recording);
 
         dispatch(&outbox, Outcome::Failed("device unreachable".into())).await;
 
-        assert_eq!(phase_of(&outbox).await.phase, Phase::Idle);
+        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Idle);
         assert!(submit(&outbox, "title", title("a")).await.is_ok());
     }
 
     // ---- reconciliation ---------------------------------------------------
 
-    /// A recording started from the front panel becomes visible to the
-    /// admission table, which is the only thing that closes the gap between
-    /// what this process asked for and what the device is doing.
     #[tokio::test]
     async fn an_observed_recording_freezes_metadata_this_process_never_started() {
         let outbox = outbox();
         assert!(submit(&outbox, "before", title("a")).await.is_ok());
-
         outbox
-            .observe("sim".to_owned(), RecordingState::Started)
+            .observe(DEV.to_owned(), RecordingState::Started)
             .await
             .unwrap();
-
-        assert_eq!(
-            submit(&outbox, "after", title("b")).await.unwrap_err(),
-            SubmitError::Rejected {
-                rejection: Rejection::MetadataFrozen,
-                phase: Phase::Recording,
-            }
-        );
-        // The take the device opened is a take, so it gets an epoch.
-        assert_eq!(phase_of(&outbox).await.epoch, 1);
+        assert!(submit(&outbox, "after", title("b")).await.is_err());
+        assert_eq!(phase_of(&outbox, DEV).await.epoch, 1);
     }
 
     #[tokio::test]
@@ -773,13 +1134,11 @@ mod tests {
         submit(&outbox, "start", Intent::StartRecording)
             .await
             .unwrap();
-
         outbox
-            .observe("sim".to_owned(), RecordingState::Unknown)
+            .observe(DEV.to_owned(), RecordingState::Unknown)
             .await
             .unwrap();
-
-        assert_eq!(phase_of(&outbox).await.phase, Phase::Recording);
+        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Recording);
     }
 
     // ---- idempotency ------------------------------------------------------
@@ -788,48 +1147,15 @@ mod tests {
     async fn a_repeated_key_returns_the_original_command() {
         let outbox = outbox();
         let submission = |id: &str| Submission {
-            id: id.to_owned(),
-            device: "sim".to_owned(),
-            intent: Intent::StartRecording,
-            at: at(T0),
             idempotency_key: Some("take-4".to_owned()),
+            ..one(id, Intent::StartRecording)
         };
 
         let first = outbox.submit(submission("one")).await.unwrap();
-        // Without deduplication this second start is refused with
-        // `AlreadyRecording` — a 409 for something the client believes never
-        // landed.
         let second = outbox.submit(submission("two")).await.unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(
-            outbox.commands_for("sim".to_owned()).await.unwrap().len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn keys_are_scoped_to_one_device() {
-        let outbox = outbox();
-        for device in ["sim-a", "sim-b"] {
-            outbox
-                .submit(Submission {
-                    id: format!("cmd-{device}"),
-                    device: device.to_owned(),
-                    intent: Intent::StartRecording,
-                    at: at(T0),
-                    idempotency_key: Some("take-4".to_owned()),
-                })
-                .await
-                .expect("one key means one command per device, not per fleet");
-        }
-
-        for device in ["sim-a", "sim-b"] {
-            assert_eq!(
-                outbox.commands_for(device.to_owned()).await.unwrap().len(),
-                1
-            );
-        }
+        assert_eq!(outbox.commands_for(DEV.to_owned()).await.unwrap().len(), 1);
     }
 
     // ---- the log ----------------------------------------------------------
@@ -841,25 +1167,21 @@ mod tests {
         submit(&outbox, "second", title("b")).await.unwrap();
         outbox
             .submit(Submission {
-                id: "elsewhere".to_owned(),
-                device: "other".to_owned(),
-                intent: title("c"),
-                at: at(T0),
-                idempotency_key: None,
+                targets: vec!["other".to_owned()],
+                ..one("elsewhere", title("c"))
             })
             .await
             .unwrap();
 
         let ids: Vec<_> = outbox
-            .commands_for("sim".to_owned())
+            .commands_for(DEV.to_owned())
             .await
             .unwrap()
             .into_iter()
             .map(|r| r.id)
             .collect();
-        // Newest first, and stated by insertion order rather than by a
-        // timestamp — all three share one, which is exactly the case a sort on
-        // `enqueued_at` would get wrong.
+        // Newest first, and by insertion order rather than by a timestamp — all
+        // three share one, which is what a sort on `enqueued_at` gets wrong.
         assert_eq!(ids, ["second", "first"]);
     }
 
@@ -878,25 +1200,448 @@ mod tests {
         let outbox = outbox();
         submit(&outbox, "claimed", title("a")).await.unwrap();
         submit(&outbox, "queued", title("b")).await.unwrap();
+        outbox.claim_next(DEV.to_owned(), at(T0)).await.unwrap();
 
-        outbox.claim_next("sim".to_owned(), at(T0)).await.unwrap();
-
-        let stranded = outbox.in_flight("sim".to_owned()).await.unwrap();
+        let stranded = outbox.in_flight(DEV.to_owned()).await.unwrap();
         assert_eq!(
             stranded.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["claimed"]
         );
     }
+}
+
+/// The rendezvous: what a group-addressed command does across its members.
+#[cfg(test)]
+mod batch_tests {
+    use super::tests::*;
+    use super::*;
+    use sismatic_api_types::{Intent, ReadingValue};
+
+    const A: &str = "atrium";
+    const B: &str = "annex";
+    const BATCH: &str = "batch-1";
+
+    /// A group submission across [`A`] and [`B`], with `barrier` as the policy
+    /// and a 10-second bound.
+    fn group_start(on_timeout: Barrier) -> Submission {
+        Submission {
+            ids: vec!["cmd-a".to_owned(), "cmd-b".to_owned()],
+            targets: vec![A.to_owned(), B.to_owned()],
+            batch: Some(BATCH.to_owned()),
+            barrier: Some(BarrierPolicy {
+                timeout: Duration::from_secs(10),
+                on_timeout,
+            }),
+            intent: Intent::StartRecording,
+            at: at(T0),
+            idempotency_key: None,
+        }
+    }
+
+    /// A lone command queued on `device` *ahead* of the batch, so that member
+    /// is not at the head when the batch is submitted.
+    fn blocker(id: &str, device: &str) -> Submission {
+        Submission {
+            ids: vec![id.to_owned()],
+            targets: vec![device.to_owned()],
+            batch: None,
+            barrier: None,
+            intent: Intent::SetMetadata {
+                field: "TITLE".to_owned(),
+                value: "ahead".to_owned(),
+            },
+            at: at(T0),
+            idempotency_key: None,
+        }
+    }
+
+    async fn claim(outbox: &MemoryOutbox, device: &str, at_: Timestamp) -> Option<Claim> {
+        outbox
+            .claim_next(device.to_owned(), at_)
+            .await
+            .expect("claim")
+    }
+
+    // ---- expansion --------------------------------------------------------
 
     #[tokio::test]
-    async fn clone_shares_the_same_backing_outbox() {
-        // The composition root hands the same value out under three ports, so a
-        // submission through one must be claimable through another.
+    async fn a_group_submission_becomes_one_row_per_member_sharing_a_batch() {
         let outbox = outbox();
-        let handle = outbox.clone();
-        submit(&outbox, "cmd", title("a")).await.unwrap();
+        let accepted = outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
 
-        let claimed = handle.claim_next("sim".to_owned(), at(T0)).await.unwrap();
-        assert_eq!(claimed.map(|r| r.id).as_deref(), Some("cmd"));
+        assert_eq!(accepted.batch.as_deref(), Some(BATCH));
+        assert_eq!(
+            accepted
+                .commands
+                .iter()
+                .map(|c| (c.id.as_str(), c.device.as_str()))
+                .collect::<Vec<_>>(),
+            [("cmd-a", A), ("cmd-b", B)]
+        );
+        // Each row lands in its own device's queue and carries the batch.
+        for (id, device) in [("cmd-a", A), ("cmd-b", B)] {
+            let record = outbox.command(id.to_owned()).await.unwrap().unwrap();
+            assert_eq!(record.device, device);
+            assert_eq!(record.batch.as_deref(), Some(BATCH));
+            assert_eq!(record.epoch, 1, "every member starts its own first take");
+        }
+    }
+
+    /// Admission is across every member at once, so one member's refusal
+    /// refuses the whole request — and, the part that matters, leaves the
+    /// other member's queue untouched.
+    #[tokio::test]
+    async fn a_group_refused_by_one_member_records_nothing_at_all() {
+        let outbox = outbox();
+        // B is already recording, so a group start cannot be admitted for it.
+        outbox
+            .submit(Submission {
+                ids: vec!["solo".to_owned()],
+                targets: vec![B.to_owned()],
+                ..group_start(Barrier::FailBatch)
+            })
+            .await
+            .unwrap();
+
+        let refused = outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, SubmitError::Rejected { device, .. } if device == B),
+            "the refusing member must be named, got {refused:?}"
+        );
+
+        // A never learned about it.
+        assert!(outbox.commands_for(A.to_owned()).await.unwrap().is_empty());
+        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+    }
+
+    // ---- the barrier ------------------------------------------------------
+
+    /// The rendezvous itself. One member at the head is not enough; the batch
+    /// goes out only when both are, and it goes out as one claim.
+    #[tokio::test]
+    async fn no_member_dispatches_until_every_member_is_ready() {
+        let outbox = outbox();
+        // B has a command ahead of its batched row, so it cannot be ready yet.
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        // A is at the head and due, and still gets nothing.
+        assert!(
+            claim(&outbox, A, at(T0)).await.is_none(),
+            "a member must not go out alone"
+        );
+
+        // Clear B's blocker; now both are at the head.
+        let Some(Claim::One(ahead)) = claim(&outbox, B, at(T0)).await else {
+            panic!("B's blocker should be claimable");
+        };
+        assert_eq!(ahead.id, "ahead-b");
+        outbox
+            .settle(
+                ahead.id,
+                Outcome::Succeeded(ReadingValue::Flag(true)),
+                at(T0),
+            )
+            .await
+            .unwrap();
+
+        let Some(Claim::Batch { id, records }) = claim(&outbox, A, at(T0)).await else {
+            panic!("the barrier should have filled");
+        };
+        assert_eq!(id, BATCH);
+        // Ordered by device id ("annex" before "atrium"), which is the set's
+        // order rather than the group's — see `Claim::Batch`.
+        assert_eq!(
+            records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["cmd-b", "cmd-a"],
+            "one claim carries every member's row"
+        );
+    }
+
+    /// Exactly one task runs the group. A sibling ticking a moment later must
+    /// not dispatch the same rows again.
+    #[tokio::test]
+    async fn only_one_member_receives_the_batch() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            claim(&outbox, A, at(T0)).await,
+            Some(Claim::Batch { .. })
+        ));
+        assert!(
+            claim(&outbox, B, at(T0)).await.is_none(),
+            "the sibling's row was already claimed by the batch"
+        );
+    }
+
+    /// The reordering the peek-not-pop rule exists for: a batched row that is
+    /// waiting must stay at the head, or the command behind it overtakes.
+    #[tokio::test]
+    async fn a_waiting_batched_row_is_not_overtaken() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+        // Queued behind A's batched row. A *setting* rather than a metadata
+        // write, because the group start already moved A's phase to Recording
+        // and metadata is frozen there — settings are admissible in every
+        // phase, which is what makes this the command that could overtake.
+        outbox
+            .submit(Submission {
+                ids: vec!["after-a".to_owned()],
+                targets: vec![A.to_owned()],
+                batch: None,
+                barrier: None,
+                intent: Intent::SetSetting {
+                    field: "TIMEZONE".to_owned(),
+                    value: "UTC".to_owned(),
+                },
+                at: at(T0),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        // A is blocked on the barrier, and `after-a` must not slip past it.
+        assert!(claim(&outbox, A, at(T0)).await.is_none());
+        assert_eq!(
+            status_of(&outbox, "after-a").await,
+            CommandStatus::Pending,
+            "the command behind a waiting batch must stay behind it"
+        );
+    }
+
+    // ---- the timeout policies --------------------------------------------
+
+    /// `DispatchReady`: one recorder is better than none.
+    #[tokio::test]
+    async fn dispatch_ready_runs_the_members_that_arrived() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::DispatchReady))
+            .await
+            .unwrap();
+
+        // Inside the bound: still waiting for B.
+        assert!(claim(&outbox, A, at_plus(9)).await.is_none());
+
+        // Past it: A goes alone.
+        let Some(Claim::Batch { records, .. }) = claim(&outbox, A, at_plus(11)).await else {
+            panic!("the ready member should have been dispatched");
+        };
+        assert_eq!(
+            records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["cmd-a"]
+        );
+    }
+
+    /// ...and a straggler under that policy still goes, because the room has
+    /// already started and one more recorder beats one fewer.
+    #[tokio::test]
+    async fn a_straggler_under_dispatch_ready_goes_out_alone() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::DispatchReady))
+            .await
+            .unwrap();
+        claim(&outbox, A, at_plus(11)).await;
+
+        // B clears its blocker and arrives late.
+        let Some(Claim::One(ahead)) = claim(&outbox, B, at_plus(12)).await else {
+            panic!("B's blocker should be claimable");
+        };
+        outbox
+            .settle(
+                ahead.id,
+                Outcome::Succeeded(ReadingValue::Flag(true)),
+                at_plus(12),
+            )
+            .await
+            .unwrap();
+
+        let late = claim(&outbox, B, at_plus(13)).await;
+        assert!(
+            matches!(&late, Some(Claim::One(r)) if r.id == "cmd-b"),
+            "a straggler must still run under DispatchReady, got {late:?}"
+        );
+    }
+
+    /// `FailBatch`: two recordings or neither. Nothing is dispatched, and the
+    /// rows that were waiting are failed without contacting a device.
+    #[tokio::test]
+    async fn fail_batch_abandons_the_take_rather_than_starting_half_a_room() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        assert!(claim(&outbox, A, at_plus(9)).await.is_none());
+        assert!(
+            claim(&outbox, A, at_plus(11)).await.is_none(),
+            "nothing is dispatched when the batch is abandoned"
+        );
+
+        assert!(
+            matches!(
+                status_of(&outbox, "cmd-a").await,
+                CommandStatus::Failed { .. }
+            ),
+            "the ready member's row is failed, not left pending"
+        );
+        // ...and the phase it optimistically moved is rolled back, so A's
+        // metadata is writable again rather than frozen by a take that never
+        // started.
+        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_straggler_under_fail_batch_is_failed_too() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+        claim(&outbox, A, at_plus(11)).await;
+
+        let Some(Claim::One(ahead)) = claim(&outbox, B, at_plus(12)).await else {
+            panic!("B's blocker should be claimable");
+        };
+        outbox
+            .settle(
+                ahead.id,
+                Outcome::Succeeded(ReadingValue::Flag(true)),
+                at_plus(12),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            claim(&outbox, B, at_plus(13)).await.is_none(),
+            "the take was abandoned; a late member must not start alone"
+        );
+        assert!(matches!(
+            status_of(&outbox, "cmd-b").await,
+            CommandStatus::Failed { .. }
+        ));
+        assert_eq!(phase_of(&outbox, B).await.phase, Phase::Idle);
+    }
+
+    /// A batch that fills inside the bound is unaffected by the timeout —
+    /// stated because an off-by-one in the comparison would make every batch
+    /// take the timeout path.
+    #[tokio::test]
+    async fn a_batch_that_fills_in_time_is_dispatched_not_timed_out() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        let claimed = claim(&outbox, A, at_plus(10)).await;
+        assert!(
+            matches!(claimed, Some(Claim::Batch { ref records, .. }) if records.len() == 2),
+            "got {claimed:?}"
+        );
+    }
+
+    /// The staleness bug the recomputed `ready` set exists to prevent: a member
+    /// that reached the head and was then overtaken by a retry is no longer
+    /// ready, and the batch must not release against its new head.
+    #[tokio::test]
+    async fn a_member_overtaken_by_a_retry_stops_being_ready() {
+        let outbox = MemoryOutbox::with_max_attempts(3).with_backoff(Duration::ZERO);
+        outbox.submit(blocker("ahead-a", A)).await.unwrap();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        // A clears its blocker, so A is now at the head and ready.
+        let Some(Claim::One(a_head)) = claim(&outbox, A, at(T0)).await else {
+            panic!("A's blocker should be claimable");
+        };
+        assert!(claim(&outbox, A, at(T0)).await.is_none(), "B is not ready");
+
+        // A's blocker fails and is pushed back to the *front*, so A's batched
+        // row is no longer at the head — A has stopped being ready.
+        outbox
+            .settle(a_head.id, Outcome::Failed("ssh died".into()), at(T0))
+            .await
+            .unwrap();
+
+        // Now B clears its blocker and arrives. With an accumulated `ready`
+        // set the batch would release here and claim A's *retry* as if it were
+        // the batched row.
+        let Some(Claim::One(b_head)) = claim(&outbox, B, at(T0)).await else {
+            panic!("B's blocker should be claimable");
+        };
+        outbox
+            .settle(
+                b_head.id,
+                Outcome::Succeeded(ReadingValue::Flag(true)),
+                at(T0),
+            )
+            .await
+            .unwrap();
+
+        let claimed = claim(&outbox, B, at(T0)).await;
+        assert!(
+            claimed.is_none(),
+            "A is no longer at the head, so the barrier is not full: got {claimed:?}"
+        );
+        assert_eq!(
+            status_of(&outbox, "ahead-a").await,
+            CommandStatus::Pending,
+            "A's retry is what sits at its head"
+        );
+    }
+
+    /// A group write needs no rendezvous — writing the same title to two
+    /// recorders gains nothing from unison — so it is expanded without a batch
+    /// and each member dispatches as soon as it can.
+    #[tokio::test]
+    async fn an_unbatched_group_expansion_dispatches_per_member() {
+        let outbox = outbox();
+        outbox
+            .submit(Submission {
+                batch: None,
+                barrier: None,
+                intent: Intent::SetMetadata {
+                    field: "TITLE".to_owned(),
+                    value: "Week 4".to_owned(),
+                },
+                ..group_start(Barrier::FailBatch)
+            })
+            .await
+            .unwrap();
+
+        for (device, id) in [(A, "cmd-a"), (B, "cmd-b")] {
+            let claimed = claim(&outbox, device, at(T0)).await;
+            assert!(
+                matches!(&claimed, Some(Claim::One(r)) if r.id == id),
+                "{device} should dispatch on its own, got {claimed:?}"
+            );
+        }
     }
 }

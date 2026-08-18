@@ -86,9 +86,9 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         sismatic_api_types::ReadingList,
         sismatic_api_types::ApiError,
         // The write side's top-level bodies. `Intent`, `CommandStatus`,
-        // `Phase` and `Rejection` are reachable from these and so arrive by
-        // being walked into, for the same reason `ReadingValue` does.
-        sismatic_api_types::Accepted,
+        // `Phase`, `Rejection` and `Accepted` are reachable from these and so
+        // arrive by being walked into, for the same reason `ReadingValue` does.
+        sismatic_api_types::Acceptance,
         sismatic_api_types::CommandRecord,
         sismatic_api_types::CommandList,
         sismatic_api_types::RecordingPhase,

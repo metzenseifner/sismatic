@@ -84,10 +84,14 @@ async fn a_start_is_accepted_and_names_the_command_it_recorded() {
     let (status, location, body) = post(&address, &url("/recording/start")).await;
 
     assert_eq!(status, 202, "got {body}");
-    assert_eq!(body["id"], "cmd-1");
+    // Always a list, even for a device that can only ever produce one command:
+    // one response shape rather than one per kind of id. See `Acceptance`.
+    assert_eq!(body["batch"], serde_json::Value::Null);
+    assert_eq!(body["commands"][0]["id"], "cmd-1");
+    assert_eq!(body["commands"][0]["device"], DEVICE);
     // The first recording, so epoch 1. Returned in the body so a caller writing
     // several metadata fields can check they all landed on one take.
-    assert_eq!(body["epoch"], 1);
+    assert_eq!(body["commands"][0]["epoch"], 1);
     // The header and the body must name the same command; with a UUID a test
     // could only check the header was *shaped* like one.
     assert_eq!(location.as_deref(), Some("/v1/commands/cmd-1"));
@@ -175,9 +179,12 @@ async fn a_metadata_write_during_a_recording_is_a_409() {
     // A conflict is not a command, so there is nothing to poll for.
     assert_eq!(location, None);
     assert_eq!(body["code"], "conflict");
-    // The message carries which rejection applied and the phase that produced
-    // it — `ApiError` has one `code` slot, so this is where a caller learns
-    // `metadata_frozen` rather than, say, `already_recording`.
+    // The typed field is how a caller tells "your edit was discarded" from "the
+    // device is already doing what you asked" — the two call for very different
+    // handling, and before this field existed telling them apart meant matching
+    // prose.
+    assert_eq!(body["rejection"], "metadata_frozen");
+    // The prose still says it too, because that is what lands in a log.
     let message = body["error"].as_str().expect("an error message");
     assert!(
         message.contains("metadata_frozen") && message.contains("recording"),
@@ -205,36 +212,18 @@ async fn each_lifecycle_verb_is_refused_by_the_state_that_contradicts_it() {
     for path in ["/recording/stop", "/recording/pause"] {
         let (status, _, body) = post(&address, &url(path)).await;
         assert_eq!(status, 409, "{path} against an idle device: {body}");
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|m| m.contains("not_recording")),
-            "{path}: {}",
-            body["error"]
-        );
+        assert_eq!(body["rejection"], "not_recording", "{path}: {body}");
     }
 
     post(&address, &url("/recording/start")).await;
     let (status, _, body) = post(&address, &url("/recording/start")).await;
     assert_eq!(status, 409);
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|m| m.contains("already_recording")),
-        "{}",
-        body["error"]
-    );
+    assert_eq!(body["rejection"], "already_recording", "{body}");
 
     post(&address, &url("/recording/pause")).await;
     let (status, _, body) = post(&address, &url("/recording/pause")).await;
     assert_eq!(status, 409);
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|m| m.contains("already_paused")),
-        "{}",
-        body["error"]
-    );
+    assert_eq!(body["rejection"], "already_paused", "{body}");
 }
 
 /// A refused submission must leave no trace. A 409 that still queued the
@@ -287,8 +276,8 @@ async fn two_writes_without_a_key_are_two_commands() {
     let (_, _, first) = put(&address, &url("/metadata/title"), "one").await;
     let (_, _, second) = put(&address, &url("/metadata/title"), "two").await;
 
-    assert_eq!(first["id"], "cmd-1");
-    assert_eq!(second["id"], "cmd-2");
+    assert_eq!(first["commands"][0]["id"], "cmd-1");
+    assert_eq!(second["commands"][0]["id"], "cmd-2");
 }
 
 // ---- reading the write side -------------------------------------------
@@ -346,6 +335,17 @@ async fn an_unknown_command_is_a_404() {
     // Unlike the readings routes' 404, this one *is* a claim about existence:
     // an id is only ever minted by an accepted submission.
     assert_eq!(body["code"], "not_found");
+    // The failure shape every other route returns is unchanged by the write
+    // side's extra field: `rejection` is skipped when absent, so a body that
+    // has no rejection serializes exactly as it did before the field existed.
+    assert_eq!(
+        body.as_object()
+            .expect("an object")
+            .keys()
+            .collect::<Vec<_>>(),
+        ["code", "error"],
+        "an error with no rejection must not carry the key: {body}"
+    );
 }
 
 #[tokio::test]
