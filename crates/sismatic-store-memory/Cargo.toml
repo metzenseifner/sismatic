@@ -6,12 +6,18 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# The outbox spaces retries out in time, which is the one piece of timestamp
+# arithmetic in this crate: `Timestamp` is an RFC 3339 string, and "half a
+# second after that instant" cannot be computed on the string.
+chrono.workspace = true
 dashmap.workspace = true
 sismatic-api-types.workspace = true
 sismatic-store = { workspace = true }
 
 [dev-dependencies]
 # The store trait is async, so the unit tests need a runtime and the
-# `#[tokio::test]` macro. A current-thread runtime is enough — the tests do no
-# real I/O and only exercise the in-memory maps.
-tokio = { workspace = true, features = ["macros", "rt"] }
+# `#[tokio::test]` macro. `rt-multi-thread` is there for the outbox's atomicity
+# tests alone: the race they exist to catch needs submissions running on
+# genuinely different threads, and a current-thread runtime would let a broken
+# critical section pass.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

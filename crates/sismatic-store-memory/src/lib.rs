@@ -44,6 +44,10 @@ use dashmap::DashMap;
 use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 use sismatic_store::{ReadError, ReadStore, WriteError, WriteStore};
 
+pub mod outbox;
+
+pub use outbox::MemoryOutbox;
+
 #[derive(Default, Clone)]
 pub struct MemoryStore {
     latest: Arc<DashMap<DeviceId, BTreeMap<FieldName, Reading>>>,

@@ -12,6 +12,9 @@ actix-web.workspace = true
 # document and served, and the contract crate has no opinion about HTTP.
 sismatic-api-types = { workspace = true, features = ["openapi"] }
 sismatic-store = { workspace = true }
+# One request body of this crate's own (`routes::commands::ValueWrite`). Every
+# other type on the wire comes from `api-types`, which derives its own.
+serde.workspace = true
 # The `#[utoipa::path]` attributes on the handlers and the `OpenApi` derive that
 # collects them — see `src/openapi.rs`.
 utoipa.workspace = true

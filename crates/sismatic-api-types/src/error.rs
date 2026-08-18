@@ -19,6 +19,14 @@ pub enum ErrorCode {
     DeviceError,
     /// A generic not-found (e.g. no readings for the given span).
     NotFound,
+    /// The request contradicts the device's current write-side state, most
+    /// often a metadata write during a recording (HTTP 409).
+    ///
+    /// One code for all four [`Rejection`](crate::Rejection)s rather than one
+    /// each. Which of them applies is named in the message, so a client that
+    /// needs to tell "already recording" from "metadata frozen" reads prose —
+    /// see the note on [`Rejection`](crate::Rejection) about what that costs.
+    Conflict,
     /// An unexpected server-side failure (HTTP 500).
     Internal,
 }

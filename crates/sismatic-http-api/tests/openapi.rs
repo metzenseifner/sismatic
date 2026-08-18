@@ -27,21 +27,28 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{Reading, ReadingValue, RecordingState, Timestamp};
+use sismatic_api_types::{Intent, Reading, ReadingValue, RecordingState, Timestamp};
+use sismatic_store::outbox::{CommandSubmit, Submission};
 use sismatic_store::{DynReadStore, WriteStore};
 use sismatic_store_memory::MemoryStore;
+
+mod harness;
 
 /// The device and field every seeded reading uses, and the values substituted
 /// into `{id}` and `{field}` when a documented path is requested.
 const DEVICE: &str = "atrium-101";
 const FIELD: &str = "RUNNING_STATE";
+/// The command id `{id}` becomes under `/v1/commands/`. The first id the
+/// harness's counting stamp issues, which is the one the seeded submission
+/// below receives.
+const COMMAND: &str = "cmd-1";
 
 /// Start the application over a store holding one reading of [`FIELD`] on
-/// [`DEVICE`]; return its base URL.
+/// [`DEVICE`], and an outbox holding one command; return its base URL.
 ///
-/// Seeded rather than empty so that *every* documented path can answer `200`.
-/// That makes the drift test's expectation exactly "200", with no per-path
-/// allowance for a legitimate 404 that a route-miss could then hide behind.
+/// Seeded rather than empty so that a handler *reached* can never answer 404 of
+/// its own accord — which is what lets the drift test read a 404 as "no such
+/// route" and nothing else.
 async fn spawn_app() -> String {
     let store = MemoryStore::default();
     store
@@ -61,8 +68,23 @@ async fn spawn_app() -> String {
         .expect("reading the bound address")
         .port();
 
-    let server = sismatic_http_api::run(listener, store).expect("building the server");
-    drop(tokio::spawn(server));
+    let outbox = harness::serve(listener, store);
+    // Submitted straight through the port rather than over HTTP: this suite is
+    // about the document, and a seeding step that went through a route would
+    // make it depend on the very routing it is checking.
+    outbox
+        .submit(Submission {
+            id: COMMAND.to_owned(),
+            device: DEVICE.to_owned(),
+            intent: Intent::SetSetting {
+                field: "TIMEZONE".to_owned(),
+                value: "UTC".to_owned(),
+            },
+            at: Timestamp(harness::AT.to_owned()),
+            idempotency_key: None,
+        })
+        .await
+        .expect("seeding the outbox");
 
     format!("http://127.0.0.1:{port}")
 }
@@ -89,14 +111,14 @@ async fn the_document_is_served_as_openapi_json() {
         "expected an OpenAPI 3.x document, got {}",
         doc["openapi"]
     );
-    assert_eq!(doc["info"]["title"], "Sismatic read API");
+    assert_eq!(doc["info"]["title"], "Sismatic API");
     // Read from the crate's metadata rather than written out, so a release bump
     // cannot leave a stale number in the document.
     assert_eq!(doc["info"]["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]
-async fn every_documented_path_is_a_path_the_server_serves() {
+async fn every_documented_operation_is_one_the_server_serves() {
     let address = spawn_app().await;
     let doc = document(&address).await;
 
@@ -104,32 +126,72 @@ async fn every_documented_path_is_a_path_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        4,
-        "expected the four documented routes, got {:?}",
+        12,
+        "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
 
+    let client = reqwest::Client::new();
+    let mut checked = 0;
+
     for (template, item) in paths {
-        assert!(
-            item.get("get").is_some(),
-            "{template} is documented but not as a GET"
-        );
+        let operations = item.as_object().expect("a path item is an object");
+        for (method, _) in operations {
+            let url = format!("{address}{}", fill(template));
+            let request = match method.as_str() {
+                "get" => client.get(&url),
+                "post" => client.post(&url),
+                // The two write bodies the document declares. A `PUT` with no
+                // body is a 400 from the extractor, which would be
+                // indistinguishable from a route that does not exist.
+                "put" => client.put(&url).json(&serde_json::json!({"value": "x"})),
+                other => panic!("{template} documents an unhandled method: {other}"),
+            };
+            let status = request
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("requesting {method} {url}: {e}"))
+                .status()
+                .as_u16();
 
-        let url = template.replace("{id}", DEVICE).replace("{field}", FIELD);
-        let status = reqwest::get(format!("{address}{url}"))
-            .await
-            .unwrap_or_else(|e| panic!("requesting the documented path {url}: {e}"))
-            .status()
-            .as_u16();
-
-        // 404 here means the server has no such route — the store was seeded so
-        // that a handler reached at all has something to answer with.
-        assert_eq!(
-            status, 200,
-            "the document advertises {template}, but {url} answered {status}; \
-             the `#[utoipa::path]` attribute and the route in `startup` disagree"
-        );
+            // Not "is it 200": several of these routes answer `202`, and a
+            // `pause` against an idle device answers a perfectly correct `409`.
+            // What drift produces is a *routing* failure — 404 for a path the
+            // server does not have, 405 for a method it does not accept on that
+            // path — and those are what this rules out. The store and the
+            // outbox are seeded so that no handler reached at all can 404 of
+            // its own accord. What each route answers on its own terms is
+            // `tests/commands.rs`.
+            assert!(
+                status != 404 && status != 405,
+                "the document advertises {method} {template}, but {method} {url} \
+                 answered {status}; the `#[utoipa::path]` attribute and the route \
+                 in `startup` disagree"
+            );
+            checked += 1;
+        }
     }
+
+    // One operation per path here, but asserted rather than assumed: a path
+    // that gained a second method and lost it in `startup` would otherwise slip
+    // through as "12 paths, still fine".
+    assert_eq!(checked, 12, "expected one operation per documented path");
+}
+
+/// Substitute a documented path template's parameters with data the fixtures
+/// hold.
+///
+/// `{id}` is a *device* id everywhere except under `/v1/commands/`, where it is
+/// a command id — the two share a spelling and nothing else, and filling a
+/// command route with a device id would produce a handler's own honest 404 that
+/// looks exactly like a missing route.
+fn fill(template: &str) -> String {
+    let id = if template.starts_with("/v1/commands/") {
+        COMMAND
+    } else {
+        DEVICE
+    };
+    template.replace("{id}", id).replace("{field}", FIELD)
 }
 
 #[tokio::test]
@@ -145,8 +207,8 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        3,
-        "expected the three readings routes under /v1, got {:?}",
+        11,
+        "expected every readings and commands route under /v1, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
     // ...and the health check deliberately outside it: a liveness probe is not

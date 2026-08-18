@@ -27,13 +27,23 @@
 //! # The routes
 //!
 //! ```text
-//! GET /health_check                               liveness; consults nothing
-//! GET /v1/devices/{id}/fields                     every field's latest value
-//! GET /v1/devices/{id}/fields/{field}             one field's latest value
-//! GET /v1/devices/{id}/fields/{field}/history     one field over a time span
+//! GET  /health_check                               liveness; consults nothing
 //!
-//! GET /swagger-ui/                                the routes above, browsable
-//! GET /api-docs/openapi.json                      the same, as OpenAPI 3.1
+//! GET  /v1/devices/{id}/fields                     every field's latest value
+//! GET  /v1/devices/{id}/fields/{field}             one field's latest value
+//! GET  /v1/devices/{id}/fields/{field}/history     one field over a time span
+//!
+//! POST /v1/devices/{id}/recording/start            begin a recording
+//! POST /v1/devices/{id}/recording/stop             end one
+//! POST /v1/devices/{id}/recording/pause            suspend one
+//! PUT  /v1/devices/{id}/metadata/{field}           write a metadata register
+//! PUT  /v1/devices/{id}/settings/{field}           write a device setting
+//! GET  /v1/devices/{id}/recording                  the write side's phase/epoch
+//! GET  /v1/devices/{id}/commands                   what this device was asked
+//! GET  /v1/commands/{id}                           what became of one request
+//!
+//! GET  /swagger-ui/                                the routes above, browsable
+//! GET  /api-docs/openapi.json                      the same, as OpenAPI 3.1
 //! ```
 //!
 //! Three routes cover every field core can query, and will still cover them
@@ -53,11 +63,21 @@
 //! # Capability, not connection
 //!
 //! [`run`] takes a [`DynReadStore`] — `Arc<dyn ReadStore>` — and never a
-//! [`WriteStore`], so no handler can write no matter what it asks for. The store
-//! the composition root passes in is the very same object the sync driver writes
-//! through; what differs is the type each side sees it as. Narrowing at the
-//! boundary rather than reviewing call sites is what makes "the read side never
-//! writes" a property of the build instead of a convention.
+//! [`WriteStore`], so no handler can write a reading no matter what it asks
+//! for. The store the composition root passes in is the very same object the
+//! sync driver writes through; what differs is the type each side sees it as.
+//! Narrowing at the boundary rather than reviewing call sites is what makes
+//! "the read side never writes" a property of the build instead of a
+//! convention.
+//!
+//! The write routes extend that arrangement rather than relaxing it. They are
+//! handed `CommandSubmit` and `CommandLog` — append an intent, read what was
+//! appended — and never `CommandDrain`, which is what claims a command and
+//! settles it. Draining belongs to `sismatic-intent-relay`, and a handler able
+//! to claim could reorder a device's queue. So the capability this crate gained
+//! is exactly one verb, and it is one that *records a request* rather than
+//! performing it: no handler here can reach a device, which is what keeps the
+//! `sismatic-core` seam intact while the API gained a write side.
 //!
 //! The store is registered with [`web::Data::from`], which adopts the existing
 //! `Arc` rather than wrapping it in a second one, so a handler's
@@ -71,10 +91,12 @@
 
 pub mod openapi;
 pub mod routes;
+pub mod stamp;
 pub mod startup;
 
 pub use openapi::ApiDoc;
 pub use routes::health_check;
+pub use stamp::Stamp;
 pub use startup::run;
 
 /// The running server's stop handle, re-exported so the composition root can

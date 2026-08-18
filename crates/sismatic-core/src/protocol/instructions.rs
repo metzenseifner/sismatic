@@ -7,6 +7,7 @@ mod catalog;
 pub mod commands;
 pub mod query;
 pub mod register;
+pub mod setting;
 //
 //
 // ---- Instruction ----------------------------------------------------------

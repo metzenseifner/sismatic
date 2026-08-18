@@ -11,6 +11,7 @@ members = [
   "crates/sismatic-store-memory",
   "crates/sismatic-sync",
   "crates/sismatic-web/backend",
+  "crates/sismatic-intent-relay",
 ]
 
 # Shared across every member so a version/edition/license bump happens once.

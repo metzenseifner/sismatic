@@ -3324,6 +3324,7 @@ dependencies = [
  "actix-web",
  "async-trait",
  "reqwest",
+ "serde",
  "serde_json",
  "sismatic-api-types",
  "sismatic-store",
@@ -3331,6 +3332,21 @@ dependencies = [
  "tokio",
  "utoipa",
  "utoipa-swagger-ui",
+]
+
+[[package]]
+name = "sismatic-intent-relay"
+version = "0.2.25"
+dependencies = [
+ "chrono",
+ "sismatic-api-types",
+ "sismatic-core",
+ "sismatic-store",
+ "sismatic-store-memory",
+ "sismatic-sync",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3349,11 +3365,14 @@ name = "sismatic-server"
 version = "0.2.25"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "config",
  "serde",
+ "sismatic-api-types",
  "sismatic-core",
  "sismatic-http-api",
+ "sismatic-intent-relay",
  "sismatic-store",
  "sismatic-store-memory",
  "sismatic-sync",
@@ -3362,6 +3381,7 @@ dependencies = [
  "tracing-bunyan-formatter",
  "tracing-log 0.2.0",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3377,6 +3397,7 @@ name = "sismatic-store-memory"
 version = "0.2.25"
 dependencies = [
  "async-trait",
+ "chrono",
  "dashmap",
  "sismatic-api-types",
  "sismatic-store",

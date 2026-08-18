@@ -68,11 +68,27 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         crate::routes::readings::list_fields,
         crate::routes::readings::read_field,
         crate::routes::readings::field_history,
+        crate::routes::commands::start_recording,
+        crate::routes::commands::stop_recording,
+        crate::routes::commands::pause_recording,
+        crate::routes::commands::set_metadata,
+        crate::routes::commands::set_setting,
+        crate::routes::commands::read_phase,
+        crate::routes::commands::list_commands,
+        crate::routes::commands::read_command,
     ),
     components(schemas(
         sismatic_api_types::Reading,
         sismatic_api_types::ReadingList,
         sismatic_api_types::ApiError,
+        // The write side's top-level bodies. `Intent`, `CommandStatus`,
+        // `Phase` and `Rejection` are reachable from these and so arrive by
+        // being walked into, for the same reason `ReadingValue` does.
+        sismatic_api_types::Accepted,
+        sismatic_api_types::CommandRecord,
+        sismatic_api_types::CommandList,
+        sismatic_api_types::RecordingPhase,
+        crate::routes::commands::ValueWrite,
     )),
     tags(
         (name = "readings", description =
@@ -81,6 +97,12 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
              passed through to the store rather than a symbol the server was \
              compiled against — a field added to the device catalog is served here \
              with no code change."),
+        (name = "commands", description =
+            "Asking a device to do something. Every write is recorded and answered \
+             `202 Accepted` before any device is contacted, so no response here is \
+             ever waiting on one — follow the `Location` header to learn what \
+             happened. Metadata is writable only while nothing is recording; \
+             settings are writable always."),
         (name = "health", description =
             "Liveness. Consults nothing, so it reports on this process and never on \
              its dependencies."),
@@ -99,14 +121,15 @@ impl ApiDoc {
     pub fn document() -> utoipa::openapi::OpenApi {
         let mut doc = <Self as OpenApi>::openapi();
         doc.info = Info::builder()
-            .title("Sismatic read API")
+            .title("Sismatic API")
             .version(env!("CARGO_PKG_VERSION"))
             .description(Some(
-                "The read (query) side of Sismatic. A device is polled by the sync \
-                 driver, which writes what it reads to the store; these routes answer \
-                 questions about what was written. Nothing here reaches a device, so \
-                 no response is ever waiting on one — a value's `at` timestamp is how \
-                 fresh it is.",
+                "Sismatic's HTTP surface. Reads are answered from what the sync \
+                 driver polled and stored; writes are recorded as intents and \
+                 performed later by the intent relay. Nothing here reaches a device \
+                 during a request, so no response is ever waiting on one — a \
+                 reading's `at` says how fresh it is, and a command's `202` says it \
+                 was accepted rather than done.",
             ))
             .license(Some(License::new(env!("CARGO_PKG_LICENSE"))))
             .build();

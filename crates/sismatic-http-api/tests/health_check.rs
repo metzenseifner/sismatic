@@ -18,6 +18,8 @@ use std::sync::Arc;
 use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 use sismatic_store::{DynReadStore, ReadError, ReadStore};
 
+mod harness;
+
 /// A store that fails the test if it is read at all.
 ///
 /// The health check must be answerable without consulting anything — see
@@ -64,11 +66,10 @@ fn spawn_app() -> String {
         .expect("reading the bound address")
         .port();
 
-    let server = sismatic_http_api::run(listener, store).expect("building the server");
     // Detached deliberately: dropping a `JoinHandle` leaves the task running,
     // so the server lives exactly as long as the test's runtime does and no
-    // test has to remember to stop it.
-    drop(tokio::spawn(server));
+    // test has to remember to stop it. See `harness::serve`.
+    harness::serve(listener, store);
 
     format!("http://127.0.0.1:{port}")
 }

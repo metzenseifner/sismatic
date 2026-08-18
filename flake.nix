@@ -89,13 +89,21 @@
           # tests/fixtures/ likewise: an integration test that reads a config
           # file off disk (sismatic-server) needs the file itself in the build
           # sandbox, and it is a .yaml/.toml that filterCargoSources drops.
+          #
+          # server_configuration.yaml is the shipped config rather than a
+          # fixture, and it is kept for the same reason: `deny_unknown_fields`
+          # makes "does the config we ship still load?" a real question — a
+          # section present in the YAML and absent from `RawServerConfig` is a
+          # startup failure — and the unit test that answers it has to be able
+          # to read the file.
           src = lib.cleanSourceWith {
             src = ./.;
             filter =
               path: type:
               (craneLib.filterCargoSources path type)
               || (lib.hasInfix "/python/" path)
-              || (lib.hasInfix "/tests/fixtures/" path);
+              || (lib.hasInfix "/tests/fixtures/" path)
+              || (lib.hasSuffix "/server_configuration.yaml" path);
           };
 
           # Version is shared by every workspace member (workspace.package),

@@ -113,3 +113,8 @@ release = false
 name = "sismatic-http-api"
 version_group = "sismatic"
 release = false
+
+[[package]]
+name = "sismatic-intent-relay"
+version_group = "sismatic"
+release = false
