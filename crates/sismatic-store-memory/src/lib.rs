@@ -44,8 +44,10 @@ use dashmap::DashMap;
 use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 use sismatic_store::{ReadError, ReadStore, WriteError, WriteStore};
 
+pub mod catalog;
 pub mod outbox;
 
+pub use catalog::MemoryCatalog;
 pub use outbox::MemoryOutbox;
 
 #[derive(Default, Clone)]

@@ -76,6 +76,10 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         crate::routes::commands::read_phase,
         crate::routes::commands::list_commands,
         crate::routes::commands::read_command,
+        crate::routes::devices::list_devices,
+        crate::routes::devices::read_device,
+        crate::routes::devices::list_groups,
+        crate::routes::devices::read_group,
     ),
     components(schemas(
         sismatic_api_types::Reading,
@@ -89,6 +93,12 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         sismatic_api_types::CommandList,
         sismatic_api_types::RecordingPhase,
         crate::routes::commands::ValueWrite,
+        // The inventory bodies. `DeviceSummary` and `ConnectionStatus` arrive
+        // by being reachable from these.
+        sismatic_api_types::DeviceList,
+        sismatic_api_types::DeviceDetail,
+        sismatic_api_types::GroupList,
+        sismatic_api_types::GroupSummary,
     )),
     tags(
         (name = "readings", description =
@@ -97,6 +107,11 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
              passed through to the store rather than a symbol the server was \
              compiled against — a field added to the device catalog is served here \
              with no code change."),
+        (name = "inventory", description =
+            "What this server was configured with. Answered from the device catalog \
+             rather than the store, so an unknown id here is a `404` — a real claim \
+             about the devices file — where the readings routes can only answer \
+             `nothing stored`."),
         (name = "commands", description =
             "Asking a device to do something. Every write is recorded and answered \
              `202 Accepted` before any device is contacted, so no response here is \

@@ -21,14 +21,16 @@ use std::net::TcpListener;
 
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
+use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
 use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
 use sismatic_store::{DynReadStore, ReadStore};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
 use crate::routes::{
-    field_history, health_check, list_commands, list_fields, pause_recording, read_command,
-    read_field, read_phase, set_metadata, set_setting, start_recording, stop_recording,
+    field_history, health_check, list_commands, list_devices, list_fields, list_groups,
+    pause_recording, read_command, read_device, read_field, read_group, read_phase, set_metadata,
+    set_setting, start_recording, stop_recording,
 };
 use crate::stamp::Stamp;
 
@@ -56,6 +58,7 @@ use crate::stamp::Stamp;
 pub fn run(
     listener: TcpListener,
     store: DynReadStore,
+    catalog: DynDeviceCatalog,
     submit: DynCommandSubmit,
     log: DynCommandLog,
     stamp: Stamp,
@@ -64,6 +67,7 @@ pub fn run(
     // handlers an `Arc<Arc<dyn ReadStore>>` to dereference twice, and would make
     // the type say the API owns a store rather than shares one.
     let store: web::Data<dyn ReadStore> = web::Data::from(store);
+    let catalog: web::Data<dyn DeviceCatalog> = web::Data::from(catalog);
     let submit: web::Data<dyn CommandSubmit> = web::Data::from(submit);
     let log: web::Data<dyn CommandLog> = web::Data::from(log);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
@@ -81,6 +85,7 @@ pub fn run(
         // it inside would give each worker its own store.
         App::new()
             .app_data(store.clone())
+            .app_data(catalog.clone())
             .app_data(submit.clone())
             .app_data(log.clone())
             .app_data(stamp.clone())
@@ -155,7 +160,15 @@ pub fn run(
                     .service(
                         web::resource("/devices/{id}/commands").route(web::get().to(list_commands)),
                     )
-                    .service(web::resource("/commands/{id}").route(web::get().to(read_command))),
+                    .service(web::resource("/commands/{id}").route(web::get().to(read_command)))
+                    // The inventory routes, registered after everything under
+                    // `/devices/{id}/…` so the bare `{id}` resource cannot be
+                    // tried against a longer path first. `/devices` last of the
+                    // three, because it is the shortest.
+                    .service(web::resource("/devices/{id}").route(web::get().to(read_device)))
+                    .service(web::resource("/devices").route(web::get().to(list_devices)))
+                    .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
+                    .service(web::resource("/groups").route(web::get().to(list_groups))),
             )
             // Registered last, and this time the order *is* load-bearing: the
             // UI is mounted on a tail match (`/swagger-ui/{_:.*}`), which is

@@ -1,0 +1,140 @@
+//! The inventory routes — what devices and groups this server was configured
+//! with.
+//!
+//! ```text
+//! GET /devices             every configured device
+//! GET /devices/{id}        one device, with the latest value of each field
+//! GET /groups              every configured group
+//! GET /groups/{id}         one group and the devices it addresses
+//! ```
+//!
+//! # Why these are not answered from the store
+//!
+//! Every other read route answers from what the sync side *wrote*, which is why
+//! an unknown device there yields an empty list rather than a `404` — the store
+//! cannot tell "no such device" from "this one has not answered yet". These
+//! four answer from the [`DeviceCatalog`] instead, which is the configured set,
+//! so here a `404` is a real claim: the id is not in the devices file.
+//!
+//! That distinction is what makes the index useful. `GET /devices` returning
+//! `[]` from the store would mean "nothing has been polled yet"; returning `[]`
+//! from the catalog means "no devices are configured", and those call for very
+//! different actions.
+//!
+//! # The one route that reads both
+//!
+//! [`read_device`] joins the two sides: the catalog says the device exists and
+//! how it is addressed, the store says what it last reported. A device that is
+//! configured but has never answered is a `200` with an empty `latest`, which
+//! is the honest answer and the one a dashboard needs to render a row at all.
+
+use actix_web::web;
+use sismatic_api_types::{ApiError, DeviceDetail, DeviceList, GroupList, GroupSummary};
+use sismatic_store::ReadStore;
+use sismatic_store::catalog::DeviceCatalog;
+
+use crate::routes::error::ApiFailure;
+
+/// `GET /devices` — every configured device, ordered by id.
+#[utoipa::path(
+    get,
+    path = "/devices",
+    context_path = "/v1",
+    tag = "inventory",
+    responses(
+        (status = 200, description = "Every device in the devices file, ordered by \
+             id. Empty means none are configured — unlike an empty readings list, \
+             which means none have answered.", body = DeviceList),
+    ),
+)]
+pub async fn list_devices(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<DeviceList> {
+    web::Json(DeviceList {
+        devices: catalog.devices().await,
+    })
+}
+
+/// `GET /devices/{id}` — one device and the latest value of every field it has
+/// reported.
+#[utoipa::path(
+    get,
+    path = "/devices/{id}",
+    context_path = "/v1",
+    tag = "inventory",
+    params(("id" = String, Path, description = "Device id, as written in the devices file.")),
+    responses(
+        (status = 200, description = "The device, with one reading per field it has \
+             answered. `latest` is empty for a device that is configured but has \
+             never been reached.", body = DeviceDetail),
+        (status = 404, description = "No device has this id. Unlike the readings \
+             routes' 404, this one is a claim about configuration.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn read_device(
+    catalog: web::Data<dyn DeviceCatalog>,
+    store: web::Data<dyn ReadStore>,
+    path: web::Path<String>,
+) -> Result<web::Json<DeviceDetail>, ApiFailure> {
+    let id = path.into_inner();
+    let device = catalog
+        .device(&id)
+        .await
+        .ok_or_else(|| ApiFailure::NotFound(format!("no device '{id}' is configured")))?;
+
+    // Only after the device is known to exist: a store read for an unknown id
+    // would answer `[]` and turn a 404 into a plausible-looking 200.
+    let latest = store.latest_all(id).await?;
+    Ok(web::Json(DeviceDetail { device, latest }))
+}
+
+/// `GET /groups` — every configured group, ordered by id.
+#[utoipa::path(
+    get,
+    path = "/groups",
+    context_path = "/v1",
+    tag = "inventory",
+    responses(
+        (status = 200, description = "Every group in the devices file, ordered by id. \
+             Each carries its members in the order they were configured.",
+         body = GroupList),
+    ),
+)]
+pub async fn list_groups(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<GroupList> {
+    web::Json(GroupList {
+        groups: catalog.groups().await,
+    })
+}
+
+/// `GET /groups/{id}` — one group and the devices it addresses.
+#[utoipa::path(
+    get,
+    path = "/groups/{id}",
+    context_path = "/v1",
+    tag = "inventory",
+    params(("id" = String, Path, description = "Group id, as written in the devices file.")),
+    responses(
+        (status = 200, description = "The group and its member device ids, in \
+             configured order.", body = GroupSummary),
+        (status = 404, description = "No group has this id.", body = ApiError),
+    ),
+)]
+pub async fn read_group(
+    catalog: web::Data<dyn DeviceCatalog>,
+    path: web::Path<String>,
+) -> Result<web::Json<GroupSummary>, ApiFailure> {
+    let id = path.into_inner();
+    if let Some(group) = catalog.group(&id).await {
+        return Ok(web::Json(group));
+    }
+
+    // Devices and groups share one id namespace, so naming a device here is a
+    // different mistake from naming nothing: the fix is a different URL, not a
+    // different id. Saying which saves the caller a second round trip to find
+    // out.
+    let message = if catalog.device(&id).await.is_some() {
+        format!("'{id}' is a device, not a group; try /v1/devices/{id}")
+    } else {
+        format!("no group '{id}' is configured")
+    };
+    Err(ApiFailure::NotFound(message))
+}

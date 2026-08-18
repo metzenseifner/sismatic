@@ -35,8 +35,10 @@ use sismatic_store_memory::MemoryStore;
 mod harness;
 
 /// The device and field every seeded reading uses, and the values substituted
-/// into `{id}` and `{field}` when a documented path is requested.
-const DEVICE: &str = "atrium-101";
+/// into `{id}` and `{field}` when a documented path is requested. The device is
+/// the harness catalog's, so the write routes recognise it — an id the catalog
+/// does not hold now answers 404, which this suite reads as a missing route.
+const DEVICE: &str = harness::DEVICE;
 const FIELD: &str = "RUNNING_STATE";
 /// The command id `{id}` becomes under `/v1/commands/`. The first id the
 /// harness's counting stamp issues, which is the one the seeded submission
@@ -126,7 +128,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        12,
+        16,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -174,20 +176,23 @@ async fn every_documented_operation_is_one_the_server_serves() {
 
     // One operation per path here, but asserted rather than assumed: a path
     // that gained a second method and lost it in `startup` would otherwise slip
-    // through as "12 paths, still fine".
-    assert_eq!(checked, 12, "expected one operation per documented path");
+    // through as "16 paths, still fine".
+    assert_eq!(checked, 16, "expected one operation per documented path");
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
 /// hold.
 ///
-/// `{id}` is a *device* id everywhere except under `/v1/commands/`, where it is
-/// a command id — the two share a spelling and nothing else, and filling a
-/// command route with a device id would produce a handler's own honest 404 that
-/// looks exactly like a missing route.
+/// `{id}` means three different things depending on where it sits: a command id
+/// under `/v1/commands/`, a group id under `/v1/groups/`, and a device id
+/// everywhere else. They share a spelling and nothing else, and filling one
+/// route with another's id produces a handler's own honest 404 that looks
+/// exactly like a missing route.
 fn fill(template: &str) -> String {
     let id = if template.starts_with("/v1/commands/") {
         COMMAND
+    } else if template.starts_with("/v1/groups/") {
+        harness::GROUP
     } else {
         DEVICE
     };
@@ -207,8 +212,8 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        11,
-        "expected every readings and commands route under /v1, got {:?}",
+        15,
+        "expected every readings, commands and inventory route under /v1, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
     // ...and the health check deliberately outside it: a liveness probe is not

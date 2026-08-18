@@ -58,6 +58,7 @@ use serde::Deserialize;
 use sismatic_api_types::{
     Accepted, ApiError, CommandList, CommandRecord, DeviceId, Intent, RecordingPhase,
 };
+use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::outbox::{CommandLog, CommandSubmit, Submission};
 
 use crate::routes::error::ApiFailure;
@@ -71,6 +72,7 @@ use crate::stamp::Stamp;
 /// media type. `{"value": "Week 4"}` also survives a value that is a number or
 /// a boolean in the caller's language — every SIS write is text on the channel,
 /// and the quoting says so.
+///
 /// Derived unconditionally, unlike the DTOs in `sismatic-api-types`: those are
 /// shared with clients that have no use for utoipa, so their derive is behind a
 /// feature. This body is this crate's own and this crate always builds the
@@ -113,12 +115,25 @@ impl actix_web::FromRequest for IdempotencyKey {
 /// The one path from an [`Intent`] to a response. Every route below is this
 /// function plus an `Intent` constructor.
 async fn submit(
+    catalog: &dyn DeviceCatalog,
     port: &dyn CommandSubmit,
     stamp: &Stamp,
     device: DeviceId,
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
+    // Checked before anything is recorded. The outbox holds what was submitted
+    // and no list of what exists, so without this it would admit a command for
+    // a mistyped device against a fresh idle phase and answer `202` — a promise
+    // that cannot be kept, which the caller discovers only by polling a command
+    // that fails at dispatch. See `sismatic_store::catalog` for why this
+    // deliberately diverges from the read side's empty-list answer.
+    if !catalog.contains(&device).await {
+        return Err(ApiFailure::NotFound(format!(
+            "no device or group '{device}' is configured"
+        )));
+    }
+
     let (id, at) = stamp.next();
     let accepted: Accepted = port
         .submit(Submission {
@@ -152,16 +167,21 @@ async fn submit(
         (status = 202, description = "Recorded. No device has been contacted yet; \
              follow the `Location` header for the outcome.", body = Accepted),
         (status = 409, description = "This device is already recording.", body = ApiError),
+        (status = 404, description = "No device or group has this id. The catalog \
+             is the configured set, so this is a claim about the devices file.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn start_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
     port: web::Data<dyn CommandSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
     submit(
+        &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
@@ -183,16 +203,21 @@ pub async fn start_recording(
     responses(
         (status = 202, body = Accepted),
         (status = 409, description = "No recording is in progress.", body = ApiError),
+        (status = 404, description = "No device or group has this id. The catalog \
+             is the configured set, so this is a claim about the devices file.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn stop_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
     port: web::Data<dyn CommandSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
     submit(
+        &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
@@ -215,16 +240,21 @@ pub async fn stop_recording(
         (status = 202, body = Accepted),
         (status = 409, description = "Nothing is recording, or it is already paused.",
          body = ApiError),
+        (status = 404, description = "No device or group has this id. The catalog \
+             is the configured set, so this is a claim about the devices file.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn pause_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
     port: web::Data<dyn CommandSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
     submit(
+        &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
@@ -252,10 +282,14 @@ pub async fn pause_recording(
         (status = 409, description = "A recording is in progress, so this device's \
              metadata is sealed for the current epoch. Stop the recording, or write \
              the field before the next one starts.", body = ApiError),
+        (status = 404, description = "No device or group has this id. The catalog \
+             is the configured set, so this is a claim about the devices file.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn set_metadata(
+    catalog: web::Data<dyn DeviceCatalog>,
     port: web::Data<dyn CommandSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
@@ -270,7 +304,7 @@ pub async fn set_metadata(
         field: normalize_field(&field),
         value: body.into_inner().value,
     };
-    submit(&**port, &stamp, device, intent, key.0).await
+    submit(&**catalog, &**port, &stamp, device, intent, key.0).await
 }
 
 #[utoipa::path(
@@ -288,10 +322,14 @@ pub async fn set_metadata(
     responses(
         (status = 202, description = "Recorded. Settings carry no recording freeze, so \
              this is accepted in every phase.", body = Accepted),
+        (status = 404, description = "No device or group has this id. The catalog \
+             is the configured set, so this is a claim about the devices file.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn set_setting(
+    catalog: web::Data<dyn DeviceCatalog>,
     port: web::Data<dyn CommandSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
@@ -303,7 +341,7 @@ pub async fn set_setting(
         field: normalize_field(&field),
         value: body.into_inner().value,
     };
-    submit(&**port, &stamp, device, intent, key.0).await
+    submit(&**catalog, &**port, &stamp, device, intent, key.0).await
 }
 
 /// `GET /commands/{id}` — what became of one submitted command.

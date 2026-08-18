@@ -29,15 +29,16 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
-use sismatic_api_types::Timestamp;
-use sismatic_core::devices::config::Resolved;
+use sismatic_api_types::{ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
+use sismatic_core::devices::config::{DeviceConfig, Resolved};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_http_api::{ServerHandle, Stamp};
+use sismatic_store::DynDeviceCatalog;
 use sismatic_store::outbox::{DynCommandDrain, DynCommandLog, DynCommandSubmit};
 use sismatic_store::{DynReadStore, DynWriteStore};
-use sismatic_store_memory::{MemoryOutbox, MemoryStore};
+use sismatic_store_memory::{MemoryCatalog, MemoryOutbox, MemoryStore};
 use tokio::task::JoinHandle;
 use tracing::{info, instrument};
 use uuid::Uuid;
@@ -66,6 +67,23 @@ pub async fn run(
     let log: DynCommandLog = Arc::new(outbox.clone());
     let drain: DynCommandDrain = Arc::new(outbox);
 
+    // Built from the resolved config *before* the registry consumes it: the
+    // catalog is the public, secret-free projection of the same device set, and
+    // this is the only place both shapes are in scope. `DeviceSummary` has no
+    // `username` or `password` field at all, so there is nothing to redact —
+    // see `sismatic_api_types::device`.
+    let catalog: DynDeviceCatalog = Arc::new(MemoryCatalog::new(
+        devices.devices.iter().map(summarize).collect(),
+        devices
+            .groups
+            .iter()
+            .map(|group| GroupSummary {
+                id: group.id.clone(),
+                members: group.device_ids.clone(),
+            })
+            .collect(),
+    ));
+
     let registry = Arc::new(Registry::build(
         devices.devices,
         devices.groups,
@@ -77,7 +95,7 @@ pub async fn run(
     // opened no SSH connection and started no poll loop, and has therefore
     // nothing to unwind.
     let listener = TcpListener::bind((cfg.http.host.as_str(), cfg.http.port))?;
-    let server = sismatic_http_api::run(listener, read, submit, log, stamp())?;
+    let server = sismatic_http_api::run(listener, read, catalog, submit, log, stamp())?;
     let handle = server.handle();
 
     // Started *before* the poll loops so that for an eager device the first
@@ -151,6 +169,24 @@ pub async fn run(
     // number of loops being drained is known.
     sync.shutdown().await;
     served
+}
+
+/// Project a device's config onto the secret-free summary the API serves.
+///
+/// `status` is [`ConnectionStatus::Unknown`] and not a live reading, because
+/// the catalog is a snapshot of *configuration* taken before anything connects.
+/// Reporting warmth would need a second port over the [`Registry`], which is on
+/// the far side of the seam this design exists to keep — the variant is
+/// documented as "the server has not yet determined the state", which is
+/// exactly true here rather than a placeholder.
+fn summarize(config: &DeviceConfig) -> DeviceSummary {
+    DeviceSummary {
+        id: config.id.clone(),
+        host: config.host.clone(),
+        port: config.port,
+        eager: config.eager,
+        status: ConnectionStatus::Unknown,
+    }
 }
 
 /// The real id-and-instant source the write handlers are given.

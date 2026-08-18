@@ -27,9 +27,11 @@ use std::sync::Arc;
 
 use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 
+pub mod catalog;
 pub mod error;
 pub mod outbox;
 
+pub use catalog::{DeviceCatalog, DynDeviceCatalog};
 pub use error::{ReadError, WriteError};
 
 /// A convenient object-safe handle.

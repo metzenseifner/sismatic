@@ -29,6 +29,11 @@
 //! ```text
 //! GET  /health_check                               liveness; consults nothing
 //!
+//! GET  /v1/devices                                 every configured device
+//! GET  /v1/devices/{id}                            one device + its readings
+//! GET  /v1/groups                                  every configured group
+//! GET  /v1/groups/{id}                             one group and its members
+//!
 //! GET  /v1/devices/{id}/fields                     every field's latest value
 //! GET  /v1/devices/{id}/fields/{field}             one field's latest value
 //! GET  /v1/devices/{id}/fields/{field}/history     one field over a time span
@@ -78,6 +83,16 @@
 //! is exactly one verb, and it is one that *records a request* rather than
 //! performing it: no handler here can reach a device, which is what keeps the
 //! `sismatic-core` seam intact while the API gained a write side.
+//!
+//! The [`DeviceCatalog`] is the same trick applied to a third question. The
+//! inventory routes need to know which devices exist, and the obvious source —
+//! `sismatic-core`'s `Registry` — is exactly the type this crate may not name.
+//! So the composition root projects it into DTOs once at startup and passes the
+//! projection. This crate learns *what* is configured and nothing about how to
+//! reach it: `DeviceSummary` has no credential field at all, so there is no
+//! secret here to leak rather than a secret that is carefully not printed.
+//!
+//! [`DeviceCatalog`]: sismatic_store::DeviceCatalog
 //!
 //! The store is registered with [`web::Data::from`], which adopts the existing
 //! `Arc` rather than wrapping it in a second one, so a handler's
