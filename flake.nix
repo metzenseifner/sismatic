@@ -120,7 +120,7 @@
             strictDeps = true;
 
             # Build-time tools (compilers, codegen, pkg-config) go here.
-            # russh -> aws-lc-sys builds AWS-LC from C source. The CLI and web
+            # russh -> aws-lc-sys builds AWS-LC from C source. The CLI
             # front-ends always enable core's `ssh` feature, and cargo unifies
             # features across the workspace, so every build here (deps, clippy,
             # nextest, the binaries) compiles that C source and needs cmake +
@@ -167,20 +167,10 @@
             }
           );
 
-          # The HTTP server binary (`sismatic-web`).
-          web = craneLib.buildPackage (
-            individualCrateArgs
-            // {
-              pname = "sismatic-web";
-              cargoExtraArgs = "-p sismatic-web";
-              meta.mainProgram = "sismatic-web";
-            }
-          );
-
           # The composition-root binary (`sismatic-server`) — the deployable
           # artifact, wired up from core, the HTTP API, the store and sync.
           #
-          # Unlike cli and web this one gets a dependency layer of its own,
+          # Unlike cli this one gets a dependency layer of its own,
           # scoped exactly the way the build is scoped. The shared
           # `cargoArtifacts` is resolved workspace-wide, and for
           # `utoipa-swagger-ui` that lands on a different feature variant than
@@ -337,22 +327,20 @@
           # The published artifact. Naming, contents and checksum live here so
           # the workflow stays a dispatcher — `nix build .#server-release`
           # produces byte-identical output on a laptop and on a runner.
-          serverRelease =
-            pkgs.runCommand "sismatic-server-release-${version}-${releaseTarget}" { }
-              ''
-                name="sismatic-server-${version}-${releaseTarget}"
-                mkdir -p "$name" "$out"
-                cp ${serverPortable}/bin/sismatic-server "$name/"
-                cp ${./LICENSE} "$name/LICENSE"
-                cp ${./README.md} "$name/README.md"
-                chmod -R u+w "$name"
+          serverRelease = pkgs.runCommand "sismatic-server-release-${version}-${releaseTarget}" { } ''
+            name="sismatic-server-${version}-${releaseTarget}"
+            mkdir -p "$name" "$out"
+            cp ${serverPortable}/bin/sismatic-server "$name/"
+            cp ${./LICENSE} "$name/LICENSE"
+            cp ${./README.md} "$name/README.md"
+            chmod -R u+w "$name"
 
-                # Reproducible archive: sorted entries, fixed mtime, no owner
-                # names, and gzip -n so the header carries no timestamp either.
-                tar --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner \
-                  -cf - "$name" | gzip -9n > "$out/$name.tar.gz"
-                ( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
-              '';
+            # Reproducible archive: sorted entries, fixed mtime, no owner
+            # names, and gzip -n so the header carries no timestamp either.
+            tar --sort=name --mtime='@1' --owner=0 --group=0 --numeric-owner \
+              -cf - "$name" | gzip -9n > "$out/$name.tar.gz"
+            ( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          '';
 
           # Source for the wheel: the cargo sources crane already filters,
           # plus the packaging files maturin reads (pyproject.toml and the
@@ -505,7 +493,7 @@
             # `serverRelease` is deliberately not here: it would drag the musl
             # toolchain into every `nix flake check`, and the release matrix in
             # CI builds it on each architecture anyway.
-            inherit cli web server;
+            inherit cli server;
 
             # Clippy as a separate derivation: CI blocks on lints, but
             # downstream consumers can still build the package without
@@ -557,8 +545,8 @@
               let
                 cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
                 releasePlz = builtins.fromTOML (builtins.readFile ./release-plz.toml);
-                # Dir basename != package name (crates/sismatic-web/backend ->
-                # "sismatic-web"), so read each member's own manifest for the
+                # Dir basename != package name necessarily
+                # so read each member's own manifest for the
                 # real name.
                 memberNames = map (
                   m: (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml"))).package.name
@@ -631,15 +619,35 @@
                     n = lib.length parts;
                   in
                   if c 0 != 0 then
-                    [ (c 0 + 1) 0 0 ]
+                    [
+                      (c 0 + 1)
+                      0
+                      0
+                    ]
                   else if n == 1 then
-                    [ 1 0 0 ]
+                    [
+                      1
+                      0
+                      0
+                    ]
                   else if c 1 != 0 then
-                    [ 0 (c 1 + 1) 0 ]
+                    [
+                      0
+                      (c 1 + 1)
+                      0
+                    ]
                   else if n == 2 then
-                    [ 0 1 0 ]
+                    [
+                      0
+                      1
+                      0
+                    ]
                   else
-                    [ 0 0 (c 2 + 1) ];
+                    [
+                      0
+                      0
+                      (c 2 + 1)
+                    ];
 
                 # a >= b, on [ major minor patch ].
                 atLeast =
@@ -676,9 +684,10 @@
                 # which this same check covers at the root.
                 depsIn =
                   file: table:
-                  lib.mapAttrsToList (name: dep: { inherit file name; req = dep.version or null; }) (
-                    lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table
-                  );
+                  lib.mapAttrsToList (name: dep: {
+                    inherit file name;
+                    req = dep.version or null;
+                  }) (lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table);
 
                 deps =
                   depsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
@@ -691,14 +700,10 @@
 
                 # `*` imposes no bound at all, so the workspace version satisfies
                 # it by construction; cargo packages it happily.
-                ok =
-                  d:
-                  d.req == "*"
-                  || (d.req != null && reqParts d.req != null && satisfies (reqParts d.req));
+                ok = d: d.req == "*" || (d.req != null && reqParts d.req != null && satisfies (reqParts d.req));
 
                 offenders = lib.filter (d: !(ok d)) deps;
-                describe =
-                  d: "  ${d.file}: ${d.name} -> ${if d.req == null then "(no version field)" else d.req}";
+                describe = d: "  ${d.file}: ${d.name} -> ${if d.req == null then "(no version field)" else d.req}";
               in
               assert lib.assertMsg (offenders == [ ]) ''
                 Internal path dependencies without a usable version requirement
@@ -735,7 +740,6 @@
             #     cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
             #
             #     # package name -> { dir; manifest }. Dir basename != package name
-            #     # (crates/sismatic-web/backend -> "sismatic-web").
             #     members = lib.listToAttrs (
             #       map (
             #         dir:
@@ -833,8 +837,8 @@
 
           packages = {
             default = cli;
-            # `nix build .#cli` / `.#web` / `.#server` -> the binaries.
-            inherit cli web server;
+            # `nix build .#cli` / `.#server` -> the binaries.
+            inherit cli server;
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
 
@@ -861,11 +865,6 @@
             default = {
               type = "app";
               program = pkgs.lib.getExe cli;
-            };
-            # `nix run .#web` starts the HTTP server.
-            web = {
-              type = "app";
-              program = pkgs.lib.getExe web;
             };
             # `nix run .#server` starts the composition root.
             server = {

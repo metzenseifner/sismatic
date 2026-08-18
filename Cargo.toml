@@ -10,7 +10,6 @@ members = [
   "crates/sismatic-store",
   "crates/sismatic-store-memory",
   "crates/sismatic-sync",
-  "crates/sismatic-web/backend",
   "crates/sismatic-intent-relay",
 ]
 
