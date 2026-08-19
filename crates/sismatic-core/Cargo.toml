@@ -50,8 +50,4 @@ simulator = ["ssh", "yaml", "dep:clap", "dep:tracing-subscriber"]
 [dev-dependencies]
 tracing-bunyan-formatter.workspace = true
 tracing-subscriber.workspace = true
-# Self dev-dependency so this crate's own integration tests get `simulator`.
-# Nothing in the workspace depends on core with that feature (deliberately —
-# see above), and the workspace-root `cargo nextest` passes no `--features`, so
-# without this the simulator tests would silently never run in CI.
-sismatic-core = { path = ".", features = ["simulator"] }
+sismatic-core = { workspace = true, features = ["simulator"] }
