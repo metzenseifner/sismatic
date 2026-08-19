@@ -23,6 +23,7 @@
 //! are then read by nobody, and the first poll of every field races to open the
 //! same connection.
 pub mod configuration;
+pub mod status;
 pub mod telemetry;
 
 use std::net::TcpListener;
@@ -37,8 +38,8 @@ use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_http_api::{ServerHandle, Stamp};
-use sismatic_store::DynDeviceCatalog;
 use sismatic_store::outbox::{DynCommandDrain, DynCommandLog, DynCommandSubmit};
+use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox, MemoryStore};
 use tokio::task::JoinHandle;
@@ -46,6 +47,7 @@ use tracing::{info, instrument};
 use uuid::Uuid;
 
 use crate::configuration::ServerConfig;
+use crate::status::RegistryStatus;
 
 /// Start the "sync" write-side and the read-side "http-api", and run until
 /// `shutdown` resolves — or until the server stops on its own — then stop the
@@ -85,12 +87,17 @@ pub async fn run(
         Arc::new(RusshConnector),
     ));
 
+    // Over the registry rather than the config: this is the one read whose
+    // answer changes without anything being written, which is the whole reason
+    // it is a port of its own rather than a field the catalog could fill.
+    let status: DynDeviceStatus = Arc::new(RegistryStatus::new(Arc::clone(&registry)));
+
     // Bound and built before anything is *started*, so the one failure that is
     // likely here — the port is taken — is reported by a process that has
     // opened no SSH connection and started no poll loop, and has therefore
     // nothing to unwind.
     let listener = TcpListener::bind((cfg.http.host.as_str(), cfg.http.port))?;
-    let server = sismatic_http_api::run(listener, read, catalog, submit, log, stamp())?;
+    let server = sismatic_http_api::run(listener, read, catalog, status, submit, log, stamp())?;
     let handle = server.handle();
 
     // Started *before* the poll loops so that for an eager device the first
@@ -168,12 +175,11 @@ pub async fn run(
 
 /// Project a device's config onto the secret-free summary the API serves.
 ///
-/// `status` is [`ConnectionStatus::Unknown`] and not a live reading, because
-/// the catalog is a snapshot of *configuration* taken before anything connects.
-/// Reporting warmth would need a second port over the [`Registry`], which is on
-/// the far side of the seam this design exists to keep — the variant is
-/// documented as "the server has not yet determined the state", which is
-/// exactly true here rather than a placeholder.
+/// `status` is [`ConnectionStatus::Unknown`], and stays that way: the catalog
+/// is a snapshot of *configuration* taken before anything connects, so it has
+/// nothing else it could truthfully say. The live value comes from
+/// [`RegistryStatus`] and is overlaid by the two device routes — which is why
+/// this is a second port rather than a field this function could fill.
 fn summarize(config: &DeviceConfig) -> DeviceSummary {
     DeviceSummary {
         id: config.id.clone(),

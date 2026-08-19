@@ -101,6 +101,37 @@ struct Link {
     cold_until: Option<Instant>,
 }
 
+/// What a device's connection looks like *right now*, without dialing.
+///
+/// A snapshot for an operator, not a decision input. It is stale the instant it
+/// is taken — nothing here reserves the connection it describes — so a caller
+/// that wants to *use* a device still calls [`Device::run`] and handles the
+/// error. What this is for is the status dot on a dashboard: the four states
+/// are the four things an operator can usefully be told, and each one implies a
+/// different next move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connectivity {
+    /// A connection is open and idle. The next command reuses it.
+    Warm,
+    /// A command is in flight on this device.
+    ///
+    /// A distinct state rather than folded into [`Warm`](Connectivity::Warm),
+    /// because it is what the observation can actually support: the connection
+    /// lock is held, so this device either has a warm connection or is dialing
+    /// one, and which of the two cannot be known without waiting for the answer
+    /// — which is exactly what a status read must not do.
+    Busy,
+    /// No connection is open and nothing says one would fail. The ordinary
+    /// resting state of a device that is not marked `eager`.
+    Cold,
+    /// No connection, and a recent dial failed: the cold gate is shut, so a
+    /// command issued now fails without even dialing.
+    ///
+    /// The one state that says *the device is down* rather than merely idle,
+    /// which is the distinction [`Cold`](Connectivity::Cold) cannot draw.
+    Gated,
+}
+
 /// Whether a call is allowed to dial a device the cold gate is holding shut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dial {
@@ -138,6 +169,43 @@ impl Device {
     /// This device's resolved config.
     pub fn config(&self) -> &DeviceConfig {
         &self.config
+    }
+
+    /// This device's connection state, without dialing and without waiting.
+    ///
+    /// # Why this reads the lock rather than a mirrored flag
+    ///
+    /// The obvious alternative is an `AtomicU8` updated alongside `link`. It
+    /// would answer [`Busy`](Connectivity::Busy) devices more precisely, and it
+    /// would be wrong sooner or later: `conn` and `cold_until` are written from
+    /// five places between `exec` and `dial`, and a mirror is five chances for
+    /// the two to disagree — on a value whose
+    /// whole job is to be believed. Reading the real state has no such failure
+    /// mode, because there is only one state.
+    ///
+    /// `try_lock` and not `lock().await`, because a status read must never
+    /// queue behind an SSH exchange. A `GET` over a fleet mid-poll would
+    /// otherwise take `command_timeout` per busy device, and an endpoint that
+    /// reports on a slow device by *being* slow is the failure it exists to
+    /// describe. A held lock is not a missing answer, either — it means a
+    /// command is running, which is [`Busy`](Connectivity::Busy).
+    ///
+    /// Synchronous, so it composes into an `async` caller without an await
+    /// point and cannot accidentally become a blocking one.
+    pub fn connectivity(&self) -> Connectivity {
+        let Ok(link) = self.link.try_lock() else {
+            return Connectivity::Busy;
+        };
+        if link.conn.is_some() {
+            return Connectivity::Warm;
+        }
+        // A gate armed in the past has expired; the next caller will dial
+        // through it, so reporting the device as down would be a stale answer
+        // rather than a current one.
+        match link.cold_until {
+            Some(until) if Instant::now() < until => Connectivity::Gated,
+            _ => Connectivity::Cold,
+        }
     }
 
     /// Run `instruction`, opening or reusing the warm connection as needed.
@@ -593,5 +661,102 @@ mod tests {
         ) -> Result<Box<dyn Transport>, ConnectError> {
             std::future::pending().await
         }
+    }
+    // ---- connectivity ----------------------------------------------------
+    //
+    // The four states, driven through the real state machine rather than
+    // asserted against a mirrored flag.
+
+    #[tokio::test]
+    async fn a_device_that_has_never_been_used_is_cold() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let device = Device::new(config(500), connector);
+        assert_eq!(device.connectivity(), Connectivity::Cold);
+    }
+
+    #[tokio::test]
+    async fn a_device_that_ran_a_command_is_warm() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let device = Device::new(config(500), connector);
+        device.run(&port_query()).await.expect("the command");
+        // The connection is cached for reuse, which is the whole reason a
+        // device holds one.
+        assert_eq!(device.connectivity(), Connectivity::Warm);
+    }
+
+    /// The state that says *down* rather than merely idle. A failed dial arms
+    /// the cold gate, and until it expires a command fails without dialing —
+    /// which is what an operator wants a red dot for.
+    #[tokio::test]
+    async fn a_device_whose_dial_failed_is_gated() {
+        let device = Device::new(
+            gated_config(500, Some(Duration::from_secs(3600))),
+            Arc::new(FailingConnector::new()),
+        );
+
+        device.run(&port_query()).await.expect_err("the dial fails");
+
+        assert_eq!(device.connectivity(), Connectivity::Gated);
+    }
+
+    /// ...and an *expired* gate is not `Gated`: the next caller will dial
+    /// through it, so reporting the device as down would be a stale answer
+    /// rather than a current one.
+    #[tokio::test]
+    async fn an_expired_gate_reads_as_cold_again() {
+        let device = Device::new(
+            gated_config(500, Some(Duration::from_millis(50))),
+            Arc::new(FailingConnector::new()),
+        );
+        device.run(&port_query()).await.expect_err("the dial fails");
+        assert_eq!(device.connectivity(), Connectivity::Gated);
+
+        // A real sleep, as the neighbouring gate test uses: this crate's tokio
+        // has no `test-util`, so there is no clock to pause.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(device.connectivity(), Connectivity::Cold);
+    }
+
+    /// A device with no gate configured never reads as `Gated`, however many
+    /// dials fail — the operator turned the gate off, so nothing is holding
+    /// anyone back and "down" is not a state this device has.
+    #[tokio::test]
+    async fn a_device_with_no_backoff_is_never_gated() {
+        let device = Device::new(config(500), Arc::new(FailingConnector::new()));
+        device.run(&port_query()).await.expect_err("the dial fails");
+        assert_eq!(device.connectivity(), Connectivity::Cold);
+    }
+
+    /// The property the whole design turns on: a status read never waits for a
+    /// command. Were this `lock().await`, a `GET` over a fleet mid-poll would
+    /// take `command_timeout` per busy device — an endpoint reporting on a slow
+    /// device by *being* slow.
+    #[tokio::test]
+    async fn a_status_read_does_not_wait_for_an_in_flight_command() {
+        // A connector that never completes, so the dial holds the lock for as
+        // long as the test cares to look.
+        let device = Arc::new(Device::new(config(60_000), Arc::new(StallingConnector)));
+
+        let busy = tokio::spawn({
+            let device = Arc::clone(&device);
+            async move { device.run(&port_query()).await }
+        });
+
+        // Each of these reads returns immediately; the loop is waiting for the
+        // spawned task to take the lock, not for the read to answer.
+        for _ in 0..1000 {
+            if device.connectivity() == Connectivity::Busy {
+                busy.abort();
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        busy.abort();
+        panic!("the command never took the lock");
     }
 }

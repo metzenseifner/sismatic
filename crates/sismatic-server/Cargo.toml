@@ -41,6 +41,10 @@ sismatic-sync = { workspace = true, features = ["driver"] }
 
 #  Third-party dependencies
 anyhow.workspace = true
+# The store's ports are async traits, and the root implements one of them:
+# `status::RegistryStatus` is the adapter that cannot live in
+# `sismatic-store-memory`, because it reads a `sismatic-core` registry.
+async-trait.workspace = true
 # The write side's `Stamp`: the root is where a fresh command id and the instant
 # it was accepted are minted, so that `sismatic-http-api` needs neither a UUID
 # generator nor a clock and its handlers stay pure functions of their

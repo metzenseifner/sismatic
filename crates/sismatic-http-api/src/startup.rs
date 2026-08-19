@@ -23,6 +23,7 @@ use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
 use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
 use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
+use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -59,6 +60,7 @@ pub fn run(
     listener: TcpListener,
     store: DynReadStore,
     catalog: DynDeviceCatalog,
+    status: DynDeviceStatus,
     submit: DynCommandSubmit,
     log: DynCommandLog,
     stamp: Stamp,
@@ -68,6 +70,7 @@ pub fn run(
     // the type say the API owns a store rather than shares one.
     let store: web::Data<dyn ReadStore> = web::Data::from(store);
     let catalog: web::Data<dyn DeviceCatalog> = web::Data::from(catalog);
+    let status: web::Data<dyn DeviceStatus> = web::Data::from(status);
     let submit: web::Data<dyn CommandSubmit> = web::Data::from(submit);
     let log: web::Data<dyn CommandLog> = web::Data::from(log);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
@@ -86,6 +89,7 @@ pub fn run(
         App::new()
             .app_data(store.clone())
             .app_data(catalog.clone())
+            .app_data(status.clone())
             .app_data(submit.clone())
             .app_data(log.clone())
             .app_data(stamp.clone())

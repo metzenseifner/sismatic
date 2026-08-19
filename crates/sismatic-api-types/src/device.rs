@@ -12,19 +12,38 @@ use crate::command::Barrier;
 use crate::reading::Reading;
 use crate::{DeviceId, GroupId};
 
-/// Whether the server currently holds a warm connection to a device. Purely
-/// informational (a status dot on a dashboard); it says nothing about the
-/// credentials or transport.
+/// What the server's connection to a device looks like right now.
+///
+/// Purely informational — a status dot on a dashboard — and stale the instant
+/// it is read: nothing here reserves a connection, so a caller that wants to
+/// *use* the device still issues a command and handles the failure.
+///
+/// The wire mirror of `sismatic_core::devices::device::Connectivity`, plus
+/// [`Unknown`](ConnectionStatus::Unknown), which core has no equivalent of
+/// because core always knows. The composition root maps the four states with a
+/// wildcard-free match, so a fifth is a build error at the seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionStatus {
-    /// A connection is open.
+    /// A connection is open and idle. The next command reuses it.
     Warm,
-    /// No connection is currently open.
+    /// A command is in flight. The device either holds a connection or is
+    /// opening one, and telling those apart would mean waiting for the command
+    /// to finish — which a status read must not do.
+    Busy,
+    /// No connection is open, and nothing says one would fail. The resting
+    /// state of a device that is not marked `eager`.
     Cold,
-    /// The server has not yet determined the state.
+    /// A recent dial failed and the cold-backoff window is still open, so a
+    /// command issued now fails without even dialing.
+    ///
+    /// The one value that says the device is *down* rather than merely idle,
+    /// which is the distinction [`Cold`](ConnectionStatus::Cold) cannot draw.
+    Gated,
+    /// The server has not determined the state — no status port is wired, or
+    /// the id is configured but absent from the running registry.
     Unknown,
 }
 

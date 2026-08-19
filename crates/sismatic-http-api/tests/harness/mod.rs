@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sismatic_api_types::{Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
 use sismatic_http_api::Stamp;
 use sismatic_store::outbox::{DynCommandLog, DynCommandSubmit};
-use sismatic_store::{DynDeviceCatalog, DynReadStore};
+use sismatic_store::status::DeviceStatus;
+use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox};
 
 /// The instant every submitted command is stamped with. Fixed, because no
@@ -88,13 +89,33 @@ pub fn serve_with(
     store: DynReadStore,
     catalog: MemoryCatalog,
 ) -> MemoryOutbox {
+    serve_with_status(listener, store, catalog, StatedStatus::default())
+}
+
+/// [`serve_with`] over a stated connection status, for the suites that are
+/// about what the status port reports.
+pub fn serve_with_status(
+    listener: TcpListener,
+    store: DynReadStore,
+    catalog: MemoryCatalog,
+    status: StatedStatus,
+) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
+    let status: DynDeviceStatus = Arc::new(status);
     let submit: DynCommandSubmit = Arc::new(outbox.clone());
     let log: DynCommandLog = Arc::new(outbox.clone());
 
-    let server = sismatic_http_api::run(listener, store, catalog, submit, log, counting_stamp())
-        .expect("building the server");
+    let server = sismatic_http_api::run(
+        listener,
+        store,
+        catalog,
+        status,
+        submit,
+        log,
+        counting_stamp(),
+    )
+    .expect("building the server");
     drop(tokio::spawn(server));
     outbox
 }
@@ -112,11 +133,52 @@ pub fn spawn(store: DynReadStore) -> (String, MemoryOutbox) {
 /// [`spawn`] over a stated catalog. Returns the base URL, the outbox and the
 /// port the kernel chose.
 pub fn spawn_with(store: DynReadStore, catalog: MemoryCatalog) -> (String, MemoryOutbox, u16) {
+    spawn_with_status(store, catalog, StatedStatus::default())
+}
+
+/// [`spawn_with`] over a stated connection status.
+pub fn spawn_with_status(
+    store: DynReadStore,
+    catalog: MemoryCatalog,
+    status: StatedStatus,
+) -> (String, MemoryOutbox, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
     let port = listener
         .local_addr()
         .expect("reading the bound address")
         .port();
-    let outbox = serve_with(listener, store, catalog);
+    let outbox = serve_with_status(listener, store, catalog, status);
     (format!("http://127.0.0.1:{port}"), outbox, port)
+}
+
+/// A [`DeviceStatus`] that reports whatever it was told to.
+///
+/// The one collaborator here that is a double rather than the real adapter, and
+/// for a reason the others do not have: the real one reads a `sismatic-core`
+/// `Registry`, which this crate may not name. That is the seam working — a test
+/// of these routes states the status it wants observed and asserts it comes
+/// back, which is the whole of what the routes are responsible for.
+#[derive(Debug, Default, Clone)]
+pub struct StatedStatus(pub std::collections::BTreeMap<String, ConnectionStatus>);
+
+impl StatedStatus {
+    pub fn of(pairs: &[(&str, ConnectionStatus)]) -> Self {
+        Self(
+            pairs
+                .iter()
+                .map(|(id, status)| ((*id).to_owned(), *status))
+                .collect(),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DeviceStatus for StatedStatus {
+    async fn status(&self, id: &str) -> ConnectionStatus {
+        self.0.get(id).copied().unwrap_or(ConnectionStatus::Unknown)
+    }
+
+    async fn all(&self) -> std::collections::BTreeMap<String, ConnectionStatus> {
+        self.0.clone()
+    }
 }

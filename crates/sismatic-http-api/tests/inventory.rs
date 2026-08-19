@@ -488,3 +488,85 @@ async fn a_groups_barrier_policy_is_visible_on_the_inventory_route() {
     assert_eq!(body["barrier_timeout_secs"], 30);
     assert_eq!(body["barrier"], "dispatch_ready");
 }
+
+// ---- live connection status --------------------------------------------
+
+/// The gap the status port closes. Before it, every device reported `unknown`
+/// because the catalog is a snapshot of configuration taken before the process
+/// connects to anything.
+#[tokio::test]
+async fn the_index_reports_each_devices_live_connection_state() {
+    let catalog = MemoryCatalog::new(
+        vec![
+            summary("warm-one", "10.0.0.1", true),
+            summary("down-one", "10.0.0.2", false),
+            summary("idle-one", "10.0.0.3", false),
+        ],
+        vec![],
+    );
+    let status = harness::StatedStatus::of(&[
+        ("warm-one", ConnectionStatus::Warm),
+        ("down-one", ConnectionStatus::Gated),
+        ("idle-one", ConnectionStatus::Cold),
+    ]);
+    let (address, ..) =
+        harness::spawn_with_status(Arc::new(MemoryStore::default()), catalog, status);
+
+    let (code, body) = get(format!("{address}/v1/devices")).await;
+
+    assert_eq!(code, 200);
+    let states: Vec<(&str, &str)> = body["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .map(|d| {
+            (
+                d["id"].as_str().expect("id"),
+                d["status"].as_str().expect("status"),
+            )
+        })
+        .collect();
+    // `gated` is the one that matters operationally: it says the device is
+    // *down*, where `cold` says only that nothing has connected to it yet.
+    assert_eq!(
+        states,
+        [
+            ("down-one", "gated"),
+            ("idle-one", "cold"),
+            ("warm-one", "warm"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_detail_route_reports_the_live_state_too() {
+    let catalog = MemoryCatalog::new(vec![summary("busy-one", "10.0.0.1", false)], vec![]);
+    let status = harness::StatedStatus::of(&[("busy-one", ConnectionStatus::Busy)]);
+    let (address, ..) =
+        harness::spawn_with_status(Arc::new(MemoryStore::default()), catalog, status);
+
+    let (code, body) = get(format!("{address}/v1/devices/busy-one")).await;
+
+    assert_eq!(code, 200);
+    assert_eq!(body["device"]["status"], "busy");
+}
+
+/// A device the status port does not know about keeps `unknown` rather than
+/// being invented as `cold`. The two sources are built from one config so it
+/// cannot happen in the server — but the route must not paper over it if it
+/// ever does, because `cold` is a claim and `unknown` is an admission.
+#[tokio::test]
+async fn a_device_the_status_port_does_not_know_stays_unknown() {
+    let catalog = MemoryCatalog::new(vec![summary("ghost", "10.0.0.1", false)], vec![]);
+    let (address, ..) = harness::spawn_with_status(
+        Arc::new(MemoryStore::default()),
+        catalog,
+        harness::StatedStatus::default(),
+    );
+
+    let (_, body) = get(format!("{address}/v1/devices")).await;
+    assert_eq!(body["devices"][0]["status"], "unknown");
+
+    let (_, body) = get(format!("{address}/v1/devices/ghost")).await;
+    assert_eq!(body["device"]["status"], "unknown");
+}

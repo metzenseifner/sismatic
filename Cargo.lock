@@ -3295,6 +3295,7 @@ name = "sismatic-server"
 version = "0.2.25"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "config",

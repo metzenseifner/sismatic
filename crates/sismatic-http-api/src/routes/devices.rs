@@ -21,6 +21,16 @@
 //! from the catalog means "no devices are configured", and those call for very
 //! different actions.
 //!
+//! # `status` is live, and only here
+//!
+//! The catalog's [`DeviceSummary::status`] is always `unknown` — it is a
+//! snapshot of configuration taken before the process connected to anything.
+//! Both device routes overlay the real value from [`DeviceStatus`], which reads
+//! the running registry without dialing. That makes these the only two routes
+//! whose answer can change with nothing having been written.
+//!
+//! [`DeviceSummary::status`]: sismatic_api_types::DeviceSummary::status
+//!
 //! # The one route that reads both
 //!
 //! [`read_device`] joins the two sides: the catalog says the device exists and
@@ -32,6 +42,7 @@ use actix_web::web;
 use sismatic_api_types::{ApiError, DeviceDetail, DeviceList, GroupList, GroupSummary};
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
+use sismatic_store::status::DeviceStatus;
 
 use crate::routes::error::ApiFailure;
 
@@ -43,14 +54,38 @@ use crate::routes::error::ApiFailure;
     tag = "inventory",
     responses(
         (status = 200, description = "Every device in the devices file, ordered by \
-             id. Empty means none are configured — unlike an empty readings list, \
-             which means none have answered.", body = DeviceList),
+             id, each with its live connection state. Empty means none are \
+             configured — unlike an empty readings list, which means none have \
+             answered.", body = DeviceList),
     ),
 )]
-pub async fn list_devices(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<DeviceList> {
-    web::Json(DeviceList {
-        devices: catalog.devices().await,
-    })
+pub async fn list_devices(
+    catalog: web::Data<dyn DeviceCatalog>,
+    status: web::Data<dyn DeviceStatus>,
+) -> web::Json<DeviceList> {
+    // The catalog is a snapshot of configuration taken before the process
+    // connected to anything, so the `status` it carries is always `Unknown`.
+    // The live value is overlaid here, which is the only place both are in
+    // scope. One `all()` for the fleet rather than a lookup per device: the
+    // adapter walks its registry once, and a per-device call would walk it once
+    // each.
+    let live = status.all().await;
+    let devices = catalog
+        .devices()
+        .await
+        .into_iter()
+        .map(|mut device| {
+            // A device in the catalog and absent from the registry stays
+            // `Unknown` — the two are built from one config, so it cannot
+            // happen, and inventing `Cold` for it would be a claim rather than
+            // an observation.
+            if let Some(&observed) = live.get(&device.id) {
+                device.status = observed;
+            }
+            device
+        })
+        .collect();
+    web::Json(DeviceList { devices })
 }
 
 /// `GET /devices/{id}` — one device and the latest value of every field it has
@@ -72,14 +107,16 @@ pub async fn list_devices(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<De
 )]
 pub async fn read_device(
     catalog: web::Data<dyn DeviceCatalog>,
+    status: web::Data<dyn DeviceStatus>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<String>,
 ) -> Result<web::Json<DeviceDetail>, ApiFailure> {
     let id = path.into_inner();
-    let device = catalog
+    let mut device = catalog
         .device(&id)
         .await
         .ok_or_else(|| ApiFailure::NotFound(format!("no device '{id}' is configured")))?;
+    device.status = status.status(&id).await;
 
     // Only after the device is known to exist: a store read for an unknown id
     // would answer `[]` and turn a 404 into a plausible-looking 200.
