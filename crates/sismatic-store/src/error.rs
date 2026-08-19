@@ -15,7 +15,9 @@
 
 use std::fmt;
 
-use sismatic_api_types::{ApiError, ErrorCode};
+use sismatic_api_types::{ApiError, ErrorCode, Phase};
+
+use crate::outbox::SubmitError;
 
 /// Why a read from the store failed.
 ///
@@ -87,5 +89,55 @@ impl From<ReadError> for ApiError {
 impl From<WriteError> for ApiError {
     fn from(e: WriteError) -> Self {
         ApiError::coded(ErrorCode::Internal, e.to_string())
+    }
+}
+
+/// A submission failure is the one store error whose two halves are not both
+/// ours. A rejection is the caller's problem — it asked for something the
+/// device's write-side state does not allow — and a backend failure is ours, so
+/// the two take different codes. The mapping lives here, where `store` already
+/// meets `api-types`, for the same reason the two above do.
+impl From<SubmitError> for ApiError {
+    fn from(e: SubmitError) -> Self {
+        match e {
+            SubmitError::Rejected {
+                device,
+                rejection,
+                phase,
+            } => ApiError::rejected(
+                rejection,
+                // The prose stays, and stays complete, even though the
+                // rejection is now a field: this is the string that lands in a
+                // log, and a reader there has no other way to learn which
+                // device refused. The device because a group submission is
+                // refused as a whole by one member, and "which one" is the
+                // first thing an operator needs; the phase because it is what
+                // the caller would have to change — "not_recording" alone does
+                // not say a start has to come first.
+                format!(
+                    "{rejection} (device '{device}', phase: {})",
+                    phase_name(phase)
+                ),
+            ),
+            SubmitError::Malformed(msg) => ApiError::coded(
+                // The caller built a nonsensical submission, so this is a bug
+                // in the server rather than in the request — no wording of the
+                // request could have avoided it.
+                ErrorCode::Internal,
+                format!("malformed submission: {msg}"),
+            ),
+            SubmitError::Backend(msg) => ApiError::coded(ErrorCode::Internal, msg),
+        }
+    }
+}
+
+/// The wire spelling of a phase — the same `snake_case` its `Serialize` impl
+/// produces, so the message and the `GET .../recording` body agree on what to
+/// call a state.
+const fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Idle => "idle",
+        Phase::Recording => "recording",
+        Phase::Paused => "paused",
     }
 }

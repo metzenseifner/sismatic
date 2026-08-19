@@ -16,6 +16,7 @@ use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, ResponseError};
 use sismatic_api_types::{ApiError, ErrorCode};
 use sismatic_store::ReadError;
+use sismatic_store::outbox::SubmitError;
 
 /// A failed read-side request.
 #[derive(Debug)]
@@ -31,6 +32,15 @@ pub enum ApiFailure {
     BadRequest(String),
     /// The storage backend failed. Ours, not the caller's.
     Store(ReadError),
+    /// A submission the outbox refused, or the backend failure that stopped it
+    /// being recorded.
+    ///
+    /// Carried whole rather than split into a message and a status here,
+    /// because `sismatic-store` already knows which half is the caller's fault:
+    /// [`SubmitError`]'s `From` impl for [`ApiError`] is the one place that
+    /// decision is made, and this variant defers to it for both the body and —
+    /// via the code it chose — the status.
+    Submit(SubmitError),
 }
 
 impl std::fmt::Display for ApiFailure {
@@ -38,6 +48,9 @@ impl std::fmt::Display for ApiFailure {
         match self {
             ApiFailure::NotFound(msg) | ApiFailure::BadRequest(msg) => f.write_str(msg),
             ApiFailure::Store(e) => write!(f, "{e}"),
+            // Rendered through the same conversion the body uses, so the
+            // message a log line carries is the message the caller received.
+            ApiFailure::Submit(e) => f.write_str(&ApiError::from(e.clone()).error),
         }
     }
 }
@@ -50,6 +63,14 @@ impl std::error::Error for ApiFailure {}
 impl From<ReadError> for ApiFailure {
     fn from(e: ReadError) -> Self {
         ApiFailure::Store(e)
+    }
+}
+
+/// The write-side counterpart, so a `commands` handler bubbles a refused
+/// submission with `?` exactly as a readings handler bubbles a store failure.
+impl From<SubmitError> for ApiFailure {
+    fn from(e: SubmitError) -> Self {
+        ApiFailure::Submit(e)
     }
 }
 
@@ -69,6 +90,10 @@ impl ApiFailure {
             // caller would not be.
             ApiFailure::BadRequest(_) => ErrorCode::BadInstruction,
             ApiFailure::Store(_) => ErrorCode::Internal,
+            // The only variant that does not pick its own code: `store` already
+            // classified this one, and re-deciding here is how the two could
+            // disagree.
+            ApiFailure::Submit(e) => return ApiError::from(e.clone()),
         };
         ApiError::coded(code, self.to_string())
     }
@@ -80,10 +105,79 @@ impl ResponseError for ApiFailure {
             ApiFailure::NotFound(_) => StatusCode::NOT_FOUND,
             ApiFailure::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiFailure::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            // Derived from the code `store` chose rather than matched on the
+            // variant a second time. A rejection is a `409` because it is a
+            // conflict with the device's state; a backend failure is ours.
+            ApiFailure::Submit(_) => match self.body().code {
+                Some(ErrorCode::Conflict) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
         }
     }
 
     fn error_response(&self) -> HttpResponse {
         HttpResponse::build(self.status_code()).json(self.body())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sismatic_api_types::{Phase, Rejection};
+
+    /// The pairing the two `match`es above could get out of step. A rejection
+    /// is the caller's fault and a backend failure is ours, and the status has
+    /// to say which.
+    #[test]
+    fn a_refused_submission_is_a_conflict_and_a_backend_failure_is_ours() {
+        let refused = ApiFailure::Submit(SubmitError::Rejected {
+            device: "atrium-101".to_owned(),
+            rejection: Rejection::MetadataFrozen,
+            phase: Phase::Recording,
+        });
+        assert_eq!(refused.status_code(), StatusCode::CONFLICT);
+        assert_eq!(refused.body().code, Some(ErrorCode::Conflict));
+        // The typed field is what a client branches on; the prose is what a
+        // log reader reads. Both are asserted, because the two could drift.
+        assert_eq!(refused.body().rejection, Some(Rejection::MetadataFrozen));
+        assert!(
+            refused.to_string().contains("metadata_frozen")
+                && refused.to_string().contains("atrium-101"),
+            "got: {refused}"
+        );
+
+        let broken = ApiFailure::Submit(SubmitError::Backend("disk full".into()));
+        assert_eq!(broken.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(broken.body().code, Some(ErrorCode::Internal));
+        // Not a rejection, so the field is absent — and therefore not even
+        // serialized. A client that sees `rejection` knows it was refused by a
+        // precondition and not by a broken disk.
+        assert_eq!(broken.body().rejection, None);
+    }
+
+    /// Every rejection reaches a caller as a 409 — none of the four is a
+    /// server-side fault, and one landing on a 500 would tell an operator to
+    /// look at the wrong side.
+    #[test]
+    fn every_rejection_is_a_conflict() {
+        for rejection in [
+            Rejection::MetadataFrozen,
+            Rejection::AlreadyRecording,
+            Rejection::AlreadyPaused,
+            Rejection::NotRecording,
+        ] {
+            let failure = ApiFailure::Submit(SubmitError::Rejected {
+                device: "atrium-101".to_owned(),
+                rejection,
+                phase: Phase::Idle,
+            });
+            assert_eq!(
+                failure.status_code(),
+                StatusCode::CONFLICT,
+                "{rejection:?} did not read as a conflict"
+            );
+            // ...and reaches the caller as itself, not flattened into the code.
+            assert_eq!(failure.body().rejection, Some(rejection));
+        }
     }
 }

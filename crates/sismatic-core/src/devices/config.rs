@@ -39,7 +39,16 @@
 //! [[group]]
 //! id = "room-5"
 //! devices = ["atrium-101", "annex-far"]
+//! barrier_timeout_secs = 15   # default: the slowest member's connect + command
+//! barrier = "fail"            # "fail" | "dispatch-ready"; default "fail"
 //! ```
+//!
+//! The two barrier keys describe what happens when a command addressed to the
+//! *group* cannot reach every member at once. The write side expands such a
+//! command into one row per member and holds them all until each is ready to
+//! go, so the room acts in unison; `barrier_timeout_secs` bounds that wait and
+//! `barrier` says whether a partial room is dispatched or the whole batch
+//! fails. See [`Barrier`].
 //!
 //! Resolution is format-agnostic: [`resolve_config`] turns an already-parsed
 //! [`RawConfig`] into a fully-resolved [`Resolved`] (devices plus groups) and is
@@ -204,6 +213,37 @@ pub struct DeviceConfig {
     pub cold_backoff: Option<Duration>,
 }
 
+/// What to do when a group command's barrier does not fill within its timeout.
+///
+/// A group-addressed command is expanded into one row per member, and none of
+/// them is dispatched until every one has reached the head of its own device's
+/// queue. That rendezvous is what makes "the room starts together" true rather
+/// than approximately true. A member whose device is wedged, however, would
+/// hold the barrier indefinitely, so the wait is bounded — and this is the
+/// answer to what happens when the bound is reached.
+///
+/// There is no universally right answer, which is why it is configuration. A
+/// lecture capture with a backup recorder wants [`DispatchReady`]: one
+/// recording beats none. A stereo pair whose two halves are useless apart wants
+/// [`FailBatch`]: a half-recorded take is worse than an obvious failure an
+/// operator retries.
+///
+/// [`DispatchReady`]: Barrier::DispatchReady
+/// [`FailBatch`]: Barrier::FailBatch
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Barrier {
+    /// Run the members that arrived. One recorder is better than none.
+    DispatchReady,
+    /// Fail every row in the batch. Two recordings or neither.
+    ///
+    /// The default, because it is the answer that cannot silently produce a
+    /// partial result: a failed batch is visible in the command log and an
+    /// operator resubmits, where a half-dispatched one looks like success until
+    /// someone plays back the missing half.
+    #[default]
+    FailBatch,
+}
+
 /// A resolved device group: a name plus the ids of its member devices, every
 /// one of which is guaranteed to name a device in the same document. The
 /// registry turns each `device_id` into the shared device handle when it builds
@@ -213,6 +253,19 @@ pub struct GroupConfig {
     pub id: String,
     /// Member device ids, in the order written; each resolves to a `[[device]]`.
     pub device_ids: Vec<String>,
+    /// How long a group command waits for every member to reach the head of its
+    /// queue before [`barrier`] decides what to do.
+    ///
+    /// Defaults to the slowest member's `connect_secs + command_secs`, rounded
+    /// up to the second — the time one member could legitimately spend on the
+    /// command *ahead* of the batched one before it can be at the head. A
+    /// shorter default would fire the barrier on a device that is merely busy
+    /// rather than wedged, which is the false positive worth avoiding.
+    ///
+    /// [`barrier`]: GroupConfig::barrier
+    pub barrier_timeout: Duration,
+    /// What to do when the barrier times out.
+    pub barrier: Barrier,
 }
 
 /// Everything a config file resolves to: the flat device list plus any groups
@@ -357,13 +410,44 @@ pub fn resolve_config(raw: RawConfig) -> Result<Resolved, ConfigError> {
                 });
             }
         }
+        let barrier_timeout = match group.barrier_timeout_secs {
+            Some(secs) => Duration::from_secs(secs),
+            None => default_barrier_timeout(&devices, &group.devices),
+        };
         groups.push(GroupConfig {
             id: group.id,
             device_ids: group.devices,
+            barrier_timeout,
+            barrier: group.barrier.map(Barrier::from).unwrap_or_default(),
         });
     }
 
     Ok(Resolved { devices, groups })
+}
+
+/// The barrier timeout a group gets when it names none: the slowest member's
+/// `connect_secs + command_secs`, rounded up to the second.
+///
+/// The *slowest*, not the average, because the barrier is filled by the last
+/// member to arrive — a timeout derived from a faster member would fire on the
+/// slow one as a matter of course. Rounded up so a sub-second remainder cannot
+/// make the bound tighter than the exchange it is meant to allow for.
+///
+/// Members are looked up rather than passed in already-resolved, because this
+/// runs inside the same loop that is still validating them; every id here has
+/// already been checked to name a device, so a miss is impossible and is
+/// skipped rather than defended against.
+fn default_barrier_timeout(devices: &[DeviceConfig], members: &[String]) -> Duration {
+    let slowest = members
+        .iter()
+        .filter_map(|id| devices.iter().find(|d| &d.id == id))
+        .map(|d| d.connect_timeout + d.command_timeout)
+        .max()
+        .unwrap_or_default();
+
+    // `Duration::as_secs` truncates, so a 3.5s budget would round to 3.
+    let rounded = slowest.as_secs() + u64::from(slowest.subsec_nanos() > 0);
+    Duration::from_secs(rounded.max(1))
 }
 
 /// Fold the defaults into one raw device, failing if a required field is unset.
@@ -480,13 +564,42 @@ struct RawDevice {
     cold_backoff_secs: Option<u64>,
 }
 
-/// A group as written: an `id` and the ids of the member devices. Nothing here
-/// inherits from `[defaults]`; a group is only a name over existing devices.
+/// A group as written: an `id`, the ids of the member devices, and how the
+/// rendezvous behaves. Nothing here inherits from `[defaults]`; a group is a
+/// name over existing devices plus a policy of its own, and a fleet-wide
+/// default barrier would be a claim about rooms this file cannot make.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGroup {
     id: String,
     devices: Vec<String>,
+    /// Unset means "derive it from the members" — see [`GroupConfig::barrier_timeout`].
+    barrier_timeout_secs: Option<u64>,
+    barrier: Option<RawBarrier>,
+}
+
+/// The barrier policy as spelled in a config file.
+///
+/// A separate type from [`Barrier`] so the wire spellings (`"fail"`,
+/// `"dispatch-ready"`) live next to the parser rather than being imposed on the
+/// domain enum by a `#[serde(rename)]`. `deny_unknown_fields` has no equivalent
+/// for an enum, so a misspelling is caught by there being no variant to match —
+/// `barrier = "failed"` is a parse error naming the value, not a silent
+/// fallback to the default.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawBarrier {
+    Fail,
+    DispatchReady,
+}
+
+impl From<RawBarrier> for Barrier {
+    fn from(raw: RawBarrier) -> Self {
+        match raw {
+            RawBarrier::Fail => Barrier::FailBatch,
+            RawBarrier::DispatchReady => Barrier::DispatchReady,
+        }
+    }
 }
 
 #[cfg(all(test, feature = "toml"))]
@@ -907,6 +1020,81 @@ devices = ["room-5-front", "room-5-back"]
         assert_eq!(
             resolved.groups[0].device_ids,
             vec!["room-5-front", "room-5-back"]
+        );
+    }
+
+    // ---- the barrier -----------------------------------------------------
+
+    #[test]
+    fn a_group_that_names_no_barrier_gets_the_safe_default() {
+        let group = &from_toml_str(GROUP_EXAMPLE).unwrap().groups[0];
+        // `FailBatch`, because it is the policy that cannot silently produce a
+        // half-recorded take.
+        assert_eq!(group.barrier, Barrier::FailBatch);
+    }
+
+    #[test]
+    fn both_barrier_policies_parse_from_their_wire_spellings() {
+        for (written, expected) in [
+            ("fail", Barrier::FailBatch),
+            ("dispatch-ready", Barrier::DispatchReady),
+        ] {
+            let text = format!("{GROUP_EXAMPLE}barrier = \"{written}\"\n");
+            assert_eq!(from_toml_str(&text).unwrap().groups[0].barrier, expected);
+        }
+    }
+
+    /// A misspelling is a startup error naming the value, not a silent fallback
+    /// to the default — which for `barrier` would quietly change what happens
+    /// to a half-arrived room.
+    #[test]
+    fn a_misspelled_barrier_is_rejected_by_name() {
+        let text = format!("{GROUP_EXAMPLE}barrier = \"failed\"\n");
+        let err = from_toml_str(&text).unwrap_err();
+        assert!(
+            format!("{err}").contains("failed"),
+            "expected the bad value named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_barrier_timeout_is_taken_as_written() {
+        let text = format!("{GROUP_EXAMPLE}barrier_timeout_secs = 15\n");
+        assert_eq!(
+            from_toml_str(&text).unwrap().groups[0].barrier_timeout,
+            Duration::from_secs(15)
+        );
+    }
+
+    /// Derived from the *slowest* member, because the barrier is filled by the
+    /// last member to arrive: a timeout taken from a faster one would fire on
+    /// the slow member as a matter of course rather than only when it is stuck.
+    #[test]
+    fn the_default_barrier_timeout_follows_the_slowest_member() {
+        let text = r#"
+[defaults]
+username = "admin"
+password = "extron"
+
+[[device]]
+id = "quick"
+host = "10.0.0.7"
+connect_secs = 1
+command_secs = 1
+
+[[device]]
+id = "slow"
+host = "10.0.0.8"
+connect_secs = 20
+command_secs = 5
+
+[[group]]
+id = "room-5"
+devices = ["quick", "slow"]
+"#;
+        assert_eq!(
+            from_toml_str(text).unwrap().groups[0].barrier_timeout,
+            Duration::from_secs(25)
         );
     }
 

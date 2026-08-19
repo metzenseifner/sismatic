@@ -21,23 +21,61 @@ use std::net::TcpListener;
 
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
+use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
+use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
+use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
-use crate::routes::{field_history, health_check, list_fields, read_field};
+use crate::routes::{
+    field_history, health_check, list_commands, list_devices, list_fields, list_groups,
+    pause_recording, read_command, read_device, read_field, read_group, read_phase, set_metadata,
+    set_setting, start_recording, stop_recording,
+};
+use crate::stamp::Stamp;
 
-/// Build the application over `store`, serve it on `listener`, and hand the
-/// running server back.
+/// Build the application over the three ports, serve it on `listener`, and hand
+/// the running server back.
 ///
 /// Fails only if the listener cannot be turned into a serving socket; every
 /// later failure belongs to the returned [`Server`], which resolves when it
 /// stops.
-pub fn run(listener: TcpListener, store: DynReadStore) -> Result<Server, std::io::Error> {
+///
+/// # What the argument list narrows
+///
+/// Four capabilities, each the smallest one its handlers need. `submit` may
+/// append an intent and nothing else — it cannot dispatch one, settle one, or
+/// touch a reading. There is deliberately no `CommandDrain` here: draining is
+/// `sismatic-intent-relay`'s, and a handler that could claim a command could
+/// reorder a device's queue. And still no [`WriteStore`], so the readings
+/// routes remain unable to write no matter what they ask for.
+///
+/// That is the same narrowing the read side already relied on, extended rather
+/// than relaxed: the write side gained exactly one verb, and it is one that
+/// records a request rather than performs it.
+///
+/// [`WriteStore`]: sismatic_store::WriteStore
+pub fn run(
+    listener: TcpListener,
+    store: DynReadStore,
+    catalog: DynDeviceCatalog,
+    status: DynDeviceStatus,
+    submit: DynCommandSubmit,
+    log: DynCommandLog,
+    stamp: Stamp,
+) -> Result<Server, std::io::Error> {
     // Adopt the caller's `Arc` instead of wrapping it: `Data::new` would give
     // handlers an `Arc<Arc<dyn ReadStore>>` to dereference twice, and would make
     // the type say the API owns a store rather than shares one.
     let store: web::Data<dyn ReadStore> = web::Data::from(store);
+    let catalog: web::Data<dyn DeviceCatalog> = web::Data::from(catalog);
+    let status: web::Data<dyn DeviceStatus> = web::Data::from(status);
+    let submit: web::Data<dyn CommandSubmit> = web::Data::from(submit);
+    let log: web::Data<dyn CommandLog> = web::Data::from(log);
+    // `Data::new` here and not `Data::from`: the stamp arrives owned, because
+    // the composition root has no reason to keep a handle to it.
+    let stamp = web::Data::new(stamp);
 
     // Built once and cloned per worker, for the same reason the store handle is:
     // the document is identical on every worker, and assembling it inside the
@@ -50,6 +88,11 @@ pub fn run(listener: TcpListener, store: DynReadStore) -> Result<Server, std::io
         // it inside would give each worker its own store.
         App::new()
             .app_data(store.clone())
+            .app_data(catalog.clone())
+            .app_data(status.clone())
+            .app_data(submit.clone())
+            .app_data(log.clone())
+            .app_data(stamp.clone())
             .service(
                 // A `resource` rather than `App::route`, which is otherwise the
                 // same thing spelled shorter: `route` hoists the method guard onto
@@ -86,7 +129,50 @@ pub fn run(listener: TcpListener, store: DynReadStore) -> Result<Server, std::io
                     )
                     .service(
                         web::resource("/devices/{id}/fields").route(web::get().to(list_fields)),
-                    ),
+                    )
+                    // The write routes. Same longest-path-first discipline, and
+                    // here it earns its keep: `/recording/start` must be
+                    // registered before `/recording`, or the shorter resource
+                    // is tried first. It does not match (a literal segment is
+                    // not a path parameter), so the order is still not
+                    // load-bearing today — but the two now differ by a suffix
+                    // rather than by a whole segment, which is one edit away
+                    // from mattering.
+                    .service(
+                        web::resource("/devices/{id}/recording/start")
+                            .route(web::post().to(start_recording)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/recording/stop")
+                            .route(web::post().to(stop_recording)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/recording/pause")
+                            .route(web::post().to(pause_recording)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/recording").route(web::get().to(read_phase)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/metadata/{field}")
+                            .route(web::put().to(set_metadata)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/settings/{field}")
+                            .route(web::put().to(set_setting)),
+                    )
+                    .service(
+                        web::resource("/devices/{id}/commands").route(web::get().to(list_commands)),
+                    )
+                    .service(web::resource("/commands/{id}").route(web::get().to(read_command)))
+                    // The inventory routes, registered after everything under
+                    // `/devices/{id}/…` so the bare `{id}` resource cannot be
+                    // tried against a longer path first. `/devices` last of the
+                    // three, because it is the shortest.
+                    .service(web::resource("/devices/{id}").route(web::get().to(read_device)))
+                    .service(web::resource("/devices").route(web::get().to(list_devices)))
+                    .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
+                    .service(web::resource("/groups").route(web::get().to(list_groups))),
             )
             // Registered last, and this time the order *is* load-bearing: the
             // UI is mounted on a tail match (`/swagger-ui/{_:.*}`), which is

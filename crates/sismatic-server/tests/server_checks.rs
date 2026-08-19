@@ -279,6 +279,12 @@ fn a_missing_config_file_makes_the_binary_print_help() {
 fn test_config(host: &str, port: u16) -> ServerConfig {
     ServerConfig {
         devices_config_path: PathBuf::from("unused-by-run.toml"),
+        // A relay over a fleet of no devices starts no tasks, so the numbers
+        // here only have to be startable: a zero poll would panic the ticker.
+        intent_relay: sismatic_server::configuration::IntentRelayConfig {
+            poll: Duration::from_millis(10),
+            max_attempts: 3,
+        },
         sync: SyncConfig {
             default_interval: Some(Duration::from_secs(1)),
             fields: vec![

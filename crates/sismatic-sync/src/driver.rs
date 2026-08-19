@@ -55,6 +55,7 @@ use sismatic_core::devices::registry::Registry;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_store::DynWriteStore;
+use sismatic_store::outbox::DynCommandDrain;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -71,10 +72,31 @@ use crate::dto;
 /// unit-tested over values). By the time a schedule reaches the driver the
 /// precedence question is settled, so this crate never has to answer "which
 /// interval applies" — it only reads one off each field.
-#[derive(Debug)]
 pub struct SyncConfig {
     /// One entry per field to poll on every device.
     pub fields: Vec<FieldSchedule>,
+    /// Where to report an observed recording state, if anything is listening.
+    ///
+    /// `None` is the shape every consumer had before the write side existed:
+    /// `sismatic-cli`, the driver's own tests, and any deployment running the
+    /// read side alone. The port is optional rather than a second `spawn`
+    /// because one poll of `RUNNING_STATE` serves both readers, and polling it
+    /// twice would double the exchanges on the field polled most often.
+    pub reconciler: Option<DynCommandDrain>,
+}
+
+/// Hand-written rather than derived because `reconciler` is a trait object, and
+/// a port has no `Debug` output worth printing — requiring one would push the
+/// bound onto every implementor and test double for a line nobody reads. What a
+/// reader of a config dump wants to know is whether a reconciler is wired at
+/// all, so that is the one bit reported.
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field("fields", &self.fields)
+            .field("reconciler", &self.reconciler.is_some())
+            .finish()
+    }
 }
 
 /// One field's polling schedule: what to ask for, and how often to ask.
@@ -143,6 +165,12 @@ pub fn spawn(registry: Arc<Registry>, write: DynWriteStore, cfg: SyncConfig) -> 
         );
     }
 
+    // Announced once rather than per loop: whether a field reconciler exists is a
+    // property of the deployment, not of a device.
+    if cfg.reconciler.is_some() {
+        info!("observed recording states will be reported to the command outbox");
+    }
+
     for device in registry.devices() {
         for field in &cfg.fields {
             // No task at all, rather than a task that never ticks, so the count
@@ -154,6 +182,9 @@ pub fn spawn(registry: Arc<Registry>, write: DynWriteStore, cfg: SyncConfig) -> 
                 device.clone(),
                 field.name.clone(),
                 write.clone(),
+                // Cloning an `Option<Arc<_>>` is a refcount bump when present
+                // and nothing when absent.
+                cfg.reconciler.clone(),
                 interval,
                 cancel.clone(),
             ));
@@ -170,6 +201,7 @@ async fn poll_loop(
     device: Arc<Device>,
     field: String,
     write: DynWriteStore,
+    reconciler: Option<DynCommandDrain>,
     interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -208,6 +240,25 @@ async fn poll_loop(
                 health = next;
                 announce(report, device.id(), &field, outcome.as_ref().err());
 
+                // Every condition as one combinator chain producing "the thing to report", or
+                // `None`. The effect stays outside the pipeline, so the `.await` is visible.
+                let to_report = reconciler
+                    .as_ref()
+                    .filter(|_| is_running_state(&field))
+                    .zip(outcome.as_ref().ok().and_then(Value::as_state));
+
+                // Reconcile before persisting, and by borrow, because `outcome` is moved by the `if
+                // let Ok(value)` below. Deliberately outside `health`: a store that will not take
+                // an observation says nothing about whether the device answered — the same reason a
+                // failed `upsert_latest` is not folded in.
+                if let Some((drain, state)) = to_report
+                   && let Err(err) = drain
+                       .observe(device.id().to_string(), dto::state_to_dto(state))
+                       .await
+               {
+                   warn!(device = device.id(), %err, "failed to report the observed recording state");
+               }
+
                 if let Ok(value) = outcome {
                     let reading = Reading {
                         device: device.id().to_string(),
@@ -226,6 +277,12 @@ async fn poll_loop(
     }
 
     info!(device = device.id(), field, "poll loop stopped");
+}
+/// The one field whose value the write side reconciles against. Read off the
+/// catalog rather than written as a literal, so a rename in core moves this
+/// with it instead of silently disabling the hook.
+fn is_running_state(field: &str) -> bool {
+    field == Query::RunningState.name()
 }
 
 /// What one loop believes about its `(device, field)` pair right now. Two states,
@@ -323,12 +380,15 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use sismatic_api_types::Reading;
+    // The wire `RecordingState`, not core's: `observe` takes what
+    // `dto::state_to_dto` produces.
+    use sismatic_api_types::{CommandId, CommandRecord, DeviceId, Reading, RecordingState};
     use sismatic_core::devices::config::DeviceConfig;
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::connector::{ConnectError, Connector};
     use sismatic_core::devices::transport::Transport;
     use sismatic_core::devices::transport::fake::FakeTransport;
+    use sismatic_store::outbox::{Claim, CommandDrain, Outcome};
     use sismatic_store::{WriteError, WriteStore};
 
     use super::*;
@@ -354,6 +414,55 @@ mod tests {
         async fn upsert_latest(&self, reading: Reading) -> Result<(), WriteError> {
             self.fields.lock().expect("lock").push(reading.field);
             Ok(())
+        }
+    }
+
+    /// A [`CommandDrain`] that records what was observed and does nothing else.
+    /// A poll loop only ever calls `observe`; the other three methods belong to
+    /// the relay, and stubbing them `Ok`-and-empty rather than `unimplemented!`
+    /// means a loop that wrongly reached for one fails an assertion here rather
+    /// than panicking inside a spawned task, where the panic is easy to miss.
+    #[derive(Default)]
+    struct RecordingReconciler {
+        observed: Mutex<Vec<(String, RecordingState)>>,
+    }
+
+    impl RecordingReconciler {
+        fn observed(&self) -> Vec<(String, RecordingState)> {
+            self.observed.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommandDrain for RecordingReconciler {
+        async fn claim_next(
+            &self,
+            _device: DeviceId,
+            _at: Timestamp,
+        ) -> Result<Option<Claim>, WriteError> {
+            Ok(None)
+        }
+
+        async fn settle(
+            &self,
+            _id: CommandId,
+            _outcome: Outcome,
+            _at: Timestamp,
+        ) -> Result<(), WriteError> {
+            Ok(())
+        }
+
+        async fn observe(
+            &self,
+            device: DeviceId,
+            observed: RecordingState,
+        ) -> Result<(), WriteError> {
+            self.observed.lock().expect("lock").push((device, observed));
+            Ok(())
+        }
+
+        async fn in_flight(&self, _device: DeviceId) -> Result<Vec<CommandRecord>, WriteError> {
+            Ok(Vec::new())
         }
     }
 
@@ -383,6 +492,18 @@ mod tests {
         (Arc::new(registry), opens)
     }
 
+    /// A registry of one device whose every connection replays `reply`.
+    fn registry_replying(reply: &'static str) -> Arc<Registry> {
+        let connector = Arc::new(CountingConnector::new(move || {
+            FakeTransport::with_reads([reply; 8])
+        }));
+        Arc::new(Registry::build(
+            vec![device_config("fixture")],
+            vec![],
+            connector,
+        ))
+    }
+
     /// Poll `cond` until it holds, or panic after ~2s, so a spawned loop can make
     /// progress without the test racing on a fixed sleep.
     async fn wait_for(cond: impl Fn() -> bool) {
@@ -393,6 +514,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("condition not met in time");
+    }
+
+    /// The read side feeding the write side: one poll of `RUNNING_STATE` serves
+    /// both, which is the whole reason `reconciler` is a field on the config
+    /// rather than a second driver polling the same register.
+    #[tokio::test]
+    async fn a_polled_recording_state_reaches_the_reconciler() {
+        // `1\r\n` is what `parse_state` decodes as `Started`.
+        let registry = registry_replying("1\r\n");
+        let store = Arc::new(RecordingStore::default());
+        let reconciler = Arc::new(RecordingReconciler::default());
+
+        let sync = spawn(
+            registry,
+            store,
+            SyncConfig {
+                fields: vec![FieldSchedule {
+                    name: "RUNNING_STATE".to_owned(),
+                    interval: Some(Duration::from_millis(10)),
+                }],
+                reconciler: Some(reconciler.clone()),
+            },
+        );
+
+        wait_for(|| !reconciler.observed().is_empty()).await;
+        sync.shutdown().await;
+
+        assert_eq!(
+            reconciler.observed()[0],
+            ("fixture".to_owned(), RecordingState::Started)
+        );
+    }
+
+    /// The hook is keyed off the field name, not off whatever the value happens
+    /// to be. A firmware string is not a recording state, and folding one into
+    /// the write side's phase would be how a poll loop unfreezes metadata.
+    #[tokio::test]
+    async fn a_field_that_is_not_the_recording_state_is_never_reconciled() {
+        let registry = registry_replying(FIRMWARE_REPLY);
+        let store = Arc::new(RecordingStore::default());
+        let reconciler = Arc::new(RecordingReconciler::default());
+
+        let sync = spawn(
+            registry,
+            store.clone(),
+            SyncConfig {
+                fields: vec![FieldSchedule {
+                    name: "FIRMWARE".to_owned(),
+                    interval: Some(Duration::from_millis(10)),
+                }],
+                reconciler: Some(reconciler.clone()),
+            },
+        );
+
+        // The store proves the loop ran, so an empty observation log below is
+        // evidence of the filter rather than of a driver that never started.
+        wait_for(|| !store.fields().is_empty()).await;
+        sync.shutdown().await;
+
+        assert!(
+            reconciler.observed().is_empty(),
+            "only RUNNING_STATE may be reconciled, got: {:?}",
+            reconciler.observed()
+        );
     }
 
     #[tokio::test]
@@ -416,6 +601,7 @@ mod tests {
                         interval: Some(Duration::from_millis(10)),
                     },
                 ],
+                reconciler: None,
             },
         );
 
@@ -444,6 +630,7 @@ mod tests {
                     name: "FIRMWARE".to_owned(),
                     interval: None,
                 }],
+                reconciler: None,
             },
         );
 
@@ -608,6 +795,7 @@ mod tests {
                         interval: Some(Duration::from_millis(5)),
                     })
                     .collect(),
+                reconciler: None,
             },
         );
 

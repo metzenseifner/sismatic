@@ -49,7 +49,7 @@ pub fn to_dto(value: Value) -> ReadingValue {
 
 /// Map core's recording state onto the wire enum. Also wildcard-free, so a new
 /// state variant in core is a compile error here.
-fn state_to_dto(state: CoreState) -> RecordingState {
+pub fn state_to_dto(state: CoreState) -> RecordingState {
     match state {
         CoreState::Stopped => RecordingState::Stopped,
         CoreState::Started => RecordingState::Started,

@@ -63,9 +63,10 @@ pub type GroupId = String;
 /// instruction catalog.
 pub type FieldName = String;
 
-// Re-export the leaf types at the crate root so callers write
-// `sismatic_api_types::Reading` rather than `::reading::Reading`.
-pub use command::{DeviceResult, GroupResult, RegisterWrite};
+pub use command::{
+    Acceptance, Accepted, Barrier, BatchId, CommandId, CommandList, CommandRecord, CommandStatus,
+    Intent, Phase, RecordingPhase, Rejection,
+};
 pub use device::{
     ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,
 };

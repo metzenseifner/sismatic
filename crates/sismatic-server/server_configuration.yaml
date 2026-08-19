@@ -1,5 +1,9 @@
 devices_config_path: devices.yaml
 
+intent_relay:
+  poll_ms: 250
+  max_attempts: 3
+
 sync:
   interval_secs: 30
   fields:

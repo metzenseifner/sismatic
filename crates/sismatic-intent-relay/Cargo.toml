@@ -1,0 +1,27 @@
+[package]
+name = "sismatic-intent-relay"
+description = "Applies queued write intents from the outbox to devices."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sismatic-api-types = { workspace = true }
+sismatic-core = { workspace = true, features = ["ssh"] }
+sismatic-store = { workspace = true }
+# Default features only: `sismatic-sync` without `driver` is the pure `dto`
+# conversion and pulls in no tokio, no clock, and no store. Its own manifest
+# calls that "keeping the pure conversion's dependency cone light"; this crate
+# is the second consumer that relies on it, and reuses `dto::to_dto` rather
+# than restating the `Value -> ReadingValue` mapping.
+sismatic-sync = { workspace = true }
+
+chrono.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sismatic-core = { workspace = true, features = ["testing"] }
+sismatic-store-memory = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

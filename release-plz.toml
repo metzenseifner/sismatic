@@ -80,11 +80,6 @@ version_group = "sismatic"
 release = false
 
 [[package]]
-name = "sismatic-web"
-version_group = "sismatic"
-release = false
-
-[[package]]
 name = "sismatic-server"
 version_group = "sismatic"
 release = false
@@ -111,5 +106,10 @@ release = false
 
 [[package]]
 name = "sismatic-http-api"
+version_group = "sismatic"
+release = false
+
+[[package]]
+name = "sismatic-intent-relay"
 version_group = "sismatic"
 release = false

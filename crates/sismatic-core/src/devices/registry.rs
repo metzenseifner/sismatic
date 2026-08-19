@@ -133,6 +133,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
+    use crate::devices::config::Barrier;
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::fake::FakeTransport;
     use crate::protocol::Value;
@@ -224,6 +225,10 @@ mod tests {
         vec![GroupConfig {
             id: "everywhere".into(),
             device_ids: vec!["atrium-101".into(), "annex-far".into()],
+            // The registry does not read either — the barrier lives in the
+            // outbox — so these are whatever `resolve_config` would default to.
+            barrier_timeout: Duration::from_secs(8),
+            barrier: Barrier::FailBatch,
         }]
     }
 

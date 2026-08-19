@@ -30,6 +30,10 @@ name = "sismatic-server"
 # `toml`/`yaml` give the composition root core's extension-dispatching
 # `config::load`, so `devices_config_path` may name either format.
 sismatic-core = { workspace = true, features = ["ssh", "toml", "yaml"] }
+# Named directly for one type: the `Timestamp` the write side's `Stamp` mints.
+# It already arrives transitively through every other internal crate here; the
+# explicit edge is so the root does not depend on that being true.
+sismatic-api-types = { workspace = true }
 sismatic-http-api = { workspace = true }
 sismatic-store = { workspace = true }
 sismatic-store-memory = { workspace = true }
@@ -37,6 +41,16 @@ sismatic-sync = { workspace = true, features = ["driver"] }
 
 #  Third-party dependencies
 anyhow.workspace = true
+# The store's ports are async traits, and the root implements one of them:
+# `status::RegistryStatus` is the adapter that cannot live in
+# `sismatic-store-memory`, because it reads a `sismatic-core` registry.
+async-trait.workspace = true
+# The write side's `Stamp`: the root is where a fresh command id and the instant
+# it was accepted are minted, so that `sismatic-http-api` needs neither a UUID
+# generator nor a clock and its handlers stay pure functions of their
+# extractors.
+chrono.workspace = true
+uuid.workspace = true
 clap = { workspace = true, features = ["derive"] }
 config = "0.15.25"
 serde.workspace = true
@@ -45,6 +59,7 @@ tracing = { workspace = true, features = ["log"] }
 tracing-bunyan-formatter.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true
+sismatic-intent-relay = { version = "0.2.25", path = "../sismatic-intent-relay" }
 
 [dev-dependencies]
 # `sync` for the oneshot the end-to-end test shuts `run` down with — the library

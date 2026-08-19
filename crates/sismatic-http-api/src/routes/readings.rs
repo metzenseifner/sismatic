@@ -234,7 +234,11 @@ pub async fn field_history(
 
 /// Fold a URL path segment onto the canonical field spelling: upper-case, with
 /// `-` rewritten to `_`.
-fn normalize_field(raw: &str) -> FieldName {
+///
+/// `pub(crate)` because the write routes need the same fold: a metadata
+/// register written as `metadata/title` and read back as `fields/TITLE` has to
+/// be one field, and two copies of this rule are how they would stop being one.
+pub(crate) fn normalize_field(raw: &str) -> FieldName {
     raw.replace('-', "_").to_ascii_uppercase()
 }
 

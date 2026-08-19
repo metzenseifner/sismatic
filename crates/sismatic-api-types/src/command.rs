@@ -1,53 +1,245 @@
-//! Write-side (command) DTOs: the request bodies and results for driving a
-//! device *through* the API.
+//! Write-side DTOs: what a caller asks a device to do, and what became of the
+//! request.
 //!
-//! These type the shapes the current `sismatic-web` backend builds by hand for
-//! its `query`/`command`/`register` routes. They belong in `api-types` because
-//! a write-back UI and the server must agree on them, even though the
-//! *execution* of a command is a core concern that lives far from this crate.
+//! An `Intent` is a *request to act*, not an act. It is accepted, recorded, and
+//! answered with `202 Accepted` before any device has been contacted; the
+//! device is reached later by `sismatic-relay`. `CommandRecord` is how a caller
+//! learns what happened afterwards.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::value::ReadingValue;
-use crate::{DeviceId, FieldName, GroupId};
+use crate::{DeviceId, FieldName, Timestamp};
 
-/// Body of a register write (`POST /devices/{id}/register/{name}`): the new
-/// value to store. A single-field object rather than a bare string so the body
-/// is self-describing and can gain fields (a units hint, a dry-run flag) later.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A submitted command's identifier. A `String` for the same reason
+/// [`DeviceId`] is: it travels as JSON and is opaque to every reader. The
+/// server mints a v4 UUID.
+pub type CommandId = String;
+
+/// Ties together the rows one group-addressed request was expanded into.
+///
+/// A `String` for the same reason [`CommandId`] is, and a *separate* id rather
+/// than the group's: a group can be addressed many times, and "these rows are
+/// one take's worth" is a statement about one request, not about the room.
+pub type BatchId = String;
+
+/// What to do when a batch's barrier does not fill within its timeout.
+///
+/// The wire mirror of `sismatic_core::devices::config::Barrier`, declared here
+/// for the same reason [`RecordingState`](crate::RecordingState) is: the outbox
+/// enforces this policy and the outbox cannot see `core`. The composition root
+/// maps between the two with a wildcard-free match, so a third variant is a
+/// build error at the seam rather than a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RegisterWrite {
-    pub value: String,
+#[serde(rename_all = "snake_case")]
+pub enum Barrier {
+    /// Run the members that arrived. One recorder is better than none.
+    DispatchReady,
+    /// Fail every row in the batch. Two recordings or neither.
+    FailBatch,
 }
 
-/// The result of running one instruction against a single device — the typed
-/// form of the web backend's `{ "device", "name", "value" }` object.
+/// What a caller wants done.
+///
+/// Internally tagged (`{"kind": "set_metadata", "field": "TITLE", ...}`) rather
+/// than adjacently tagged like [`ReadingValue`]: two variants carry no payload
+/// at all, and the adjacent form would render those as `"value": null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DeviceResult {
-    // See `Reading::device` for why the aliases are spelled out for utoipa.
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Intent {
+    StartRecording,
+    StopRecording,
+    PauseRecording,
+    /// Write one metadata register. Admissible only while the device's
+    /// [`Phase`] is [`Phase::Idle`] — see `sismatic_store::outbox::admit`.
+    SetMetadata {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, example = "TITLE"))]
+        field: FieldName,
+        value: String,
+    },
+    /// Write one device setting. Admissible in every phase.
+    SetSetting {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, example = "TIMEZONE"))]
+        field: FieldName,
+        value: String,
+    },
+}
+
+/// The write side's belief about whether a recording is in progress.
+///
+/// Distinct from [`RecordingState`](crate::value::RecordingState), which is what
+/// a device *reported* at some past instant. `Phase` is what the outbox has
+/// accepted and not yet seen fail, which is the thing an admission decision has
+/// to be taken against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Idle,
+    Recording,
+    Paused,
+}
+
+/// Why a submission was refused. Carried in the `409 Conflict` body as
+/// [`ApiError::rejection`](crate::ApiError::rejection), so a client branches on
+/// a value rather than on prose.
+///
+/// A field of its own rather than four more [`ErrorCode`](crate::ErrorCode)
+/// variants, because all four are conflicts and differ only in which
+/// precondition refused — one axis is "what kind of failure and what status",
+/// the other is "which rule". See [`ApiError`](crate::ApiError) for the whole
+/// argument.
+///
+/// The distinction earns its keep: three of these four say the device is
+/// already in the state that was asked for, which a caller can often treat as
+/// benign, while [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was
+/// discarded and something has to be done about it. A client that could not
+/// tell them apart would either treat every `409` as an error or silently lose
+/// metadata edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Rejection {
+    /// A metadata write arrived while a recording was in progress.
+    MetadataFrozen,
+    AlreadyRecording,
+    AlreadyPaused,
+    NotRecording,
+}
+
+/// Prose for the `409` body. Written out rather than `{:?}`-formatted: the
+/// message is the only place a caller learns *which* rejection applied, so it
+/// has to say what to do about it rather than name a Rust variant.
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rejection::MetadataFrozen => f.write_str(
+                "metadata_frozen: a recording is in progress, so this device's metadata \
+                 is sealed until it stops",
+            ),
+            Rejection::AlreadyRecording => {
+                f.write_str("already_recording: this device is already recording")
+            }
+            Rejection::AlreadyPaused => {
+                f.write_str("already_paused: this device's recording is already paused")
+            }
+            Rejection::NotRecording => {
+                f.write_str("not_recording: this device has no recording in progress")
+            }
+        }
+    }
+}
+
+/// Where a submitted command has got to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CommandStatus {
+    /// Recorded, no device contacted yet.
+    Pending,
+    /// A relay task has claimed it and the SIS exchange is running.
+    InFlight,
+    /// The device answered. `value` is the decoded echo — for a register write
+    /// the device echoes the value it stored, which is worth returning.
+    Succeeded { value: ReadingValue },
+    /// Terminal failure after `attempts` tries.
+    Failed { reason: String },
+}
+
+/// A device's write-side state, as `GET /v1/devices/{id}/recording` reports it.
+/// A product type because the two fields are only meaningful together: an epoch
+/// without a phase does not say whether metadata is writable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RecordingPhase {
+    pub phase: Phase,
+    /// Increments on each transition into [`Phase::Recording`] from
+    /// [`Phase::Idle`].
+    pub epoch: u64,
+}
+
+/// One row of the outbox as a caller sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CommandRecord {
+    // Annotated for the same reason `device` is: a derive sees the alias name
+    // it was written with, so an un-annotated `CommandId` makes utoipa invent a
+    // component called `String` and every generated client grows a wrapper type
+    // around a plain string. `the_string_aliases_are_documented_as_strings` in
+    // `sismatic-http-api` is what notices when one of these is missing.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub id: CommandId,
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub field: FieldName,
-    pub value: ReadingValue,
+    pub intent: Intent,
+    /// The batch this row belongs to, when the request that produced it was
+    /// addressed to a group *and* the intent needs the members to act together.
+    ///
+    /// `None` covers both a device-addressed request and a group-addressed
+    /// metadata or setting write: those are idempotent per device and gain
+    /// nothing from a rendezvous, so making them wait would only expose them to
+    /// a barrier timeout they have no use for.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub batch: Option<BatchId>,
+    /// The recording epoch this command was admitted against.
+    pub epoch: u64,
+    pub status: CommandStatus,
+    pub attempts: u32,
+    pub enqueued_at: Timestamp,
+    pub updated_at: Timestamp,
+    // protects a command from quick exhaustion of retries
+    pub not_before: Timestamp,
 }
 
-/// The result of fanning one instruction out across a group: each member's
-/// device id mapped to its value. A `BTreeMap` gives a stable, sorted key order
-/// so the JSON is deterministic (easier diffs, stable snapshot tests).
+/// One command a submission produced. `epoch` is returned so a caller writing
+/// several metadata fields can check that all of them landed on one recording.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GroupResult {
-    // See `Reading::device` for why the aliases are spelled out for utoipa.
+pub struct Accepted {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub group: GroupId,
+    pub id: CommandId,
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub field: FieldName,
-    #[cfg_attr(feature = "openapi", schema(value_type = BTreeMap<String, ReadingValue>))]
-    pub results: BTreeMap<DeviceId, ReadingValue>,
+    pub device: DeviceId,
+    pub epoch: u64,
+}
+
+/// The `202 Accepted` body.
+///
+/// Always a list, even for a device-addressed request that can only ever
+/// produce one command. The alternative — a bare [`Accepted`] for a device and
+/// a list for a group — would make the response shape depend on which kind of
+/// id the caller happened to use, so every client would need both parsers and
+/// the generated document would carry a `oneOf` for a route that does one
+/// thing. One shape costs a wrapper object and buys a contract that does not
+/// branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Acceptance {
+    /// Set when the members were expanded under a rendezvous, so a caller can
+    /// tell "these five will act together" from "these five were merely
+    /// submitted at the same moment".
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub batch: Option<BatchId>,
+    /// One entry per target, in the order the group lists its members.
+    pub commands: Vec<Accepted>,
+}
+
+/// A page of commands, wrapped for the same reason
+/// [`ReadingList`](crate::ReadingList) is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CommandList {
+    pub commands: Vec<CommandRecord>,
 }

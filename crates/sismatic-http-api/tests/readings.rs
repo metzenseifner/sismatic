@@ -18,6 +18,8 @@ use sismatic_api_types::{DeviceId, FieldName, Reading, ReadingValue, TimeSpan, T
 use sismatic_store::{DynReadStore, ReadError, ReadStore, WriteStore};
 use sismatic_store_memory::MemoryStore;
 
+mod harness;
+
 /// A `Reading` for `device`/`field` with a `Number` value stamped at `at`.
 fn reading(device: &str, field: &str, value: u32, at: &str) -> Reading {
     Reading {
@@ -63,8 +65,7 @@ fn spawn_app(store: DynReadStore) -> String {
         .expect("reading the bound address")
         .port();
 
-    let server = sismatic_http_api::run(listener, store).expect("building the server");
-    drop(tokio::spawn(server));
+    harness::serve(listener, store);
 
     format!("http://127.0.0.1:{port}")
 }

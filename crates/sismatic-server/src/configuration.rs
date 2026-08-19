@@ -21,6 +21,9 @@ const ALL_FIELDS: &str = "*";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8080;
 
+const DEFAULT_INTENT_RELAY_POLL_MS: u64 = 250;
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
 const ENV_PREFIX: &str = "SISMATIC_SERVER";
 const ENV_SEPARATOR: &str = "__";
 const ENV_LIST_SEPARATOR: &str = ",";
@@ -60,6 +63,21 @@ pub fn get_configuration_with_env(
         base_dir(path),
         raw_config(config::File::from(path), env)?,
     ))
+}
+
+/// How the intent relay drains the write outbox.
+///
+/// `poll_ms` is a floor on how long an accepted command waits before a device
+/// hears about it, so it trades idle wake-ups against apparent latency. 250 ms
+/// is below the threshold at which an operator pressing "start" perceives a
+/// delay, and costs four wake-ups per device per second.
+///
+/// `max_attempts` counts total tries, not retries: `1` means a command that
+/// fails once is failed for good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentRelayConfig {
+    pub poll: Duration,
+    pub max_attempts: u32,
 }
 
 /// The environment as a config source: every key of [`RawServerConfig`],
@@ -135,6 +153,7 @@ fn base_dir(config_path: &Path) -> &Path {
 /// Fold `[defaults]` and the built-in defaults into a fully-resolved config.
 pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let defaults = raw.defaults;
+    let intent_relay = raw.intent_relay.unwrap_or_default();
     let sync = raw.sync.unwrap_or_default();
     let http = raw.http.unwrap_or_default();
 
@@ -166,12 +185,28 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
 
     ServerConfig {
         devices_config_path,
+        intent_relay: IntentRelayConfig {
+            poll: handle_poll(intent_relay.poll_ms.unwrap_or(DEFAULT_INTENT_RELAY_POLL_MS)),
+            max_attempts: intent_relay.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS),
+        },
         sync: SyncConfig {
             default_interval,
             fields,
         },
         http: HttpConfig { host, port },
     }
+}
+
+/// Decode `intent_relay.poll_ms`.
+///
+/// `0` is *not* the "never" sentinel it is under `sync` — a relay that never
+/// looks at its queue accepts commands and performs none of them, which is a
+/// deployment nobody means to write. It is read as "as fast as possible"
+/// instead, which is one millisecond: `tokio::time::interval` panics on a zero
+/// period, so the floor keeps a plausible-looking config from taking the
+/// process down at startup.
+fn handle_poll(ms: u64) -> Duration {
+    Duration::from_millis(ms.max(1))
 }
 
 /// Decode the `interval_secs` sentinel: `0` is *never*, anything else is a
@@ -255,6 +290,7 @@ pub struct RawServerConfig {
     #[serde(default)]
     pub defaults: Defaults,
     pub devices_config_path: Option<String>,
+    pub intent_relay: Option<RawIntentRelay>,
     pub sync: Option<RawSync>,
     pub http: Option<RawHttp>,
 }
@@ -269,6 +305,18 @@ pub struct Defaults {
     pub fields: Option<Vec<RawField>>,
     pub host: Option<String>,
     pub port: Option<u16>,
+}
+
+/// The `intent_relay` section as written.
+///
+/// A section of its own rather than keys folded into [`Defaults`]: the two
+/// numbers only mean anything together with the relay, and nothing else in the
+/// document would ever want to inherit them.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawIntentRelay {
+    pub poll_ms: Option<u64>,
+    pub max_attempts: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -326,7 +374,7 @@ struct RawFieldTable {
 
 /// Hand-written rather than `#[serde(untagged)]`: untagged reports every failure
 /// as "data did not match any variant", which would throw away the precise
-/// unknown-key error [`RawFieldTable`] produces. Dispatching on the input's own
+/// unknown-key error `RawFieldTable` produces. Dispatching on the input's own
 /// shape keeps that error intact.
 impl<'de> Deserialize<'de> for RawField {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -366,6 +414,7 @@ impl<'de> Deserialize<'de> for RawField {
 pub struct ServerConfig {
     /// Where the devices file lives, using the server config's directory as base.
     pub devices_config_path: PathBuf,
+    pub intent_relay: IntentRelayConfig,
     pub sync: SyncConfig,
     pub http: HttpConfig,
 }
@@ -403,6 +452,9 @@ impl ServerConfig {
             devices_config_path: overrides
                 .devices_config_path
                 .unwrap_or(self.devices_config_path),
+            // No command-line flag reaches the relay, so it passes through
+            // untouched — the same as `sync`.
+            intent_relay: self.intent_relay,
             sync: self.sync,
             http: HttpConfig {
                 host: overrides.host.unwrap_or(self.http.host),
@@ -794,6 +846,10 @@ mod tests {
             cfg,
             ServerConfig {
                 devices_config_path: PathBuf::from(DEFAULT_DEVICES_CONFIG_PATH),
+                intent_relay: IntentRelayConfig {
+                    poll: Duration::from_millis(DEFAULT_INTENT_RELAY_POLL_MS),
+                    max_attempts: DEFAULT_MAX_ATTEMPTS,
+                },
                 sync: SyncConfig {
                     default_interval: Some(Duration::from_secs(DEFAULT_INTERVAL_SECS)),
                     fields: vec![FieldConfig {
@@ -817,6 +873,63 @@ mod tests {
         assert_eq!(cfg.sync.default_interval, Some(Duration::from_secs(1)));
         // ...and the built-in field list picks up the interval that was named.
         assert_eq!(schedule(&cfg), [("RUNNING_STATE", Some(1))]);
+    }
+
+    // ---- the intent relay section ----------------------------------------
+
+    #[test]
+    fn the_intent_relay_section_is_read() {
+        let cfg = resolve("", "intent_relay:\n  poll_ms: 50\n  max_attempts: 7\n");
+        assert_eq!(
+            cfg.intent_relay,
+            IntentRelayConfig {
+                poll: Duration::from_millis(50),
+                max_attempts: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn a_partial_intent_relay_section_is_accepted() {
+        let cfg = resolve("", "intent_relay:\n  max_attempts: 1\n");
+        assert_eq!(cfg.intent_relay.max_attempts, 1);
+        assert_eq!(
+            cfg.intent_relay.poll,
+            Duration::from_millis(DEFAULT_INTENT_RELAY_POLL_MS)
+        );
+    }
+
+    /// Unlike `sync`'s `interval_secs`, a zero here is not "never". A relay that
+    /// never drains would accept commands and perform none of them, and a zero
+    /// period panics `tokio::time::interval` — so it is read as "as fast as
+    /// possible" rather than taking the process down at startup.
+    #[test]
+    fn a_zero_poll_is_a_floor_rather_than_a_never() {
+        let cfg = resolve("", "intent_relay:\n  poll_ms: 0\n");
+        assert_eq!(cfg.intent_relay.poll, Duration::from_millis(1));
+    }
+
+    /// The section is reachable through the environment like every other key,
+    /// which is what a container deployment sets it with.
+    #[test]
+    fn the_intent_relay_section_can_be_set_from_the_environment() {
+        let cfg = resolve_env(
+            "",
+            "{}",
+            &[("SISMATIC_SERVER__INTENT_RELAY__POLL_MS", "75")],
+        );
+        assert_eq!(cfg.intent_relay.poll, Duration::from_millis(75));
+    }
+
+    /// `deny_unknown_fields` covers the new section too, so a typo is a startup
+    /// error rather than a default silently standing.
+    #[test]
+    fn a_misspelled_intent_relay_key_is_an_error() {
+        let err = try_raw("intent_relay:\n  pollms: 50\n", &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("pollms"),
+            "expected the unknown key named, got: {err}"
+        );
     }
 
     /// The overrides an operator who typed every flag would produce.
@@ -1188,6 +1301,29 @@ mod tests {
         assert!(
             err.to_string().contains("devices_config_pth"),
             "expected the unknown key in the error, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shipped_config_check {
+    /// The config file that ships in this crate must be one the loader accepts.
+    /// `deny_unknown_fields` makes that a real question: a section present in
+    /// the YAML and absent from `RawServerConfig` is a startup failure, not a
+    /// setting that is quietly ignored.
+    #[test]
+    fn the_shipped_configuration_parses() {
+        let cfg = super::get_configuration(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/server_configuration.yaml"
+        ))
+        .expect("the shipped server_configuration.yaml must load");
+        assert_eq!(
+            cfg.intent_relay,
+            super::IntentRelayConfig {
+                poll: std::time::Duration::from_millis(250),
+                max_attempts: 3,
+            }
         );
     }
 }
