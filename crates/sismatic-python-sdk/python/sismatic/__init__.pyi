@@ -40,6 +40,8 @@ QueryName = Literal[
     "description",
     "format",
     "identifier",
+    "language",
+    "publisher",
     "presenter",
     "relation",
     "rights",

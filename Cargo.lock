@@ -3232,12 +3232,14 @@ name = "sismatic-core"
 version = "0.2.25"
 dependencies = [
  "async-trait",
+ "clap",
  "dashmap",
  "russh",
  "secrecy",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "sismatic-core",
  "tokio",
  "toml 0.8.23",
  "tracing",

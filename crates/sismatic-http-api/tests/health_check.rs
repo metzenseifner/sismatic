@@ -6,7 +6,7 @@
 //! outside by something that is not this program, so what is worth pinning is
 //! the status code that reaches the wire — not that a function returned a value
 //! that would have become one. Nothing below names a handler, so the routes may
-//! be re-organized freely and only a change in *behaviour* breaks a test.
+//! be re-organized freely and only a change in *behavior* breaks a test.
 //!
 //! [`spawn_app`] binds port 0 and asks the kernel which port it got, so the
 //! suite needs no reserved port and its tests cannot collide with each other or

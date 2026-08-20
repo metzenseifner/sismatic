@@ -112,13 +112,17 @@ impl Setting {
         }
     }
 
-    /// The SIS verb this setting writes through.
+    /// The SIS verb this setting writes through. Crate-visible so the simulator
+    /// can build its write echo from the same verb the client addressed, rather
+    /// than re-spelling the token in a second place — as
+    /// [`Register::reg`](super::register::Register::reg) and
+    /// [`Command::verb`](super::commands::Command::verb) already are.
     ///
     /// Every verb below is the *read* verb attested in `query.rs`. The write
     /// form is the same verb with the value in front — verify per model against
     /// the SIS reference before shipping. See the design note's verification
     /// section.
-    fn verb(self) -> &'static str {
+    pub(crate) fn verb(self) -> &'static str {
         match self {
             Setting::UnitName => "CN",
             Setting::Timezone => "TZON",
