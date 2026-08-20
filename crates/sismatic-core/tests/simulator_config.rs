@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_core::protocol::instructions::register::Register;
+use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_core::simulator::{DeviceState, catalog_fields};
 
 /// The config is pulled in at compile time, so a rename or deletion is a build
@@ -108,5 +109,43 @@ fn every_settable_register_has_a_read_path() {
     assert!(
         gettable.difference(&settable).count() > 0,
         "expected some read-only fields"
+    );
+}
+
+/// The same guarantee for the other write catalog: `names(Setting)` ⊆
+/// `names(Query)`.
+///
+/// A setting write lands in the cell its canonical name picks, and the
+/// simulator will only accept a value that field's *read* parser can decode —
+/// so a write-only setting would be a field whose writes are neither validated
+/// nor observable, and `set_then_get_round_trips_every_setting` could not see
+/// it. If this fails, either add the matching `Query` variant or accept the
+/// hole deliberately.
+#[test]
+fn every_setting_has_a_read_path() {
+    let gettable: BTreeSet<&str> = Query::ALL.iter().map(|q| q.name()).collect();
+    let writable: BTreeSet<&str> = Setting::ALL.iter().map(|s| s.name()).collect();
+
+    let write_only: BTreeSet<_> = writable.difference(&gettable).copied().collect();
+    assert!(
+        write_only.is_empty(),
+        "these settings can be written but never read back: {write_only:?}"
+    );
+}
+
+/// The two write catalogs name disjoint fields, which is what lets the write
+/// path route by name: `PUT /settings/TITLE` is refused as "that is metadata"
+/// by looking `TITLE` up in `Register`, and nothing else. An overlap would make
+/// that lookup ambiguous and would put one storage cell under two write rules —
+/// one of which applies a recording freeze and one of which does not.
+#[test]
+fn no_field_is_both_a_metadata_register_and_a_device_setting() {
+    let registers: BTreeSet<&str> = Register::ALL.iter().map(|r| r.name()).collect();
+    let settings: BTreeSet<&str> = Setting::ALL.iter().map(|s| s.name()).collect();
+
+    let both: BTreeSet<_> = registers.intersection(&settings).copied().collect();
+    assert!(
+        both.is_empty(),
+        "these fields are in both write catalogs: {both:?}"
     );
 }

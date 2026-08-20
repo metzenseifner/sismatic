@@ -17,9 +17,9 @@
 //!
 //! # Config is the *initial* state
 //!
-//! The map is mutable at runtime: register writes overwrite a field and
-//! recording commands rewrite `RUNNING_STATE`. The file is a starting point,
-//! not a fixed answer table.
+//! The map is mutable at runtime: register and setting writes overwrite a field
+//! and recording commands rewrite `RUNNING_STATE`. The file is a starting
+//! point, not a fixed answer table.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -34,6 +34,7 @@ use crate::protocol::control_chars::RCDR_LOWER;
 use crate::protocol::instructions::commands::Command;
 use crate::protocol::instructions::query::Query;
 use crate::protocol::instructions::register::{MAX_VALUE_LEN, Register};
+use crate::protocol::instructions::setting::Setting;
 use crate::protocol::payload_helpers::shorten;
 use crate::simulator::dispatch::Request;
 
@@ -94,7 +95,7 @@ struct RawConfig {
 /// so `--check-config` can show every problem in one pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Issue {
-    /// A config key that is in neither [`Query`] nor [`Register`].
+    /// A config key that is in none of [`Query`], [`Register`] or [`Setting`].
     Unknown {
         /// The key as written in the file.
         key: String,
@@ -222,7 +223,8 @@ impl DeviceState {
     }
 
     /// Apply a decoded request and produce the device's reply, or `None` when
-    /// the device would stay silent (an unset field — which surfaces to the
+    /// the device would stay silent (an unset field, or a setting write whose
+    /// value the field's own read parser rejects — either surfaces to the
     /// client as a command timeout, exactly like an unmodelled request).
     pub fn handle(&self, request: Request) -> Option<String> {
         match request {
@@ -240,6 +242,14 @@ impl DeviceState {
                 self.set(Query::RunningState.name(), running_state_code(c));
                 Some(format!("{RCDR_LOWER}{}\r\n", c.verb()))
             }
+
+            // No `RCDR` and no `*`: a setting is addressed to the device, not
+            // to the recorder subsystem, so its echo is a bare `<verb><value>`
+            // (see `setting::setting_echo`, which parses this).
+            Request::Configure(s, value) => survives_the_read_path(s.name(), &value).then(|| {
+                self.set(s.name(), value.clone());
+                format!("{}{value}\r\n", s.verb())
+            }),
         }
     }
 
@@ -321,24 +331,65 @@ impl DeviceState {
 /// simulator's output reproducible.
 const BANNER_DATE: &str = "Mon, 13 Jul 2026 08:16:21";
 
-/// Every field the protocol can read or write: `Query::ALL ∪ Register::ALL`,
-/// joined on the canonical name. `TITLE` appears in both catalogs and is one
-/// field — which is what makes a register write visible to a later query
-/// without any pairing table.
+/// Every field the protocol can read or write:
+/// `Query::ALL ∪ Register::ALL ∪ Setting::ALL`, joined on the canonical name.
+/// `TITLE` appears in two of them and is one field — which is what makes a
+/// write visible to a later query without any pairing table.
+///
+/// `Setting::ALL` contributes nothing to the union today, because every setting
+/// names a field some query also reads (`every_setting_has_a_read_path`). It is
+/// chained in anyway so that a write-only setting would be *reported* as a
+/// missing config field rather than quietly escaping coverage.
 pub fn catalog_fields() -> BTreeSet<String> {
     Query::ALL
         .iter()
         .map(|q| q.name().to_string())
         .chain(Register::ALL.iter().map(|r| r.name().to_string()))
+        .chain(Setting::ALL.iter().map(|s| s.name().to_string()))
         .collect()
 }
 
-/// Resolve a config key to its canonical catalog name, trying both catalogs.
+/// Resolve a config key to its canonical catalog name, trying every catalog.
 fn canonical_name(key: &str) -> Option<String> {
     Query::from_str(key)
         .map(|q| q.name().to_string())
         .or_else(|_| Register::from_str(key).map(|r| r.name().to_string()))
+        .or_else(|_| Setting::from_str(key).map(|s| s.name().to_string()))
         .ok()
+}
+
+/// Whether `value` would survive being read back out of `field`: the
+/// simulator's own rendering of it, fed to that field's *production* parser.
+///
+/// The two conditions are exactly what [`DeviceState::check`] reports as
+/// [`Issue::Unparsable`] and [`Issue::Mismatch`], applied to a runtime write
+/// instead of the config file — so the store's invariant ("every cell holds
+/// wire text the client can decode") holds for a running device and not only
+/// for its starting state. Without it, one hand-crafted write could poison a
+/// cell and turn every later read of that field into a mysterious timeout.
+///
+/// Refusing here is also what the device does. A value it will not take is
+/// answered with an error token this catalog does not model
+/// (see [`Setting::instruction`]), which reaches the caller as a command
+/// timeout — which is what the simulator's silence produces.
+///
+/// This never refuses a value that came from [`Setting::instruction`]: a flag
+/// is already `0`/`1`, a port is already in range, and free text is already
+/// within its ceiling. What it catches is a request no client of ours built.
+fn survives_the_read_path(field: &str, value: &str) -> bool {
+    let Ok(query) = Query::from_str(field) else {
+        // A write-only field has no read path to disagree with. There are none
+        // (`every_setting_has_a_read_path`); this keeps the simulator serving
+        // if one is added deliberately.
+        return true;
+    };
+    match query.instruction().parse_step(&format!("{value}\r\n")) {
+        // An embedded CR truncates the reply, so the device would read back
+        // something other than what was written.
+        Step::Done(Value::Text(decoded)) => decoded == value,
+        Step::Done(_) => true,
+        Step::NeedMore => false,
+    }
 }
 
 /// The `RUNNING_STATE` wire code a command leaves behind. Written as an
@@ -457,6 +508,57 @@ fields:
         let long = "x".repeat(MAX_VALUE_LEN + 10);
         state.handle(Request::Set(Register::Title, long));
         assert_eq!(state.get("TITLE").map(|v| v.len()), Some(MAX_VALUE_LEN));
+    }
+
+    /// The settings half of `a_register_write_is_visible_to_the_matching_query`.
+    /// `Setting` and `Query` spell `TIMEZONE` the same way, so the write lands
+    /// in the cell the read looks in with no pairing table involved.
+    #[test]
+    fn a_setting_write_is_visible_to_the_matching_query() {
+        let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
+        state.handle(Request::Configure(
+            Setting::Timezone,
+            "Europe/Vienna".into(),
+        ));
+        assert_eq!(
+            state.handle(Request::Get(Query::Timezone)),
+            Some("Europe/Vienna\r\n".into())
+        );
+    }
+
+    /// The drift net for the write echo, without a socket: the bytes the
+    /// simulator answers a setting write with are fed to *that setting's own
+    /// production parser*. The echo shape lives in two places by necessity —
+    /// `setting_echo` parses it and `handle` renders it — and this is what
+    /// keeps them the same shape.
+    #[test]
+    fn a_setting_write_echo_satisfies_the_clients_own_parser() {
+        let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
+        let value = "Europe/Vienna";
+        let echo = state
+            .handle(Request::Configure(Setting::Timezone, value.into()))
+            .expect("a legal setting write is answered");
+        assert_eq!(
+            Setting::Timezone
+                .instruction(value)
+                .expect("a timezone is free text")
+                .parse_step(&echo),
+            Step::Done(Value::Text(value.into())),
+            "the client's parser could not read the simulator's echo"
+        );
+    }
+
+    /// A value no `Setting::instruction` would ever produce, arriving anyway.
+    /// Storing it would leave `DHCP_MODE` holding text the flag parser cannot
+    /// read, so every later read of the field would time out instead.
+    #[test]
+    fn a_setting_write_the_read_parser_would_reject_is_ignored() {
+        let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
+        assert_eq!(
+            state.handle(Request::Configure(Setting::DhcpMode, "maybe".into())),
+            None
+        );
+        assert_eq!(state.get("DHCP_MODE").as_deref(), Some("0"), "unchanged");
     }
 
     #[test]

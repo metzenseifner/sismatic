@@ -21,6 +21,7 @@ use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::instructions::commands::Command;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_core::protocol::instructions::register::Register;
+use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_core::protocol::{RecordingState, Value};
 use sismatic_core::simulator::{DeviceState, ReplyStream, SimulatedDevice, bind};
 use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
@@ -196,6 +197,80 @@ async fn set_then_get_round_trips_every_register() {
             register.index()
         );
     }
+}
+
+/// The same round trip for the other write catalog — the one the `PUT
+/// .../settings/{field}` route ends in.
+///
+/// Two things have to hold and neither is checkable without a connection.
+/// First, the device must *acknowledge* the write in bytes `setting_echo`
+/// accepts: a setting echo carries no `RCDR` and no `*`, unlike a register's,
+/// and getting that wrong is not a wrong answer but a **command timeout**, five
+/// seconds of nothing. Second, the value must be observable through the query
+/// that shares the setting's name — `Setting::verb` picks the write verb and
+/// `Query::instruction` independently picks the read verb, and nothing but this
+/// forces them to agree.
+#[tokio::test]
+async fn set_then_get_round_trips_every_setting() {
+    use std::str::FromStr;
+
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
+
+    for (i, &setting) in Setting::ALL.iter().enumerate() {
+        // `every_setting_has_a_read_path` guarantees this resolves.
+        let query = Query::from_str(setting.name())
+            .unwrap_or_else(|_| panic!("{setting} has no matching query"));
+        let probe = probe_value(i, setting);
+
+        let echoed = device
+            .run(&setting.instruction(&probe).expect("the probe is legal"))
+            .await
+            .unwrap_or_else(|e| panic!("writing {setting} should succeed: {e:?}"));
+
+        // Every setting echo decodes to `Value::Text`, whatever the field's
+        // read type — it is the device repeating the characters it was sent.
+        assert_eq!(
+            echoed,
+            Value::Text(probe.clone()),
+            "{setting} did not echo the value it was written"
+        );
+
+        let read_back = device
+            .run(&query.instruction())
+            .await
+            .unwrap_or_else(|e| panic!("reading {query} back should succeed: {e:?}"));
+
+        // `Display` is the wire text for the three types a setting can have
+        // (text, port, flag). It is a human-facing projection only for
+        // `Value::State`, which no setting writes.
+        assert_eq!(
+            read_back.to_string(),
+            probe,
+            "{setting} did not read back through {query}"
+        );
+    }
+}
+
+/// A value `setting` accepts, discovered by asking the catalog's own encoder
+/// instead of keeping a per-setting table here — the table would be exactly the
+/// drift this simulator exists to avoid, and it would have to be updated by
+/// hand for every new setting.
+///
+/// The ladder runs from most to least distinctive, so free-text settings get a
+/// value unique to them and the narrower shapes fall through to one they
+/// accept. `i` keeps ports apart from each other and alternates the flags, so a
+/// write that lands in the wrong cell shows up as a mismatch rather than
+/// passing by coincidence.
+fn probe_value(i: usize, setting: Setting) -> String {
+    [
+        format!("probe-{}", setting.name()),
+        (40001 + i).to_string(),
+        (i % 2).to_string(),
+    ]
+    .into_iter()
+    .find(|candidate| setting.instruction(candidate).is_ok())
+    .unwrap_or_else(|| panic!("no probe value for {setting}: extend the ladder"))
 }
 
 /// Config is the *initial* state: a command mutates the device, and the change

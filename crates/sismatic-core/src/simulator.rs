@@ -13,7 +13,7 @@
 //!
 //! | Concern | Derived from |
 //! |---|---|
-//! | Which requests exist | [`Query::ALL`], [`Command::ALL`], [`Register::ALL`] |
+//! | Which requests exist | [`Query::ALL`], [`Command::ALL`], [`Register::ALL`], [`Setting::ALL`] |
 //! | Their exact bytes | each enum's own `instruction()` constructor |
 //! | Which config keys are legal | the catalogs' `FromStr` (aliases and case-insensitivity for free) |
 //! | Whether a value is well-formed | the *production* parser, run over the simulator's own output |
@@ -21,6 +21,7 @@
 //! [`Query::ALL`]: crate::protocol::instructions::query::Query::ALL
 //! [`Command::ALL`]: crate::protocol::instructions::commands::Command::ALL
 //! [`Register::ALL`]: crate::protocol::instructions::register::Register::ALL
+//! [`Setting::ALL`]: crate::protocol::instructions::setting::Setting::ALL
 //!
 //! The remaining gap — a config that omits a field, names one that does not
 //! exist, or gives one a value the parser rejects — is closed by
@@ -30,21 +31,28 @@
 //! # Fields, algebraically
 //!
 //! The device is a partial map `Field → wire text`, where
-//! `Field = names(Query) ∪ names(Register)` joined on the canonical name. The
-//! two catalogs are read and write *views* over that one name space, so:
+//! `Field = names(Query) ∪ names(Register) ∪ names(Setting)` joined on the
+//! canonical name. The catalogs are read and write *views* over that one name
+//! space, so, writing `W = names(Register) ∪ names(Setting)`:
 //!
-//! - `names(Query) ∩ names(Register)` — read/write metadata (`TITLE`, …). One
-//!   storage cell, so a register write is visible to a later query with no
-//!   pairing table to maintain.
-//! - `names(Query) \ names(Register)` — read-only (`FIRMWARE`, `MAC_ADDRESS`,
-//!   `DATE`, `IDENTIFIER`, …).
-//! - `names(Register) \ names(Query)` — write-only. Currently empty, and
-//!   `every_settable_register_has_a_read_path` keeps it that way: a register
-//!   with no read path is a field the drift net can only check for *presence*,
-//!   never decode or observe.
+//! - `names(Query) ∩ W` — read/write fields (`TITLE`, `TIMEZONE`, …). One
+//!   storage cell, so a write is visible to a later query with no pairing table
+//!   to maintain.
+//! - `names(Query) \ W` — read-only (`FIRMWARE`, `MAC_ADDRESS`, `DATE`,
+//!   `IDENTIFIER`, …).
+//! - `W \ names(Query)` — write-only. Currently empty, and
+//!   `every_settable_register_has_a_read_path` and `every_setting_has_a_read_path`
+//!   keep it that way: a field with no read path is one the drift net can only
+//!   check for *presence*, never decode or observe.
+//!
+//! The two write views are disjoint and stay that way deliberately: `Register`
+//! is metadata addressed to the recorder subsystem and carries a recording
+//! freeze, `Setting` is device configuration that does not. The simulator keeps
+//! them apart as [`Request::Set`] and [`Request::Configure`] rather than
+//! merging them into one write, because the wire framing differs too.
 //!
 //! The config supplies the map's *initial* value. It is mutable at runtime:
-//! register writes overwrite a field and recording commands rewrite
+//! register and setting writes overwrite a field and recording commands rewrite
 //! `RUNNING_STATE`.
 //!
 //! # Example
