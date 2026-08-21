@@ -531,37 +531,142 @@
               src = pkgs.lib.sources.sourceFilesBySuffices src [ ".toml" ];
             };
 
-            # Guardrail for the release-plz footgun that broke CI when
-            # sismatic-api-types was added. A new workspace member defaults to
-            # `release = true`; because the git tag is shared workspace-wide
-            # (git_tag_name = "v{{ version }}"), release-plz then looks for the
-            # crate in a worktree at the last tag — where a just-added crate does
-            # not exist — and the whole release-pr job errors. That dynamic
-            # failure can't be reproduced here (no network, no tag history), but
-            # its root cause is a *static* drift: a member with no explicit entry
-            # in release-plz.toml. Enforce that the member set and the
-            # [[package]] set match exactly.
+            # Guardrail for the release-plz footgun that wedged main when
+            # sismatic-intent-relay was added (Actions run 32251398251).
+            #
+            # Mechanism, measured rather than inferred. Under `git_only`,
+            # release-plz resolves each member's last release by matching tags
+            # against that member's `git_tag_name` template, checks the match out
+            # in a temp worktree, runs `cargo package --workspace` there, and
+            # looks the member up in the result (release_plz_core/src/next_ver.rs,
+            # `get_cargo_package`). Our workspace template `v{{ version }}` carries
+            # no `{{ package }}`, so *every* member matches `v0.2.25` — including
+            # crates that did not exist at that tag. The lookup then fails hard:
+            #
+            #     Failed to find package "sismatic-intent-relay"
+            #
+            # and no release PR opens again, ever, because the tag can only move
+            # via the release PR that is now failing.
+            #
+            # `release = false` does not help, and the older version of this check
+            # was built on the belief that it did. It exempts a member from version
+            # determination — only sismatic-core and sismatic-python-sdk ever reach
+            # `determining next version` — but NOT from the packaging pass that
+            # crashes. sismatic-intent-relay had an explicit entry with
+            # `release = false` and wedged main anyway.
+            #
+            # The fix is to make the tag match impossible for members that have
+            # never been released: scope their template with `{{ package }}`. Since
+            # `git_tag_enable = false` for all of them, no such tag is ever created,
+            # so release-plz takes its "treated as initial release" branch and never
+            # opens a worktree. Measured: identical version and changelog output to
+            # the unscoped config, in ~2 min rather than ~18.
+            #
+            # The converse matters just as much. Scoping a member that *is* released
+            # strips the baseline its changelog is diffed against, and the next
+            # release PR regenerates that changelog from the beginning of history.
+            # Measured on sismatic-python-sdk: its proposed 0.2.26 entry came back
+            # containing "release v0.2.25", "release v0.2.24", and "rename
+            # sismatic-python to sismatic-python-sdk".
+            #
+            # So the invariant is a biconditional, not an implication:
+            #
+            #     release = false  <=>  git_tag_name contains {{ package }}
+            #
+            # Both halves are pure functions of two files in this tree, which is
+            # why this can live in the flake sandbox at all. The historical form of
+            # the invariant — "every member exists at the last tag" — cannot: the
+            # sandbox has no .git, no tags and no network.
             release-plz-config =
               let
                 cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
                 releasePlz = builtins.fromTOML (builtins.readFile ./release-plz.toml);
-                # Dir basename != package name necessarily
-                # so read each member's own manifest for the
-                # real name.
+
+                # Dir basename != package name necessarily, so read each member's
+                # own manifest for the real name.
                 memberNames = map (
                   m: (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml"))).package.name
                 ) cargoToml.workspace.members;
-                entryNames = map (p: p.name) (releasePlz.package or [ ]);
+
+                entries = releasePlz.package or [ ];
+                entryNames = map (p: p.name) entries;
                 missing = lib.subtractLists entryNames memberNames; # members with no entry
                 stale = lib.subtractLists memberNames entryNames; # entries with no member
+
+                # A member's effective template is its own override, else the
+                # workspace default.
+                wsTagName = releasePlz.workspace.git_tag_name or null;
+                tagTemplate = p: p.git_tag_name or wsTagName;
+                # Accept any spelling: {{package}}, {{ package }}, {{  package  }}.
+                isScoped =
+                  p:
+                  let
+                    t = tagTemplate p;
+                  in
+                  t != null && lib.hasInfix "{{package}}" (builtins.replaceStrings [ " " ] [ "" ] t);
+                isReleased = p: (p.release or true) == true;
+
+                # Half one: an unreleased member with an unscoped template is the
+                # intent-relay bug, armed and waiting for the next new crate.
+                unscopedUnreleased = map (p: p.name) (
+                  builtins.filter (p: !(isReleased p) && !(isScoped p)) entries
+                );
+                # Half two: a released member with a scoped template loses its
+                # changelog baseline.
+                scopedReleased = map (p: p.name) (builtins.filter (p: isReleased p && isScoped p) entries);
+
+                # Promoting a crate to released is the one case this check cannot
+                # settle statically: it would have to prove the crate exists at the
+                # last tag, which needs history the sandbox does not have. Pin the
+                # set so that decision is made by a human editing this list, who can
+                # then check the tag by hand.
+                expectedReleased = [
+                  "sismatic-core"
+                  "sismatic-python-sdk"
+                  "sismatic-http-api"
+                ];
+                actualReleased = map (p: p.name) (builtins.filter isReleased entries);
+                newlyReleased = lib.subtractLists expectedReleased actualReleased;
+                noLongerReleased = lib.subtractLists actualReleased expectedReleased;
               in
               assert lib.assertMsg (missing == [ ] && stale == [ ]) ''
                 release-plz.toml is out of sync with the workspace members.
                   members missing a [[package]] entry: ${lib.concatStringsSep ", " missing}
                   stale [[package]] entries (no such member): ${lib.concatStringsSep ", " stale}
-                Every workspace member needs an explicit entry (release = false
-                unless it should be processed), so a new crate can't silently
-                default to release = true.
+                Every workspace member needs an explicit entry.
+              '';
+              assert lib.assertMsg (unscopedUnreleased == [ ]) ''
+                release-plz.toml: unreleased member(s) with a workspace-shaped git_tag_name:
+                  ${lib.concatStringsSep ", " unscopedUnreleased}
+                These carry `release = false`, so release-plz never releases them —
+                but the workspace template `${toString wsTagName}` still matches the
+                last `v*` tag for them. The moment such a crate is added after a tag,
+                release-plz checks out that tag, cannot find the crate there, and the
+                release-pr job dies with `Failed to find package "<crate>"` — with no
+                way to recover, since the tag only moves via the release PR.
+                Give each one a scoped template so no tag can ever match it:
+                  git_tag_name = "{{ package }}-v{{ version }}"
+              '';
+              assert lib.assertMsg (scopedReleased == [ ]) ''
+                release-plz.toml: released member(s) with a scoped git_tag_name:
+                  ${lib.concatStringsSep ", " scopedReleased}
+                A scoped template matches no tag, so release-plz treats these as an
+                initial release and regenerates their CHANGELOG.md from the whole
+                git history instead of from the last release. Released members must
+                keep the workspace-shaped template so they retain a diff baseline.
+                Drop the git_tag_name override from these entries.
+              '';
+              assert lib.assertMsg (newlyReleased == [ ] && noLongerReleased == [ ]) ''
+                release-plz.toml: the set of released members changed.
+                  newly released: ${lib.concatStringsSep ", " newlyReleased}
+                  no longer released: ${lib.concatStringsSep ", " noLongerReleased}
+                A released member must already exist at the latest `v*` tag, which
+                this check cannot verify (the flake sandbox has no tag history).
+                Confirm by hand:
+                  git ls-tree --name-only "$(git describe --tags --abbrev=0)" crates/
+                If the crate is NOT there, ship a release containing it first (as
+                release = false + scoped), then promote it in a follow-up PR.
+                Then update expectedReleased in flake.nix to match.
               '';
               pkgs.runCommand "release-plz-config-ok" { } "touch $out";
 

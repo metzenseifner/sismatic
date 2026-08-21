@@ -12,14 +12,20 @@
 pub mod commands;
 pub mod devices;
 pub mod error;
+pub mod group_readings;
 pub mod health_check;
 pub mod readings;
+pub mod target;
 
 pub use devices::{list_devices, list_groups, read_device, read_group};
 
+pub use group_readings::{group_field_history, list_group_fields, read_group_field};
+
 pub use commands::{
-    IdempotencyKey, ValueWrite, list_commands, pause_recording, read_command, read_phase,
-    set_metadata, set_setting, start_recording, stop_recording,
+    IdempotencyKey, ValueWrite, list_commands, list_group_commands, pause_group_recording,
+    pause_recording, read_command, read_group_phase, read_phase, set_group_metadata,
+    set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
+    stop_group_recording, stop_recording,
 };
 pub use error::ApiFailure;
 pub use health_check::health_check;

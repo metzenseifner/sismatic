@@ -1,10 +1,10 @@
 //! A set of devices driven as one.
 //!
 //! A [`DeviceGroup`] bundles several [`Device`]s behind a single id so a caller
-//! can address a whole room as if it were one unit: sending an instruction to
-//! the group sends it to *every* member. The motivating case is more than one
-//! recorder in the same room that must start together — issuing `start` to the
-//! group dispatches `start` to all of them.
+//! can address a whole device group as if it were one unit: sending an
+//! instruction to the group sends it to *every* member. The motivating case is
+//! more than one recorder in the same physical room that must start together —
+//! issuing `start` to the group dispatches `start` to all of them.
 //!
 //! Fan-out is concurrent: each member's exchange is spawned before any is
 //! awaited, so the members act in unison rather than one-after-another. Each

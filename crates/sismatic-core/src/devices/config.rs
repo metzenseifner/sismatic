@@ -46,9 +46,9 @@
 //! The two barrier keys describe what happens when a command addressed to the
 //! *group* cannot reach every member at once. The write side expands such a
 //! command into one row per member and holds them all until each is ready to
-//! go, so the room acts in unison; `barrier_timeout_secs` bounds that wait and
-//! `barrier` says whether a partial room is dispatched or the whole batch
-//! fails. See [`Barrier`].
+//! go, so the device group acts in unison; `barrier_timeout_secs` bounds that
+//! wait and `barrier` says whether a partially arrived device group is
+//! dispatched or the whole batch fails. See [`Barrier`].
 //!
 //! Resolution is format-agnostic: [`resolve_config`] turns an already-parsed
 //! [`RawConfig`] into a fully-resolved [`Resolved`] (devices plus groups) and is
@@ -217,7 +217,8 @@ pub struct DeviceConfig {
 ///
 /// A group-addressed command is expanded into one row per member, and none of
 /// them is dispatched until every one has reached the head of its own device's
-/// queue. That rendezvous is what makes "the room starts together" true rather
+/// queue. That rendezvous is what makes "the device group starts together" true
+/// rather
 /// than approximately true. A member whose device is wedged, however, would
 /// hold the barrier indefinitely, so the wait is bounded — and this is the
 /// answer to what happens when the bound is reached.
@@ -567,7 +568,7 @@ struct RawDevice {
 /// A group as written: an `id`, the ids of the member devices, and how the
 /// rendezvous behaves. Nothing here inherits from `[defaults]`; a group is a
 /// name over existing devices plus a policy of its own, and a fleet-wide
-/// default barrier would be a claim about rooms this file cannot make.
+/// default barrier would be a claim about device groups this file cannot make.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGroup {
@@ -1046,7 +1047,7 @@ devices = ["room-5-front", "room-5-back"]
 
     /// A misspelling is a startup error naming the value, not a silent fallback
     /// to the default — which for `barrier` would quietly change what happens
-    /// to a half-arrived room.
+    /// to a half-arrived device group.
     #[test]
     fn a_misspelled_barrier_is_rejected_by_name() {
         let text = format!("{GROUP_EXAMPLE}barrier = \"failed\"\n");

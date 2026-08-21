@@ -126,7 +126,7 @@ async fn the_group_index_lists_members_in_configured_order() {
         vec![GroupSummary {
             id: "room".to_owned(),
             // Not alphabetical: the operator wrote this sequence and a fan-out
-            // has to address the room the way it reads.
+            // has to address the device group the way it reads.
             members: vec!["atrium".to_owned(), "annex".to_owned()],
             barrier_timeout_secs: 15,
             barrier: Barrier::FailBatch,
@@ -248,7 +248,7 @@ async fn a_write_to_an_unconfigured_device_is_refused_at_submission() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|m| m.contains("no device or group 'typo'")),
+            .is_some_and(|m| m.contains("no device 'typo'")),
         "got: {}",
         body["error"]
     );
@@ -297,28 +297,41 @@ async fn every_write_route_refuses_an_unconfigured_target() {
     }
 }
 
-/// A group id is addressable too. Group fan-out is not implemented yet, so this
-/// pins only that the guard does not reject one — the point being that when
-/// fan-out lands, the catalog is already the thing that says a group exists.
+/// A group id is addressable, in its own URL space. The device space refuses it
+/// and names the one that works — the two spaces are only worth having if each
+/// one means what it says.
 #[tokio::test]
-async fn a_group_id_passes_the_guard() {
+async fn a_group_id_is_addressable_under_groups_and_refused_under_devices() {
     let (address, _outbox) = harness::spawn(Arc::new(MemoryStore::default()));
+    let client = reqwest::Client::new();
 
-    let status = reqwest::Client::new()
+    let accepted = client
+        .post(format!("{address}/v1/groups/{GROUP}/recording/start"))
+        .send()
+        .await
+        .expect("issuing the request");
+    assert_eq!(accepted.status().as_u16(), 202);
+
+    let refused = client
         .post(format!("{address}/v1/devices/{GROUP}/recording/start"))
         .send()
         .await
-        .expect("issuing the request")
-        .status()
-        .as_u16();
-
-    assert_eq!(status, 202);
+        .expect("issuing the request");
+    assert_eq!(refused.status().as_u16(), 404);
+    let body: serde_json::Value = refused.json().await.expect("a body");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("is a device group")
+            && message.contains(&format!("/v1/groups/{GROUP}/recording/start")),
+        "the refusal must name the route that works: {message}"
+    );
 }
 
 // ---- group-addressed writes -------------------------------------------
 
-/// A room of two, so a group submission expands into something worth counting.
-fn room_of_two() -> MemoryCatalog {
+/// A two-member device group, so a submission expands into something worth
+/// counting.
+fn device_group_of_two() -> MemoryCatalog {
     MemoryCatalog::new(
         vec![
             summary("front", "10.0.0.1", false),
@@ -337,10 +350,11 @@ fn room_of_two() -> MemoryCatalog {
 /// all under one batch.
 #[tokio::test]
 async fn a_group_start_expands_into_one_command_per_member() {
-    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+    let (address, ..) =
+        harness::spawn_with(Arc::new(MemoryStore::default()), device_group_of_two());
 
     let response = reqwest::Client::new()
-        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .post(format!("{address}/v1/groups/room-5/recording/start"))
         .send()
         .await
         .expect("issuing the request");
@@ -378,10 +392,11 @@ async fn a_group_start_expands_into_one_command_per_member() {
 /// on each other would only expose them to a barrier they have no use for.
 #[tokio::test]
 async fn a_group_metadata_write_expands_without_a_rendezvous() {
-    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+    let (address, ..) =
+        harness::spawn_with(Arc::new(MemoryStore::default()), device_group_of_two());
 
     let body: serde_json::Value = reqwest::Client::new()
-        .put(format!("{address}/v1/devices/room-5/metadata/title"))
+        .put(format!("{address}/v1/groups/room-5/metadata/title"))
         .json(&serde_json::json!({"value": "Week 4"}))
         .send()
         .await
@@ -400,7 +415,8 @@ async fn a_group_metadata_write_expands_without_a_rendezvous() {
 #[tokio::test]
 async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
     let (address, outbox) = {
-        let (a, o, _) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+        let (a, o, _) =
+            harness::spawn_with(Arc::new(MemoryStore::default()), device_group_of_two());
         (a, o)
     };
     let client = reqwest::Client::new();
@@ -416,7 +432,7 @@ async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
     assert_eq!(status, 202);
 
     let response = client
-        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .post(format!("{address}/v1/groups/room-5/recording/start"))
         .send()
         .await
         .expect("issuing the request");
@@ -445,10 +461,11 @@ async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
 /// command can tell it is part of a rendezvous rather than a lone request.
 #[tokio::test]
 async fn every_row_of_a_group_start_carries_the_batch() {
-    let (address, ..) = harness::spawn_with(Arc::new(MemoryStore::default()), room_of_two());
+    let (address, ..) =
+        harness::spawn_with(Arc::new(MemoryStore::default()), device_group_of_two());
 
     let body: serde_json::Value = reqwest::Client::new()
-        .post(format!("{address}/v1/devices/room-5/recording/start"))
+        .post(format!("{address}/v1/groups/room-5/recording/start"))
         .send()
         .await
         .expect("issuing the request")

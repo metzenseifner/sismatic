@@ -85,8 +85,9 @@ devices = ["atrium-101", "annex-far"]
 # Device Groups
 
 A `[[group]]` bundles several devices behind a single id so they act as one.
-The motivating case is more than one recorder in the same room that must start
-together: address the group and every member receives the instruction at once,
+The motivating case is more than one recorder in the same physical room that
+must start together: address the group and every member receives the instruction
+at once,
 rather than one after another. A group has just two fields, an `id` and the
 `devices` it contains, each of which must name a `[[device]]` defined elsewhere
 in the same file. Group ids share the same namespace as device ids, so a group

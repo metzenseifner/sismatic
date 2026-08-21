@@ -20,7 +20,8 @@ pub type CommandId = String;
 ///
 /// A `String` for the same reason [`CommandId`] is, and a *separate* id rather
 /// than the group's: a group can be addressed many times, and "these rows are
-/// one take's worth" is a statement about one request, not about the room.
+/// one take's worth" is a statement about one request, not about the device
+/// group.
 pub type BatchId = String;
 
 /// What to do when a batch's barrier does not fill within its timeout.

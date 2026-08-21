@@ -80,6 +80,16 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         crate::routes::devices::read_device,
         crate::routes::devices::list_groups,
         crate::routes::devices::read_group,
+        crate::routes::group_readings::list_group_fields,
+        crate::routes::group_readings::read_group_field,
+        crate::routes::group_readings::group_field_history,
+        crate::routes::commands::start_group_recording,
+        crate::routes::commands::stop_group_recording,
+        crate::routes::commands::pause_group_recording,
+        crate::routes::commands::set_group_metadata,
+        crate::routes::commands::set_group_setting,
+        crate::routes::commands::read_group_phase,
+        crate::routes::commands::list_group_commands,
     ),
     components(schemas(
         sismatic_api_types::Reading,
@@ -99,14 +109,32 @@ pub const SWAGGER_UI_PATH: &str = "/swagger-ui/{_:.*}";
         sismatic_api_types::DeviceDetail,
         sismatic_api_types::GroupList,
         sismatic_api_types::GroupSummary,
+        // The group read bodies. `MemberState`, `MemberHistory`,
+        // `GroupExpectation` and `SyncState` arrive by being reachable from
+        // these, for the same reason `ReadingValue` does.
+        sismatic_api_types::GroupFieldState,
+        sismatic_api_types::GroupFieldStateList,
+        sismatic_api_types::GroupHistory,
+        // The group write-side bodies. `MemberPhase` and `MemberCommands`
+        // arrive by being reachable from these.
+        sismatic_api_types::GroupPhase,
+        sismatic_api_types::GroupCommandList,
     )),
     tags(
         (name = "readings", description =
-            "Stored readings. Every queryable field of every device is reachable \
-             through these three routes, because the field is a path parameter \
-             passed through to the store rather than a symbol the server was \
-             compiled against — a field added to the device catalog is served here \
-             with no code change."),
+            "Stored readings, of one device or of a whole device group. Every \
+             queryable field of every device is reachable through these six \
+             routes, because the field is a path parameter passed through to the \
+             store rather than a symbol the server was compiled against — a field \
+             added to the device catalog is served here with no code change.\n\n\
+             The `/devices` half answers from the store alone, so an unknown id \
+             there is `nothing stored` rather than a `404`. The `/groups` half \
+             also consults the catalog, because a device group has no readings of \
+             its own and its membership has to come from somewhere — so an unknown \
+             *group* is a `404`, and each response additionally carries what the \
+             device group was last told to be, which is what makes a device group \
+             that ignored a request detectable when its members agree perfectly \
+             with each other."),
         (name = "inventory", description =
             "What this server was configured with. Answered from the device catalog \
              rather than the store, so an unknown id here is a `404` — a real claim \

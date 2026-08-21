@@ -1,13 +1,20 @@
 //! An in-memory outbox: the [`CommandSubmit`] / [`CommandLog`] /
-//! [`CommandDrain`] trio the write side runs on today.
+//! [`CommandDrain`] trio the write side runs on today, plus the [`GroupState`]
+//! read the group routes answer from.
 //!
 //! # Shape
 //!
 //! ```text
 //! logs:    device -> DeviceLog { phase, epoch, queue, history, keys }
 //! batches: batch_id -> Batch { members, ready, armed_at, barrier }
+//! groups:  group -> field -> GroupExpectation
 //! records: command_id -> CommandRecord
 //! ```
+//!
+//! `groups` is here rather than beside the readings because it holds what a
+//! device group was *told*, which is the same kind of belief a `DeviceLog`'s
+//! phase is, and is written by the same call under the same lock — see
+//! [`sismatic_store::group`].
 //!
 //! `records` is separate from `logs` because the two lookups are different
 //! questions. `GET /v1/commands/{id}` names a command and nothing else, so it
@@ -64,8 +71,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
 use sismatic_api_types::{
     Acceptance, Accepted, Barrier, BatchId, CommandId, CommandRecord, CommandStatus, DeviceId,
-    Phase, RecordingPhase, RecordingState, Timestamp,
+    FieldName, GroupExpectation, GroupId, Phase, RecordingPhase, RecordingState, Timestamp,
 };
+use sismatic_store::group::{GroupState, expects};
 use sismatic_store::outbox::{
     BarrierPolicy, Claim, CommandDrain, CommandLog, CommandSubmit, Outcome, Submission,
     SubmitError, Verb, admit, epoch_of, opens_recording, reconcile, rollback,
@@ -141,9 +149,10 @@ struct Batch {
 ///
 /// Three states rather than a `released: bool`, because a member arriving after
 /// the barrier resolved has to know *how* it resolved. Under
-/// [`Barrier::DispatchReady`] a straggler should go out on its own — the room
-/// has already started without it and one more recorder is still better than
-/// one fewer. Under [`Barrier::FailBatch`] it must not: the take was abandoned,
+/// [`Barrier::DispatchReady`] a straggler should go out on its own — the device
+/// group has already started without it and one more recorder is still better
+/// than one fewer. Under [`Barrier::FailBatch`] it must not: the take was
+/// abandoned,
 /// and dispatching now would produce exactly the lone recording that policy
 /// exists to rule out. A boolean cannot tell those apart, and the member that
 /// asks is by definition not the one that was there when it was decided.
@@ -157,13 +166,25 @@ enum Gate {
     Abandoned,
 }
 
-/// Everything the mutex guards. One struct rather than two `Mutex`es, because
-/// arming a batch and queueing its members' rows is one atomic step and two
-/// locks would be two chances to interleave.
+/// Everything the mutex guards. One struct rather than three `Mutex`es, because
+/// arming a batch, queueing its members' rows and recording what the device
+/// group was told are one atomic step, and separate locks would be chances to
+/// interleave.
 #[derive(Debug, Default)]
 struct State {
     logs: BTreeMap<DeviceId, DeviceLog>,
     batches: BTreeMap<BatchId, Batch>,
+    /// `group -> field -> what the group was last told that field should be`.
+    ///
+    /// Under the same lock as `logs` because it is written in the same critical
+    /// section that admits the submission — that is the whole contract of
+    /// [`GroupState`]: an expectation exists exactly when the request that
+    /// produced it was accepted (see [`sismatic_store::group`]).
+    ///
+    /// A `BTreeMap` inside, so `expected_all` iterates in the field order the
+    /// port promises rather than re-establishing it with a sort per read — the
+    /// same reasoning `MemoryStore`'s inner map is one.
+    groups: BTreeMap<GroupId, BTreeMap<FieldName, GroupExpectation>>,
 }
 
 #[derive(Clone)]
@@ -274,8 +295,8 @@ impl CommandSubmit for MemoryOutbox {
 
         // The whole critical section, and for a group it spans every member.
         // Nothing between the first admission check and the last queue push can
-        // observe a half-applied submission — which is what makes "the room
-        // starts or nothing does" true of the *decision* as well as the
+        // observe a half-applied submission — which is what makes "the device
+        // group starts or nothing does" true of the *decision* as well as the
         // dispatch.
         let mut state = self.state();
 
@@ -370,6 +391,35 @@ impl CommandSubmit for MemoryOutbox {
             });
         }
 
+        // Recorded here — inside the critical section, after the last thing
+        // that could have failed — so it holds exactly when the request was
+        // admitted. A submission the table refused returned above with the
+        // group's previous expectation untouched, which is what stops a
+        // rejected start from claiming the device group was asked to record.
+        // An idempotent replay returned above too, and deliberately: it
+        // produced no new commands, so moving `since` forward would report a
+        // device group as freshly told when nothing was sent.
+        //
+        // Every accepted group write gets one, batched or not: a metadata write
+        // fans out without a rendezvous (it gains nothing from acting in
+        // unison) and is exactly as capable of reaching four recorders out of
+        // five, which is the drift this is here to make visible.
+        if let Some(group) = &s.group {
+            let (field, value) = expects(&s.intent);
+            state.groups.entry(group.clone()).or_default().insert(
+                field.clone(),
+                GroupExpectation {
+                    field,
+                    value,
+                    // The submission's instant, so every member of one request
+                    // shares it and `since` reads as "when the device group
+                    // was told" rather than when some row happened to be
+                    // written.
+                    since: s.at.clone(),
+                },
+            );
+        }
+
         if let Some(batch_id) = &s.batch {
             // Armed here rather than on first arrival, so `armed_at` measures
             // the wait from when the request was accepted — which is the
@@ -452,6 +502,41 @@ impl CommandLog for MemoryOutbox {
             .get(&device)
             .map_or((Phase::Idle, 0), |log| (log.phase, log.epoch));
         Ok(RecordingPhase { phase, epoch })
+    }
+}
+
+/// The read half of what [`CommandSubmit::submit`] recorded about device
+/// groups.
+///
+/// On the outbox rather than on `MemoryStore`, because an expectation is
+/// write-side belief — the same kind of thing a [`Phase`] is, written by the
+/// same call, under the same lock. Putting it beside the readings would have
+/// made "what the device group was told" and "what a device reported" two rows
+/// in one table, which is exactly the conflation the group routes exist to
+/// undo.
+#[async_trait::async_trait]
+impl GroupState for MemoryOutbox {
+    async fn expected(
+        &self,
+        group: GroupId,
+        field: FieldName,
+    ) -> Result<Option<GroupExpectation>, ReadError> {
+        Ok(self
+            .state()
+            .groups
+            .get(&group)
+            .and_then(|fields| fields.get(&field).cloned()))
+    }
+
+    async fn expected_all(&self, group: GroupId) -> Result<Vec<GroupExpectation>, ReadError> {
+        // `BTreeMap`'s iteration order *is* the field ordering the port
+        // promises, so there is nothing to sort here.
+        Ok(self
+            .state()
+            .groups
+            .get(&group)
+            .map(|fields| fields.values().cloned().collect())
+            .unwrap_or_default())
     }
 }
 
@@ -698,8 +783,8 @@ impl MemoryOutbox {
 
         match batch.gate {
             // Resolved by dispatch; this is a straggler. Under `DispatchReady`
-            // that is the whole point — the room started without it and one
-            // more recorder still beats one fewer.
+            // that is the whole point — the device group started without it
+            // and one more recorder still beats one fewer.
             Gate::Open => return BatchStep::Alone,
             // Resolved by timeout under `FailBatch`. The take was abandoned,
             // so this row goes with it — this member and no other, since the
@@ -804,6 +889,7 @@ mod tests {
         Submission {
             ids: vec![id.to_owned()],
             targets: vec![DEV.to_owned()],
+            group: None,
             batch: None,
             barrier: None,
             intent,
@@ -1219,6 +1305,7 @@ mod batch_tests {
 
     const A: &str = "atrium";
     const B: &str = "annex";
+    const GROUP: &str = "atrium-room";
     const BATCH: &str = "batch-1";
 
     /// A group submission across [`A`] and [`B`], with `barrier` as the policy
@@ -1227,6 +1314,7 @@ mod batch_tests {
         Submission {
             ids: vec!["cmd-a".to_owned(), "cmd-b".to_owned()],
             targets: vec![A.to_owned(), B.to_owned()],
+            group: Some(GROUP.to_owned()),
             batch: Some(BATCH.to_owned()),
             barrier: Some(BarrierPolicy {
                 timeout: Duration::from_secs(10),
@@ -1244,6 +1332,7 @@ mod batch_tests {
         Submission {
             ids: vec![id.to_owned()],
             targets: vec![device.to_owned()],
+            group: None,
             batch: None,
             barrier: None,
             intent: Intent::SetMetadata {
@@ -1405,6 +1494,7 @@ mod batch_tests {
             .submit(Submission {
                 ids: vec!["after-a".to_owned()],
                 targets: vec![A.to_owned()],
+                group: None,
                 batch: None,
                 barrier: None,
                 intent: Intent::SetSetting {
@@ -1451,8 +1541,8 @@ mod batch_tests {
         );
     }
 
-    /// ...and a straggler under that policy still goes, because the room has
-    /// already started and one more recorder beats one fewer.
+    /// ...and a straggler under that policy still goes, because the device
+    /// group has already started and one more recorder beats one fewer.
     #[tokio::test]
     async fn a_straggler_under_dispatch_ready_goes_out_alone() {
         let outbox = outbox();
@@ -1643,5 +1733,162 @@ mod batch_tests {
                 "{device} should dispatch on its own, got {claimed:?}"
             );
         }
+    }
+
+    // ---- what the device group was told ------------------------------------------
+
+    /// `GroupState::expected` for one field of [`GROUP`], unwrapped.
+    async fn expected(outbox: &MemoryOutbox, field: &str) -> Option<GroupExpectation> {
+        GroupState::expected(outbox, GROUP.to_owned(), field.to_owned())
+            .await
+            .expect("expected")
+    }
+
+    const RUNNING_STATE: &str = "RUNNING_STATE";
+
+    #[tokio::test]
+    async fn an_admitted_group_request_records_what_the_room_was_told() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            expected(&outbox, RUNNING_STATE).await,
+            Some(GroupExpectation {
+                field: RUNNING_STATE.to_owned(),
+                value: ReadingValue::State(RecordingState::Started),
+                // The submission's instant, shared by every member's row.
+                since: at(T0),
+            })
+        );
+    }
+
+    /// The property the whole port exists for: the take was abandoned, every
+    /// row failed, every phase rolled back — and the device group still
+    /// records that it was asked to be recording. Without this the fleet reads
+    /// as perfectly consistent and nothing anywhere says a lecture was missed.
+    #[tokio::test]
+    async fn an_abandoned_take_leaves_the_expectation_standing() {
+        let outbox = outbox();
+        outbox.submit(blocker("ahead-b", B)).await.unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+        // Past the ten-second bound: the barrier never fills, so `FailBatch`
+        // fails the rows and `rollback` returns A to idle.
+        claim(&outbox, A, at_plus(11)).await;
+        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+
+        assert_eq!(
+            expected(&outbox, RUNNING_STATE).await.map(|e| e.value),
+            Some(ReadingValue::State(RecordingState::Started)),
+            "a failed command must not erase what the device group was asked for"
+        );
+    }
+
+    /// The counterpart: a submission the admission table *refused* records
+    /// nothing, so the previous expectation is what a reader still sees. A
+    /// rejected start that overwrote it would claim the device group was asked
+    /// for something at an instant when nothing was sent.
+    #[tokio::test]
+    async fn a_refused_group_request_leaves_the_previous_expectation_untouched() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        let refused = outbox
+            .submit(Submission {
+                ids: vec!["cmd-c".to_owned(), "cmd-d".to_owned()],
+                batch: Some("batch-2".to_owned()),
+                at: at_plus(30),
+                ..group_start(Barrier::FailBatch)
+            })
+            .await;
+        assert!(refused.is_err(), "a second start should be refused");
+
+        assert_eq!(
+            expected(&outbox, RUNNING_STATE).await.map(|e| e.since),
+            Some(at(T0)),
+            "the refused submission must not have moved `since`"
+        );
+    }
+
+    /// A device-addressed request carries no group, so it files no expectation:
+    /// one device's own phase already says what it was told, and a device
+    /// group it happens to belong to was not the thing that was asked.
+    #[tokio::test]
+    async fn a_device_addressed_request_records_no_group_expectation() {
+        let outbox = outbox();
+        outbox.submit(blocker("lone", A)).await.unwrap();
+
+        assert_eq!(
+            outbox
+                .expected_all(GROUP.to_owned())
+                .await
+                .expect("expected_all"),
+            Vec::new()
+        );
+    }
+
+    /// One entry per field, ordered by field name — the order the port promises
+    /// and the group index route renders in.
+    #[tokio::test]
+    async fn expectations_accumulate_per_field_in_field_order() {
+        let outbox = outbox();
+        // A title first (admissible while idle), then the start.
+        outbox
+            .submit(Submission {
+                ids: vec!["cmd-t1".to_owned(), "cmd-t2".to_owned()],
+                batch: None,
+                barrier: None,
+                intent: Intent::SetMetadata {
+                    field: "TITLE".to_owned(),
+                    value: "Week 4".to_owned(),
+                },
+                ..group_start(Barrier::FailBatch)
+            })
+            .await
+            .unwrap();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .unwrap();
+
+        let all = outbox
+            .expected_all(GROUP.to_owned())
+            .await
+            .expect("expected_all");
+        assert_eq!(
+            all.iter().map(|e| e.field.as_str()).collect::<Vec<_>>(),
+            [RUNNING_STATE, "TITLE"]
+        );
+        // A write carries the caller's text unchanged; reconciling it with the
+        // device's decode is `sismatic_store::group::satisfies`' job, not this
+        // adapter's.
+        assert_eq!(all[1].value, ReadingValue::Text("Week 4".to_owned()));
+    }
+
+    /// An idempotent replay produced no new commands, so it must not report
+    /// the device group as freshly told.
+    #[tokio::test]
+    async fn an_idempotent_replay_does_not_move_the_expectation() {
+        let outbox = outbox();
+        let keyed = |at_: Timestamp| Submission {
+            idempotency_key: Some("retry-me".to_owned()),
+            at: at_,
+            ..group_start(Barrier::FailBatch)
+        };
+        outbox.submit(keyed(at(T0))).await.unwrap();
+        outbox.submit(keyed(at_plus(30))).await.unwrap();
+
+        assert_eq!(
+            expected(&outbox, RUNNING_STATE).await.map(|e| e.since),
+            Some(at(T0))
+        );
     }
 }

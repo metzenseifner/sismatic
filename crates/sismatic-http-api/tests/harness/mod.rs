@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
 use sismatic_http_api::Stamp;
+use sismatic_store::group::DynGroupState;
 use sismatic_store::outbox::{DynCommandLog, DynCommandSubmit};
 use sismatic_store::status::DeviceStatus;
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
@@ -55,17 +56,31 @@ pub const GROUP: &str = "atrium-room";
 /// The catalog the suites run against unless they build their own: one device
 /// and one group over it.
 pub fn catalog() -> MemoryCatalog {
+    device_group(&[DEVICE])
+}
+
+/// A catalog of one group over `members`, in the order given.
+///
+/// The order is the point: `MemoryCatalog` sorts *devices* by id and leaves a
+/// group's member list alone, so a device group written `[atrium, annex]` reads
+/// back in that sequence — and the group routes promise their member lists in
+/// exactly that order. A helper that sorted here would make that promise
+/// untestable.
+pub fn device_group(members: &[&str]) -> MemoryCatalog {
     MemoryCatalog::new(
-        vec![DeviceSummary {
-            id: DEVICE.to_owned(),
-            host: "10.0.0.7".to_owned(),
-            port: 22023,
-            eager: false,
-            status: ConnectionStatus::Unknown,
-        }],
+        members
+            .iter()
+            .map(|id| DeviceSummary {
+                id: (*id).to_owned(),
+                host: "10.0.0.7".to_owned(),
+                port: 22023,
+                eager: false,
+                status: ConnectionStatus::Unknown,
+            })
+            .collect(),
         vec![GroupSummary {
             id: GROUP.to_owned(),
-            members: vec![DEVICE.to_owned()],
+            members: members.iter().map(|id| (*id).to_owned()).collect(),
             barrier_timeout_secs: 15,
             barrier: Barrier::FailBatch,
         }],
@@ -105,14 +120,23 @@ pub fn serve_with_status(
     let status: DynDeviceStatus = Arc::new(status);
     let submit: DynCommandSubmit = Arc::new(outbox.clone());
     let log: DynCommandLog = Arc::new(outbox.clone());
+    // The same object again, as the read-only view of what each device group
+    // was told — the real adapter rather than a double, for the reason at the
+    // top of this file: a double would have to restate when an expectation is
+    // recorded, and that rule lives inside the outbox's admission critical
+    // section.
+    let group_state: DynGroupState = Arc::new(outbox.clone());
 
     let server = sismatic_http_api::run(
         listener,
-        store,
-        catalog,
-        status,
-        submit,
-        log,
+        sismatic_http_api::Ports {
+            store,
+            catalog,
+            status,
+            submit,
+            log,
+            group_state,
+        },
         counting_stamp(),
     )
     .expect("building the server");

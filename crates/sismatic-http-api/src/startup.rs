@@ -22,6 +22,7 @@ use std::net::TcpListener;
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
 use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
+use sismatic_store::group::{DynGroupState, GroupState};
 use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
 use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
@@ -29,13 +30,45 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
 use crate::routes::{
-    field_history, health_check, list_commands, list_devices, list_fields, list_groups,
-    pause_recording, read_command, read_device, read_field, read_group, read_phase, set_metadata,
-    set_setting, start_recording, stop_recording,
+    field_history, group_field_history, health_check, list_commands, list_devices, list_fields,
+    list_group_commands, list_group_fields, list_groups, pause_group_recording, pause_recording,
+    read_command, read_device, read_field, read_group, read_group_field, read_group_phase,
+    read_phase, set_group_metadata, set_group_setting, set_metadata, set_setting,
+    start_group_recording, start_recording, stop_group_recording, stop_recording,
 };
 use crate::stamp::Stamp;
 
-/// Build the application over the three ports, serve it on `listener`, and hand
+/// The collaborators the application is assembled over.
+///
+/// A struct rather than six positional arguments, and the reason is not only
+/// that six of them is where a caller starts passing the catalog where the
+/// status port goes. Four of these are trait objects the composition root
+/// builds from *one* value — the outbox is `submit`, `log` and `group_state` at
+/// once — so at the call site they are six `Arc::new(x.clone())`s of two
+/// distinguishable things. Named fields make a mis-wiring a field name that
+/// does not exist; positions make it a server that answers plausible nonsense.
+///
+/// Every field is a `dyn` handle rather than a concrete adapter, which is what
+/// keeps this crate unable to name a `MemoryStore` — or a `Registry` behind it.
+pub struct Ports {
+    /// Reading what the sync side persisted. Never a
+    /// [`WriteStore`](sismatic_store::WriteStore).
+    pub store: DynReadStore,
+    /// What the server was configured with — the only authority on whether an
+    /// id exists.
+    pub catalog: DynDeviceCatalog,
+    /// Live connection state, read from the running registry without dialing.
+    pub status: DynDeviceStatus,
+    /// Appending an intent. The one write verb the HTTP surface has.
+    pub submit: DynCommandSubmit,
+    /// Reading what was appended. No `CommandDrain` beside it, deliberately.
+    pub log: DynCommandLog,
+    /// Reading what each device group was last told to be. Read-only by
+    /// construction — see [`run`].
+    pub group_state: DynGroupState,
+}
+
+/// Build the application over its [`Ports`], serve it on `listener`, and hand
 /// the running server back.
 ///
 /// Fails only if the listener cannot be turned into a serving socket; every
@@ -44,27 +77,35 @@ use crate::stamp::Stamp;
 ///
 /// # What the argument list narrows
 ///
-/// Four capabilities, each the smallest one its handlers need. `submit` may
+/// Six capabilities, each the smallest one its handlers need. `submit` may
 /// append an intent and nothing else — it cannot dispatch one, settle one, or
 /// touch a reading. There is deliberately no `CommandDrain` here: draining is
 /// `sismatic-intent-relay`'s, and a handler that could claim a command could
 /// reorder a device's queue. And still no [`WriteStore`], so the readings
 /// routes remain unable to write no matter what they ask for.
 ///
+/// [`Ports::group_state`] is the newest and the narrowest: it can *read* what a
+/// device group was told and cannot record it. Recording happens inside
+/// `submit`, atomically with the admission it describes, which is why there is
+/// no write half to hand over — a handler able to set an expectation directly
+/// could claim a device group had been asked for something no command was ever
+/// queued for.
+///
 /// That is the same narrowing the read side already relied on, extended rather
-/// than relaxed: the write side gained exactly one verb, and it is one that
+/// than relaxed: the write side still has exactly one verb, and it is one that
 /// records a request rather than performs it.
 ///
 /// [`WriteStore`]: sismatic_store::WriteStore
-pub fn run(
-    listener: TcpListener,
-    store: DynReadStore,
-    catalog: DynDeviceCatalog,
-    status: DynDeviceStatus,
-    submit: DynCommandSubmit,
-    log: DynCommandLog,
-    stamp: Stamp,
-) -> Result<Server, std::io::Error> {
+pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, std::io::Error> {
+    let Ports {
+        store,
+        catalog,
+        status,
+        submit,
+        log,
+        group_state,
+    } = ports;
+
     // Adopt the caller's `Arc` instead of wrapping it: `Data::new` would give
     // handlers an `Arc<Arc<dyn ReadStore>>` to dereference twice, and would make
     // the type say the API owns a store rather than shares one.
@@ -73,6 +114,7 @@ pub fn run(
     let status: web::Data<dyn DeviceStatus> = web::Data::from(status);
     let submit: web::Data<dyn CommandSubmit> = web::Data::from(submit);
     let log: web::Data<dyn CommandLog> = web::Data::from(log);
+    let group_state: web::Data<dyn GroupState> = web::Data::from(group_state);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
     // the composition root has no reason to keep a handle to it.
     let stamp = web::Data::new(stamp);
@@ -92,6 +134,7 @@ pub fn run(
             .app_data(status.clone())
             .app_data(submit.clone())
             .app_data(log.clone())
+            .app_data(group_state.clone())
             .app_data(stamp.clone())
             .service(
                 // A `resource` rather than `App::route`, which is otherwise the
@@ -171,6 +214,50 @@ pub fn run(
                     // three, because it is the shortest.
                     .service(web::resource("/devices/{id}").route(web::get().to(read_device)))
                     .service(web::resource("/devices").route(web::get().to(list_devices)))
+                    // The group routes, read and write, in the same
+                    // longest-path-first order and ahead of the bare
+                    // `/groups/{id}` for the same reason `/devices/{id}` comes
+                    // after everything under it.
+                    .service(
+                        web::resource("/groups/{id}/fields/{field}/history")
+                            .route(web::get().to(group_field_history)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/fields/{field}")
+                            .route(web::get().to(read_group_field)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/fields")
+                            .route(web::get().to(list_group_fields)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/recording/start")
+                            .route(web::post().to(start_group_recording)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/recording/stop")
+                            .route(web::post().to(stop_group_recording)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/recording/pause")
+                            .route(web::post().to(pause_group_recording)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/recording")
+                            .route(web::get().to(read_group_phase)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/metadata/{field}")
+                            .route(web::put().to(set_group_metadata)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/settings/{field}")
+                            .route(web::put().to(set_group_setting)),
+                    )
+                    .service(
+                        web::resource("/groups/{id}/commands")
+                            .route(web::get().to(list_group_commands)),
+                    )
                     .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
                     .service(web::resource("/groups").route(web::get().to(list_groups))),
             )
