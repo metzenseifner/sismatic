@@ -37,7 +37,8 @@ use sismatic_core::devices::config::{Barrier, DeviceConfig, GroupConfig, Resolve
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
-use sismatic_http_api::{ServerHandle, Stamp};
+use sismatic_http_api::{Ports, ServerHandle, Stamp};
+use sismatic_store::group::DynGroupState;
 use sismatic_store::outbox::{DynCommandDrain, DynCommandLog, DynCommandSubmit};
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
@@ -61,14 +62,21 @@ pub async fn run(
     let read: DynReadStore = Arc::new(store.clone());
     let write: DynWriteStore = Arc::new(store);
 
-    // One object, three capabilities. Only this function knows they are the
+    // One object, four capabilities. Only this function knows they are the
     // same value — the same arrangement `ReadStore`/`WriteStore` already use,
     // and the reason neither side can perform the other's half by accident: the
     // HTTP surface holds a handle that can only append and read, the relay one
     // that can only drain, and neither type admits the other's methods.
+    //
+    // `group_state` is the read-only view of what each device group was last
+    // told. It is on the outbox rather than the store because an expectation is
+    // write-side belief, recorded inside the same critical section that admits
+    // the submission — so there is no write half to hand anyone, and nothing
+    // outside `submit` can claim a device group was asked for something.
     let outbox = MemoryOutbox::with_max_attempts(cfg.intent_relay.max_attempts);
     let submit: DynCommandSubmit = Arc::new(outbox.clone());
     let log: DynCommandLog = Arc::new(outbox.clone());
+    let group_state: DynGroupState = Arc::new(outbox.clone());
     let drain: DynCommandDrain = Arc::new(outbox);
 
     // Built from the resolved config *before* the registry consumes it: the
@@ -97,7 +105,18 @@ pub async fn run(
     // opened no SSH connection and started no poll loop, and has therefore
     // nothing to unwind.
     let listener = TcpListener::bind((cfg.http.host.as_str(), cfg.http.port))?;
-    let server = sismatic_http_api::run(listener, read, catalog, status, submit, log, stamp())?;
+    let server = sismatic_http_api::run(
+        listener,
+        Ports {
+            store: read,
+            catalog,
+            status,
+            submit,
+            log,
+            group_state,
+        },
+        stamp(),
+    )?;
     let handle = server.handle();
 
     // Started *before* the poll loops so that for an eager device the first

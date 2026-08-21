@@ -103,7 +103,8 @@ mod tests {
     #[tokio::test]
     async fn a_groups_members_stay_in_configured_order() {
         // Not sorted: the operator wrote the sequence, and a fan-out that
-        // reordered it would address the room differently than it reads.
+        // reordered it would address the device group differently than it
+        // reads.
         let groups = catalog().groups().await;
         assert_eq!(groups[0].members, ["atrium", "annex"]);
     }

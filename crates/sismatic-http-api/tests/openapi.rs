@@ -78,6 +78,10 @@ async fn spawn_app() -> String {
         .submit(Submission {
             ids: vec![COMMAND.to_owned()],
             targets: vec![DEVICE.to_owned()],
+            // Filed against the group as well, so `/v1/groups/{id}/fields`
+            // has an expectation to return and cannot 404 or 500 of its own
+            // accord — the same reason the store below is seeded.
+            group: Some(harness::GROUP.to_owned()),
             batch: None,
             barrier: None,
             intent: Intent::SetSetting {
@@ -130,7 +134,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        16,
+        26,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -178,8 +182,8 @@ async fn every_documented_operation_is_one_the_server_serves() {
 
     // One operation per path here, but asserted rather than assumed: a path
     // that gained a second method and lost it in `startup` would otherwise slip
-    // through as "16 paths, still fine".
-    assert_eq!(checked, 16, "expected one operation per documented path");
+    // through as "26 paths, still fine".
+    assert_eq!(checked, 26, "expected one operation per documented path");
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
@@ -214,13 +218,77 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        15,
-        "expected every readings, commands and inventory route under /v1, got {:?}",
+        25,
+        "expected every readings, group, commands and inventory route under /v1, \
+         got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
     // ...and the health check deliberately outside it: a liveness probe is not
     // part of the versioned contract.
     assert!(paths.contains_key("/health_check"));
+}
+
+/// Tags name the *question* a route answers, not the resource in its path.
+///
+/// `inventory` covers `/v1/devices` and `/v1/groups` alike; `commands` accepts
+/// either kind of id, since the two share one namespace on the write side; and
+/// `readings` covers the device field routes and the group field routes both.
+/// The axis is worth pinning because the other one is the tempting mistake: a
+/// tag named after a resource would file `/v1/groups/{id}` and
+/// `/v1/groups/{id}/fields` in different sections of one document while leaving
+/// `/v1/groups` beside `/v1/devices`, and would hand a generated client a
+/// `GroupsApi` that does not contain `listGroups`.
+#[tokio::test]
+async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let declared: Vec<&str> = doc["tags"]
+        .as_array()
+        .expect("the document declares tags")
+        .iter()
+        .map(|t| t["name"].as_str().expect("a tag name"))
+        .collect();
+    assert_eq!(declared, ["readings", "inventory", "commands", "health"]);
+
+    // Every operation carries exactly one tag, and it is one of those four. An
+    // untagged operation lands in Swagger UI's "default" bucket, which is how a
+    // route goes missing from the rendered document without going missing from
+    // the server.
+    for (template, item) in doc["paths"].as_object().expect("paths is an object") {
+        for (method, operation) in item.as_object().expect("a path item is an object") {
+            let tags: Vec<&str> = operation["tags"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{method} {template} carries no tags"))
+                .iter()
+                .map(|t| t.as_str().expect("a tag"))
+                .collect();
+            assert_eq!(tags.len(), 1, "{method} {template} carries {tags:?}");
+            assert!(
+                declared.contains(&tags[0]),
+                "{method} {template} is tagged '{}', which the document does not declare",
+                tags[0]
+            );
+        }
+    }
+
+    // The pairing the axis exists for: one device route and one group route,
+    // asking the same question, filed together.
+    for path in [
+        "/v1/devices/{id}/fields/{field}",
+        "/v1/groups/{id}/fields/{field}",
+    ] {
+        assert_eq!(
+            doc["paths"][path]["get"]["tags"][0], "readings",
+            "for {path}"
+        );
+    }
+    // ...and the counterpart: two paths sharing the `/v1/groups` prefix that
+    // answer different questions, filed apart.
+    assert_eq!(
+        doc["paths"]["/v1/groups/{id}"]["get"]["tags"][0],
+        "inventory"
+    );
 }
 
 #[tokio::test]

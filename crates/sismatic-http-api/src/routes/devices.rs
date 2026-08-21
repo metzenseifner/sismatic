@@ -45,6 +45,7 @@ use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::status::DeviceStatus;
 
 use crate::routes::error::ApiFailure;
+use crate::routes::target::reject_group_bare;
 
 /// `GET /devices` — every configured device, ordered by id.
 #[utoipa::path(
@@ -100,8 +101,10 @@ pub async fn list_devices(
         (status = 200, description = "The device, with one reading per field it has \
              answered. `latest` is empty for a device that is configured but has \
              never been reached.", body = DeviceDetail),
-        (status = 404, description = "No device has this id. Unlike the readings \
-             routes' 404, this one is a claim about configuration.", body = ApiError),
+        (status = 404, description = "No device has this id, or the id names a device \
+             group — in which case the body carries `/v1/groups/{id}`. Unlike the \
+             readings routes' 404, this one is a claim about configuration.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
@@ -112,6 +115,9 @@ pub async fn read_device(
     path: web::Path<String>,
 ) -> Result<web::Json<DeviceDetail>, ApiFailure> {
     let id = path.into_inner();
+    // A group id was already a 404 here, since the lookup is device-only. What
+    // this adds is the other half of the message: which URL answers instead.
+    reject_group_bare(&**catalog, &id).await?;
     let mut device = catalog
         .device(&id)
         .await

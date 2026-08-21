@@ -96,7 +96,8 @@ devices:
 ### Device groups
 
 A `[[group]]` names one or more devices so they act as one — the case being
-more than one recorder in a room that must start together. Addressing the group
+more than one recorder in a physical room that must start together. Addressing
+the group
 id sends the instruction to every member at once, over the members' own warm
 connections:
 

@@ -23,6 +23,8 @@
 //! - [`value`] — the decoded value model ([`ReadingValue`], [`RecordingState`], …)
 //! - [`reading`] — [`Reading`], [`Timestamp`], and the history-query DTOs
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
+//! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
+//!   member-wise response shapes
 //! - [`command`] — write-side request bodies and instruction results
 //! - [`error`] — the [`ApiError`] envelope and [`Health`]
 //!
@@ -48,6 +50,7 @@
 pub mod command;
 pub mod device;
 pub mod error;
+pub mod group;
 pub mod reading;
 pub mod value;
 
@@ -71,5 +74,9 @@ pub use device::{
     ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,
 };
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
+pub use group::{
+    GroupCommandList, GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory,
+    GroupPhase, MemberCommands, MemberHistory, MemberPhase, MemberState, SyncState,
+};
 pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
 pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};

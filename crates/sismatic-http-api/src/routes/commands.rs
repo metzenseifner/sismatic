@@ -1,4 +1,5 @@
-//! The write routes: five ways to spell an [`Intent`], one way to submit it.
+//! The write routes: five ways to spell an [`Intent`], one way to submit it —
+//! addressed to a device or to a device group.
 //!
 //! ```text
 //! POST /devices/{id}/recording/start      begin a recording
@@ -7,10 +8,42 @@
 //! PUT  /devices/{id}/metadata/{field}     write a metadata register
 //! PUT  /devices/{id}/settings/{field}     write a device setting
 //!
+//! POST /groups/{id}/recording/start       the same five, addressed to a
+//! POST /groups/{id}/recording/stop        device group
+//! POST /groups/{id}/recording/pause
+//! PUT  /groups/{id}/metadata/{field}
+//! PUT  /groups/{id}/settings/{field}
+//!
 //! GET  /devices/{id}/recording            the write side's phase and epoch
 //! GET  /devices/{id}/commands             what this device has been asked
+//! GET  /groups/{id}/recording             every member's phase, and the one
+//!                                         they agree on
+//! GET  /groups/{id}/commands              what each member has been asked
 //! GET  /commands/{id}                     what became of one request
 //! ```
+//!
+//! # One namespace, two spaces
+//!
+//! Devices and groups share one id namespace, and each URL space accepts only
+//! its own kind. Every route here resolves its id through
+//! [`target`](crate::routes::target) first, so a group id under `/v1/devices`
+//! and a device id under `/v1/groups` are both a `404` naming the URL that
+//! would have worked.
+//!
+//! The `/groups` write routes are not a second code path for that: all ten
+//! funnel into one private [`submit`] over an already-resolved target list, so
+//! there is still one path from an intent to a response, and the kind check is
+//! the only thing that differs between them.
+//!
+//! The two status reads are why the split is a refusal rather than a fan-out.
+//! The outbox keys its logs by *device*, so a group id on
+//! `GET /v1/devices/{id}/recording` took a default and reported `idle` at epoch
+//! `0`, and on `GET /v1/devices/{id}/commands` an empty list — for a device
+//! group whose members were mid-recording with a queue each. Those were not
+//! answers about the group; they were answers about a device that does not
+//! exist, and no wording of the documentation made them safe.
+//! [`read_group_phase`] and [`list_group_commands`] ask the port the question
+//! it can actually answer, once per member.
 //!
 //! # Nothing here reaches a device
 //!
@@ -38,8 +71,8 @@
 //! `.wrap(YourAuthMiddleware::default())` placeholder in [`crate::startup`] is
 //! what makes that last point concrete rather than hypothetical.
 //!
-//! The multiplication is in the URL space only: all five funnel into one
-//! private `submit`, so there is one path from an intent to a response.
+//! The multiplication is in the URL space only: all ten funnel into one
+//! private [`submit`], so there is one path from an intent to a response.
 //!
 //! # `{field}` is a parameter, as on the read side
 //!
@@ -58,13 +91,15 @@ use serde::Deserialize;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes — the
 // handlers return `ApiFailure` and let it render.
 use sismatic_api_types::{
-    Acceptance, ApiError, CommandList, CommandRecord, DeviceId, Intent, RecordingPhase,
+    Acceptance, ApiError, CommandList, CommandRecord, DeviceId, GroupCommandList, GroupPhase,
+    GroupSummary, Intent, MemberCommands, MemberPhase, RecordingPhase,
 };
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::outbox::{BarrierPolicy, CommandLog, CommandSubmit, Submission};
 
 use crate::routes::error::ApiFailure;
 use crate::routes::readings::normalize_field;
+use crate::routes::target::{group_members, reject_group};
 use crate::stamp::Stamp;
 
 /// The body of a metadata or setting write.
@@ -116,16 +151,17 @@ impl actix_web::FromRequest for IdempotencyKey {
 
 /// Whether this intent needs the members of a group to act *together*.
 ///
-/// The three lifecycle verbs do: a room whose recorders start seconds apart has
-/// produced takes that do not line up, which is the whole reason a group is
-/// addressable as one thing. The two writes do not — setting the same title on
-/// two recorders is the same result whenever each one happens — so batching
+/// The three lifecycle verbs do: a device group whose members start seconds
+/// apart has produced takes that do not line up, which is the whole reason a
+/// group is addressable as one thing. The two writes do not — setting the same
+/// title on two devices is the same result whenever each one happens — so
+/// batching
 /// them would buy nothing and cost them a barrier they could time out against.
 ///
 /// Wildcard-free, so a new [`Intent`] variant is a build error here until
 /// someone decides which kind it is. That decision is not one a default should
 /// make: guessing "no rendezvous" would silently ship a lifecycle verb that
-/// stopped keeping a room in step.
+/// stopped keeping a device group in step.
 const fn needs_rendezvous(intent: &Intent) -> bool {
     match intent {
         Intent::StartRecording | Intent::StopRecording | Intent::PauseRecording => true,
@@ -139,30 +175,18 @@ const fn needs_rendezvous(intent: &Intent) -> bool {
 /// `target` is a device id or a group id — the two share one namespace, and
 /// which it is decides only how many rows the submission expands into.
 async fn submit(
-    catalog: &dyn DeviceCatalog,
     port: &dyn CommandSubmit,
     stamp: &Stamp,
-    target: DeviceId,
+    targets: Vec<DeviceId>,
+    group: Option<GroupSummary>,
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
-    // Expansion doubles as the existence check. The outbox holds what was
-    // submitted and no list of what exists, so without this it would admit a
-    // command for a mistyped id against a fresh idle phase and answer `202` — a
-    // promise that cannot be kept, which the caller discovers only by polling a
-    // command that fails at dispatch. See `sismatic_store::catalog` for why
-    // this deliberately diverges from the read side's empty-list answer.
-    let Some(targets) = catalog.members(&target).await else {
-        return Err(ApiFailure::NotFound(format!(
-            "no device or group '{target}' is configured"
-        )));
-    };
-
-    // Expanded *here* rather than at dispatch, because admission is per device:
-    // a room where one recorder is already running and one is idle has to be
-    // decided against both phases, and only a submission that names both can be.
-    // See the design note's group section for the alternative that was weighed.
-    let group = catalog.group(&target).await;
+    // `targets` is already expanded and `group` already resolved, by whichever
+    // entry point enforced its own URL space. Expansion happens *there* rather
+    // than at dispatch because admission is per device: a device group where one
+    // member is already running and one is idle has to be decided against both
+    // phases, and only a submission naming both can be.
     let batch = group
         .as_ref()
         .filter(|_| needs_rendezvous(&intent) && targets.len() > 1)
@@ -188,6 +212,11 @@ async fn submit(
         .submit(Submission {
             ids,
             targets,
+            // Only when the target *was* a group. A device-addressed request
+            // that happens to name a member of one has not asked anything of
+            // the device group, and filing an expectation against it would
+            // report the other members as drifted for doing nothing wrong.
+            group: group.as_ref().map(|group| group.id.clone()),
             batch,
             barrier,
             intent,
@@ -206,6 +235,69 @@ async fn submit(
     Ok(response.json(accepted))
 }
 
+/// [`submit`] from a `/v1/devices` route: the id must name a device, and one
+/// command is recorded.
+///
+/// A group id is refused here rather than fanned out. It once *was* fanned out,
+/// because `/v1/devices/{id}` was the only way to address a device group, and
+/// the two status routes below are why that stopped being tenable: they read an
+/// outbox keyed by device, so a group id there reports an idle device that does
+/// not exist. See [`crate::routes::target`].
+///
+/// An id that names nothing is a `404` and not a `202`. The outbox holds what
+/// was submitted and no list of what exists, so without this check it would
+/// admit a command for a mistyped id against a fresh idle phase — a promise
+/// that cannot be kept, which the caller discovers only by polling a command
+/// that fails at dispatch, minutes later.
+async fn submit_device(
+    catalog: &dyn DeviceCatalog,
+    port: &dyn CommandSubmit,
+    stamp: &Stamp,
+    device: DeviceId,
+    group_route: &str,
+    intent: Intent,
+    idempotency_key: Option<String>,
+) -> Result<HttpResponse, ApiFailure> {
+    reject_group(catalog, &device, group_route).await?;
+    if catalog.device(&device).await.is_none() {
+        return Err(ApiFailure::NotFound(format!(
+            "no device '{device}' is configured"
+        )));
+    }
+
+    // No group, so no rendezvous and no barrier: one device acting alone is
+    // already in unison with itself.
+    submit(port, stamp, vec![device], None, intent, idempotency_key).await
+}
+
+/// [`submit`] from a `/v1/groups` route: the id must name a device group, and
+/// one command per member is recorded.
+///
+/// The check is the whole difference between the two URL spaces. Without it
+/// `/v1/groups/atrium-101/recording/start` would start a single recorder and
+/// answer `202`, which is a `/groups` route quietly doing a `/devices` route's
+/// job — and the caller would have no way to notice, because the `202` body
+/// looks the same either way.
+///
+/// `device_route` is the tail of the `/v1/devices` route that does the same
+/// thing, so a caller who reached for the wrong space is told which URL it
+/// wanted rather than only that this one was wrong.
+async fn submit_group(
+    catalog: &dyn DeviceCatalog,
+    port: &dyn CommandSubmit,
+    stamp: &Stamp,
+    group: DeviceId,
+    device_route: &str,
+    intent: Intent,
+    idempotency_key: Option<String>,
+) -> Result<HttpResponse, ApiFailure> {
+    let targets = group_members(catalog, &group, device_route).await?;
+    // Resolved rather than re-derived: `group_members` already established that
+    // this id names one, so the summary is present.
+    let summary = catalog.group(&group).await;
+    submit(port, stamp, targets, summary, intent, idempotency_key).await
+}
+
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/start",
@@ -221,8 +313,10 @@ async fn submit(
         (status = 202, description = "Recorded. No device has been contacted yet; \
              follow the `Location` header for the outcome.", body = Acceptance),
         (status = 409, description = "This device is already recording.", body = ApiError),
-        (status = 404, description = "No device or group has this id. The catalog \
-             is the configured set, so this is a claim about the devices file.",
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -234,11 +328,12 @@ pub async fn start_recording(
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
-    submit(
+    submit_device(
         &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
+        "recording/start",
         Intent::StartRecording,
         key.0,
     )
@@ -257,8 +352,10 @@ pub async fn start_recording(
     responses(
         (status = 202, body = Acceptance),
         (status = 409, description = "No recording is in progress.", body = ApiError),
-        (status = 404, description = "No device or group has this id. The catalog \
-             is the configured set, so this is a claim about the devices file.",
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -270,11 +367,12 @@ pub async fn stop_recording(
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
-    submit(
+    submit_device(
         &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
+        "recording/stop",
         Intent::StopRecording,
         key.0,
     )
@@ -294,8 +392,10 @@ pub async fn stop_recording(
         (status = 202, body = Acceptance),
         (status = 409, description = "Nothing is recording, or it is already paused.",
          body = ApiError),
-        (status = 404, description = "No device or group has this id. The catalog \
-             is the configured set, so this is a claim about the devices file.",
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -307,11 +407,12 @@ pub async fn pause_recording(
     path: web::Path<String>,
     key: IdempotencyKey,
 ) -> Result<HttpResponse, ApiFailure> {
-    submit(
+    submit_device(
         &**catalog,
         &**port,
         &stamp,
         path.into_inner(),
+        "recording/pause",
         Intent::PauseRecording,
         key.0,
     )
@@ -336,8 +437,10 @@ pub async fn pause_recording(
         (status = 409, description = "A recording is in progress, so this device's \
              metadata is sealed for the current epoch. Stop the recording, or write \
              the field before the next one starts.", body = ApiError),
-        (status = 404, description = "No device or group has this id. The catalog \
-             is the configured set, so this is a claim about the devices file.",
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -358,7 +461,17 @@ pub async fn set_metadata(
         field: normalize_field(&field),
         value: body.into_inner().value,
     };
-    submit(&**catalog, &**port, &stamp, device, intent, key.0).await
+    let group_route = format!("metadata/{field}");
+    submit_device(
+        &**catalog,
+        &**port,
+        &stamp,
+        device,
+        &group_route,
+        intent,
+        key.0,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -376,8 +489,10 @@ pub async fn set_metadata(
     responses(
         (status = 202, description = "Recorded. Settings carry no recording freeze, so \
              this is accepted in every phase.", body = Acceptance),
-        (status = 404, description = "No device or group has this id. The catalog \
-             is the configured set, so this is a claim about the devices file.",
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -395,7 +510,17 @@ pub async fn set_setting(
         field: normalize_field(&field),
         value: body.into_inner().value,
     };
-    submit(&**catalog, &**port, &stamp, device, intent, key.0).await
+    let group_route = format!("settings/{field}");
+    submit_device(
+        &**catalog,
+        &**port,
+        &stamp,
+        device,
+        &group_route,
+        intent,
+        key.0,
+    )
+    .await
 }
 
 /// `GET /commands/{id}` — what became of one submitted command.
@@ -445,14 +570,24 @@ pub async fn read_command(
              epoch of the current or next recording. An unknown device reports `idle` \
              at epoch 0 — the outbox holds what was submitted and no catalog of what \
              exists.", body = RecordingPhase),
+        (status = 404, description = "This id names a device group. The outbox keys \
+             its logs by device, so this route would report `idle` at epoch 0 for a \
+             group whose members are recording; `/v1/groups/{id}/recording` is the \
+             answer.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn read_phase(
+    catalog: web::Data<dyn DeviceCatalog>,
     log: web::Data<dyn CommandLog>,
     path: web::Path<String>,
 ) -> Result<web::Json<RecordingPhase>, ApiFailure> {
-    Ok(web::Json(log.phase(path.into_inner()).await?))
+    let device = path.into_inner();
+    // The route that made the refusal necessary. The outbox has no log under a
+    // group id, so without this it answers `idle` at epoch 0 for a device group
+    // whose members are recording — see `crate::routes::target`.
+    reject_group(&**catalog, &device, "recording").await?;
+    Ok(web::Json(log.phase(device).await?))
 }
 
 /// `GET /devices/{id}/commands` — everything this device has been asked to do,
@@ -466,13 +601,333 @@ pub async fn read_phase(
     responses(
         (status = 200, description = "Every command recorded for this device, newest \
              first. An unknown device yields an empty list.", body = CommandList),
+        (status = 404, description = "This id names a device group, whose members each \
+             hold their own queue; `/v1/groups/{id}/commands` is the answer.",
+         body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn list_commands(
+    catalog: web::Data<dyn DeviceCatalog>,
     log: web::Data<dyn CommandLog>,
     path: web::Path<String>,
 ) -> Result<web::Json<CommandList>, ApiFailure> {
-    let commands = log.commands_for(path.into_inner()).await?;
+    let device = path.into_inner();
+    // As on the phase route: a group id has no log, so the honest answer is a
+    // redirection rather than an empty list.
+    reject_group(&**catalog, &device, "commands").await?;
+    let commands = log.commands_for(device).await?;
     Ok(web::Json(CommandList { commands }))
+}
+
+// ---- the same five verbs, addressed to a device group ---------------------
+
+#[utoipa::path(
+    post,
+    path = "/groups/{id}/recording/start",
+    context_path = "/v1",
+    tag = "commands",
+    params(
+        ("id" = String, Path, description = "Device group id, as written in the devices file."),
+        ("Idempotency-Key" = Option<String>, Header,
+         description = "Repeat this on a retry and the original commands are returned \
+             rather than a second recording started. Scoped to the group's first \
+             member, so one key answers for the whole submission."),
+    ),
+    responses(
+        (status = 202, description = "Recorded, one command per member. The three \
+             lifecycle verbs are expanded under a rendezvous, so `batch` is set and no \
+             member is dispatched until every one is ready.", body = Acceptance),
+        (status = 409, description = "One member refused, so the whole submission was \
+             refused and nothing was recorded — admission is across every member at \
+             once. The body names the member and its phase.", body = ApiError),
+        (status = 404, description = "No device group has this id. A device id here is \
+             this same 404, with the `/v1/devices` URL that would have worked.",
+         body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn start_group_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn CommandSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<String>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        path.into_inner(),
+        "recording/start",
+        Intent::StartRecording,
+        key.0,
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/groups/{id}/recording/stop",
+    context_path = "/v1",
+    tag = "commands",
+    params(
+        ("id" = String, Path, description = "Device group id."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    responses(
+        (status = 202, body = Acceptance),
+        (status = 409, description = "A member has no recording in progress, so the \
+             whole submission was refused.", body = ApiError),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn stop_group_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn CommandSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<String>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        path.into_inner(),
+        "recording/stop",
+        Intent::StopRecording,
+        key.0,
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/groups/{id}/recording/pause",
+    context_path = "/v1",
+    tag = "commands",
+    params(
+        ("id" = String, Path, description = "Device group id."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    responses(
+        (status = 202, body = Acceptance),
+        (status = 409, description = "A member is not recording, or is already paused.",
+         body = ApiError),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn pause_group_recording(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn CommandSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<String>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        path.into_inner(),
+        "recording/pause",
+        Intent::PauseRecording,
+        key.0,
+    )
+    .await
+}
+
+#[utoipa::path(
+    put,
+    path = "/groups/{id}/metadata/{field}",
+    context_path = "/v1",
+    tag = "commands",
+    params(
+        ("id" = String, Path, description = "Device group id."),
+        ("field" = String, Path, example = "TITLE",
+         description = "Metadata register name, normalized as on the read routes."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    request_body = ValueWrite,
+    responses(
+        (status = 202, description = "Recorded, one command per member. Expanded \
+             *without* a rendezvous: writing the same title to two recorders is the \
+             same result whenever each one happens, so `batch` is null and no member \
+             waits on a barrier it has no use for.", body = Acceptance),
+        (status = 409, description = "A member has a recording in progress, so its \
+             metadata is sealed — and the whole submission is refused rather than \
+             leaving the group half-written.", body = ApiError),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn set_group_metadata(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn CommandSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<(String, String)>,
+    body: web::Json<ValueWrite>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    let (group, field) = path.into_inner();
+    let intent = Intent::SetMetadata {
+        field: normalize_field(&field),
+        value: body.into_inner().value,
+    };
+    let device_route = format!("metadata/{field}");
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        group,
+        &device_route,
+        intent,
+        key.0,
+    )
+    .await
+}
+
+#[utoipa::path(
+    put,
+    path = "/groups/{id}/settings/{field}",
+    context_path = "/v1",
+    tag = "commands",
+    params(
+        ("id" = String, Path, description = "Device group id."),
+        ("field" = String, Path, example = "TIMEZONE",
+         description = "Device setting name, normalized as on the read routes."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    request_body = ValueWrite,
+    responses(
+        (status = 202, description = "Recorded, one command per member. Settings carry \
+             no recording freeze and no rendezvous, so this is accepted in every \
+             phase.", body = Acceptance),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn set_group_setting(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn CommandSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<(String, String)>,
+    body: web::Json<ValueWrite>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    let (group, field) = path.into_inner();
+    let intent = Intent::SetSetting {
+        field: normalize_field(&field),
+        value: body.into_inner().value,
+    };
+    let device_route = format!("settings/{field}");
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        group,
+        &device_route,
+        intent,
+        key.0,
+    )
+    .await
+}
+
+/// `GET /groups/{id}/recording` — every member's phase, and the one they agree
+/// on.
+///
+/// Not an alias of the device route with a group id, and cannot be: the outbox
+/// keys its logs by device, so that route answers `idle` at epoch `0` for a
+/// group id — a claim about a device that does not exist. This one asks the
+/// port once per member and reports what it actually said.
+///
+/// `phase` is `null` when the members are not all in the same one, which is a
+/// finding rather than a missing value: a group whose members have diverged is
+/// one where a start reached some of them. Epochs are never rolled up — see
+/// [`GroupPhase::members`].
+#[utoipa::path(
+    get,
+    path = "/groups/{id}/recording",
+    context_path = "/v1",
+    tag = "commands",
+    params(("id" = String, Path, description = "Device group id.")),
+    responses(
+        (status = 200, description = "Every member's accepted phase and epoch, plus \
+             the phase they agree on — `null` when they do not. This is what the \
+             *outbox* accepted, which moves before any device is contacted; the \
+             group's `RUNNING_STATE` field is what the members reported.",
+         body = GroupPhase),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn read_group_phase(
+    catalog: web::Data<dyn DeviceCatalog>,
+    log: web::Data<dyn CommandLog>,
+    path: web::Path<String>,
+) -> Result<web::Json<GroupPhase>, ApiFailure> {
+    let group = path.into_inner();
+    let member_ids = group_members(&**catalog, &group, "recording").await?;
+
+    let mut members = Vec::with_capacity(member_ids.len());
+    for device in member_ids {
+        let recording = log.phase(device.clone()).await?;
+        members.push(MemberPhase {
+            device,
+            phase: recording.phase,
+            epoch: recording.epoch,
+        });
+    }
+
+    // `None` for an empty group as well as for a divided one: there is no phase
+    // every member is in when there is no member.
+    let phase = members
+        .first()
+        .map(|first| first.phase)
+        .filter(|phase| members.iter().all(|m| m.phase == *phase));
+
+    Ok(web::Json(GroupPhase {
+        group,
+        phase,
+        members,
+    }))
+}
+
+/// `GET /groups/{id}/commands` — what each member has been asked to do, newest
+/// first within each member.
+///
+/// Partitioned rather than merged, for the reason the device route is a flat
+/// list and this one is not: two submissions can share an instant, so a merged
+/// list would have no total order to present them in. A row's `batch` is what
+/// ties one group-addressed request back together across members.
+#[utoipa::path(
+    get,
+    path = "/groups/{id}/commands",
+    context_path = "/v1",
+    tag = "commands",
+    params(("id" = String, Path, description = "Device group id.")),
+    responses(
+        (status = 200, description = "One command list per member, newest first, in \
+             configured order. A member that has been asked nothing carries an empty \
+             list rather than being omitted.", body = GroupCommandList),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn list_group_commands(
+    catalog: web::Data<dyn DeviceCatalog>,
+    log: web::Data<dyn CommandLog>,
+    path: web::Path<String>,
+) -> Result<web::Json<GroupCommandList>, ApiFailure> {
+    let group = path.into_inner();
+    let member_ids = group_members(&**catalog, &group, "commands").await?;
+
+    let mut members = Vec::with_capacity(member_ids.len());
+    for device in member_ids {
+        let commands = log.commands_for(device.clone()).await?;
+        members.push(MemberCommands { device, commands });
+    }
+
+    Ok(web::Json(GroupCommandList { group, members }))
 }

@@ -285,6 +285,31 @@ fn is_running_state(field: &str) -> bool {
     field == Query::RunningState.name()
 }
 
+/// The drift sentinel for the *other* place that names this field.
+///
+/// `sismatic-store` files a group's recording expectation under
+/// [`RECORDING_STATE_FIELD`], and has to spell it as a literal because a port
+/// the front end depends on may not see core's instruction catalog. This crate
+/// is one of the few that sees both, and already reads the canonical name off
+/// the catalog a line above — so the two are held together here rather than
+/// hoped to agree.
+///
+/// What a rename would otherwise cost: expectations filed under the old name,
+/// readings written under the new one, and every group reporting `unknown`
+/// forever with nothing failing to say why.
+///
+/// [`RECORDING_STATE_FIELD`]: sismatic_store::group::RECORDING_STATE_FIELD
+#[test]
+fn the_stores_recording_field_is_the_name_this_driver_polls_it_under() {
+    assert_eq!(
+        sismatic_store::group::RECORDING_STATE_FIELD,
+        Query::RunningState.name()
+    );
+    assert!(is_running_state(
+        sismatic_store::group::RECORDING_STATE_FIELD
+    ));
+}
+
 /// What one loop believes about its `(device, field)` pair right now. Two states,
 /// because an operator only ever asks one question of a poll loop: is this
 /// reading current, or stale?

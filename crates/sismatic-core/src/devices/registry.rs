@@ -7,7 +7,8 @@
 //! keep-warm cache, one entry per device.
 //!
 //! A [`DeviceGroup`] is a name over several of those same device handles, so a
-//! caller can address a whole room by one id; its members reuse the very warm
+//! caller can address a whole device group by one id; its members reuse the very
+//! warm
 //! connections the registry already holds. Device and group ids share one
 //! namespace (the config layer guarantees they never collide), so [`target`]
 //! resolves either kind from a single id.

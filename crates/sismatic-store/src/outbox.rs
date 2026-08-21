@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sismatic_api_types::{
-    Acceptance, Barrier, BatchId, CommandId, CommandRecord, DeviceId, Intent, Phase, ReadingValue,
-    RecordingPhase, RecordingState, Rejection, Timestamp,
+    Acceptance, Barrier, BatchId, CommandId, CommandRecord, DeviceId, GroupId, Intent, Phase,
+    ReadingValue, RecordingPhase, RecordingState, Rejection, Timestamp,
 };
 
 use crate::{ReadError, WriteError};
@@ -29,6 +29,19 @@ pub struct Submission {
     /// than zipping the shorter of the two.
     pub ids: Vec<CommandId>,
     pub targets: Vec<DeviceId>,
+    /// The group this request was addressed to, when it was addressed to one.
+    ///
+    /// Carried alongside the expanded `targets` rather than in place of them,
+    /// because the two are needed for different things: the members are what
+    /// admission is decided against, and the group is what the *expectation* is
+    /// filed under (see [`group`](crate::group)). Recording it here rather than
+    /// through a second call is what makes the expectation atomic with the
+    /// admission it describes — a submission the table refuses must leave no
+    /// trace, including no claim about what the device group was going to be.
+    ///
+    /// `None` for a device-addressed request. A device is not a device group,
+    /// and a single device's own phase already says what it was told.
+    pub group: Option<GroupId>,
     /// `Some` when the members must act together — a rendezvous is armed and no
     /// row is dispatched until every one is ready. `None` for a single device,
     /// and for a group write that gains nothing from acting in unison.
@@ -84,6 +97,11 @@ pub trait CommandSubmit: Send + Sync {
     /// lock, and then appends does not satisfy this trait, and neither does one
     /// that admits member A, finds member B refuses, and leaves A's row behind.
     /// A refused submission records nothing at all.
+    ///
+    /// When [`Submission::group`] is set, "records nothing at all" includes the
+    /// group expectation [`expects`](crate::group::expects) derives from the
+    /// intent: it is written inside the same unit, so a group that was refused
+    /// never claims to have been asked for something.
     async fn submit(&self, submission: Submission) -> Result<Acceptance, SubmitError>;
 }
 

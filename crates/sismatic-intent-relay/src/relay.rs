@@ -157,14 +157,15 @@ async fn dispatch_alone(device: &Device, drain: &dyn CommandDrain, record: Comma
 /// This is the whole point of the rendezvous. [`DeviceGroup::run`] spawns every
 /// member's exchange before awaiting any, so the members act *in unison* — which
 /// is a stronger property than "each was dispatched at about the same time", and
-/// the one a room full of recorders needs. Running the members from one task,
+/// the one a device group needs. Running the members from one task,
 /// through one group, is what makes it true; N tasks each running their own row
 /// would go out in whatever order the scheduler chose.
 ///
 /// The group is built ad hoc from the records rather than looked up by id,
 /// because the batch is not the group: a group can be addressed many times, and
-/// a batch may be a *subset* of one when `DispatchReady` fired on a partial
-/// room. What must be dispatched is exactly the rows that were claimed.
+/// a batch may be a *subset* of one when `DispatchReady` fired on a partially
+/// arrived device group. What must be dispatched is exactly the rows that were
+/// claimed.
 async fn dispatch_batch(
     registry: &Registry,
     drain: &dyn CommandDrain,
@@ -195,8 +196,8 @@ async fn dispatch_batch(
             None => {
                 // The catalog admitted a member the registry does not hold, so
                 // the two disagree about the device set. Failing the batch is
-                // the only honest answer: dispatching the rest would start a
-                // partial room under a policy that may well have been
+                // the only honest answer: dispatching the rest would start
+                // part of a device group under a policy that may well have been
                 // `FailBatch`.
                 let reason = format!("member '{}' is not in the registry", record.device);
                 warn!(%batch, reason, "a batch names a device the registry does not hold");

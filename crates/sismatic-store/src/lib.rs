@@ -29,11 +29,13 @@ use sismatic_api_types::{DeviceId, FieldName, Reading, TimeSpan};
 
 pub mod catalog;
 pub mod error;
+pub mod group;
 pub mod outbox;
 pub mod status;
 
 pub use catalog::{DeviceCatalog, DynDeviceCatalog};
 pub use error::{ReadError, WriteError};
+pub use group::{DynGroupState, GroupState};
 pub use status::{DeviceStatus, DynDeviceStatus};
 
 /// A convenient object-safe handle.

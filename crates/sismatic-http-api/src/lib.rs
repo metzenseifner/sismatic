@@ -38,6 +38,10 @@
 //! GET  /v1/devices/{id}/fields/{field}             one field's latest value
 //! GET  /v1/devices/{id}/fields/{field}/history     one field over a time span
 //!
+//! GET  /v1/groups/{id}/fields                      every field, every member
+//! GET  /v1/groups/{id}/fields/{field}              one field, every member
+//! GET  /v1/groups/{id}/fields/{field}/history      one field over time, per member
+//!
 //! POST /v1/devices/{id}/recording/start            begin a recording
 //! POST /v1/devices/{id}/recording/stop             end one
 //! POST /v1/devices/{id}/recording/pause            suspend one
@@ -45,6 +49,15 @@
 //! PUT  /v1/devices/{id}/settings/{field}           write a device setting
 //! GET  /v1/devices/{id}/recording                  the write side's phase/epoch
 //! GET  /v1/devices/{id}/commands                   what this device was asked
+//!
+//! POST /v1/groups/{id}/recording/start             the same five, addressed to
+//! POST /v1/groups/{id}/recording/stop              a device group
+//! POST /v1/groups/{id}/recording/pause
+//! PUT  /v1/groups/{id}/metadata/{field}
+//! PUT  /v1/groups/{id}/settings/{field}
+//! GET  /v1/groups/{id}/recording                   every member's phase
+//! GET  /v1/groups/{id}/commands                    what each member was asked
+//!
 //! GET  /v1/commands/{id}                           what became of one request
 //!
 //! GET  /swagger-ui/                                the routes above, browsable
@@ -58,6 +71,18 @@
 //! polled, and stored — and then served here with no code change in any crate.
 //! [`routes::readings`] has the argument for why that is a better property than
 //! a route generated per field would be.
+//!
+//! The `/v1/groups` space asks those same questions of a *device group* —
+//! every member's answer in one object, beside what the device group was last
+//! told to be, so a member that quietly did not start is visible without
+//! comparing five responses by hand.
+//!
+//! Devices and groups share one id namespace, so `/v1/devices/{id}` accepts a
+//! group id too and a group-addressed write still expands into one command per
+//! member either way. What the `/v1/groups` space adds is that its *answers*
+//! are group-shaped: [`routes::group_readings`] for the reads, and
+//! [`routes::commands`] for the two status routes the device space cannot
+//! answer correctly for a group at all.
 //!
 //! The last two are the same routes described to a reader: an OpenAPI document
 //! derived from the handlers and the DTOs themselves, and Swagger UI served over
@@ -112,7 +137,7 @@ pub mod startup;
 pub use openapi::ApiDoc;
 pub use routes::health_check;
 pub use stamp::Stamp;
-pub use startup::run;
+pub use startup::{Ports, run};
 
 /// The running server's stop handle, re-exported so the composition root can
 /// *name* the thing [`run`]'s `Server` hands it — a shutdown step it wants to
