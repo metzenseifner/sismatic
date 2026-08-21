@@ -62,54 +62,90 @@ git_tag_enable = false
 git_release_enable = false
 # One tag for the whole workspace (`v0.2.17`), not per-crate
 # `sismatic-core-v0.2.17` tags — this is the pattern pipeline.yml matches.
+#
+# This template is also what makes the `git_tag_name` overrides below load-
+# bearing. It carries no `{{ package }}`, so under git_only it matches `v0.2.25`
+# for *every* member — including a crate added after that tag, which release-plz
+# then goes looking for in a worktree checked out at it. That is what wedged main
+# when sismatic-intent-relay landed: `Failed to find package
+# "sismatic-intent-relay"`, unrecoverable, because the tag only moves via the
+# release PR that is now failing. See docs/Release-Plz-Package-Baselines.md.
 git_tag_name = "v{{ version }}"
 
+# Released members (release defaults to true). These keep the workspace-shaped
+# template above, because they must retain a real diff baseline: it is what
+# release-plz diffs their CHANGELOG against. Scoping one of these makes
+# release-plz treat it as an initial release and regenerate its changelog from
+# the whole git history. Both are old enough to exist at every tag.
+#
+# These two are also the only members that ever reach `determining next version`
+# — `release = false` below exempts the rest from version determination (though
+# NOT from the packaging pass, which is the distinction that caused the bug).
+# So these two, and only these two, drive the shared version.
 [[package]]
+git_tag_enable = true
 name = "sismatic-core"
 publish = false
-git_tag_enable = true
 version_group = "sismatic"
 
 [[package]]
 name = "sismatic-python-sdk"
 version_group = "sismatic"
 
+# Unreleased members. Each carries a *scoped* git_tag_name whose regex can never
+# match: `git_tag_enable = false` means no `<crate>-v<version>` tag is ever
+# created. release-plz therefore finds no baseline, logs "will be treated as
+# initial release", and never opens a worktree — which is precisely the crash it
+# would otherwise hit for any crate newer than the last tag. Nothing is lost:
+# these members never reached version determination anyway, so the proposed
+# version and changelogs are byte-for-byte identical to the unscoped config, and
+# release-pr drops from ~18 min to ~2 by skipping 8 `cargo package --workspace`
+# runs.
+#
+# `nix flake check` (release-plz-config) enforces the biconditional both ways:
+# release = false <=> scoped template. Do not set one without the other.
 [[package]]
 name = "sismatic-cli"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-server"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-api-types"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-sync"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-store"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-store-memory"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
 [[package]]
 name = "sismatic-http-api"
 version_group = "sismatic"
-release = false
 
 [[package]]
 name = "sismatic-intent-relay"
+git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
