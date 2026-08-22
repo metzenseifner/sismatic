@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/metzenseifner/sismatic/compare/v0.2.25...v0.3.0) - 2026-08-22
+
+### Added
+
+- [**breaking**] add group endpoints to readings
+- status codes improved for consumer error handling
+- give ApiError a rejection reason distinguisher for consumer
+- add write support to sismatic-store
+
 ## [0.2.25](https://github.com/metzenseifner/sismatic/compare/v0.2.24...v0.2.25) - 2026-08-14
 
 ### Other
