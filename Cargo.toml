@@ -49,6 +49,7 @@ license = "ECL-2.0"
 sismatic-api-types = { path = "crates/sismatic-api-types", version = "0" }
 sismatic-core = { path = "crates/sismatic-core", version = "0" }
 sismatic-http-api = { path = "crates/sismatic-http-api", version = "0" }
+sismatic-intent-relay = { path = "crates/sismatic-intent-relay", version = "0" }
 sismatic-store = { path = "crates/sismatic-store", version = "0" }
 sismatic-store-memory = { path = "crates/sismatic-store-memory", version = "0" }
 sismatic-sync = { path = "crates/sismatic-sync", version = "0" }

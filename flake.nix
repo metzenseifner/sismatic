@@ -809,7 +809,44 @@
 
                 offenders = lib.filter (d: !(ok d)) deps;
                 describe = d: "  ${d.file}: ${d.name} -> ${if d.req == null then "(no version field)" else d.req}";
+
+                # `ok` above only asks whether the requirement holds *right now*.
+                # That is not enough, and the gap has now cost a release: at
+                # workspace 0.2.25 the exact pin `sismatic-intent-relay = "0.2.25"`
+                # in sismatic-server satisfied ^0.2.25 and sailed through this
+                # check, then broke the first release PR that crossed a minor
+                # boundary — release-plz bumped the member to 0.3.0, the pin still
+                # demanded ^0.2.25, and `cargo update` failed with
+                #
+                #   failed to select a version for the requirement
+                #   `sismatic-intent-relay = "^0.2.25"`
+                #   candidate versions found which didn't match: 0.3.0
+                #
+                # which is exactly the rot the note in [workspace.dependencies]
+                # warns against, and exactly the blind spot the older version of
+                # this comment predicted ("invisible here until the 0.3.0
+                # boundary"). Predicting a hole is not the same as closing it.
+                #
+                # So require the requirement to be bump-proof, not merely
+                # currently-true: it must spell out no more than the leading zero,
+                # i.e. `0` (or `^0`, or `*`). `^0` matches every 0.x, so every bump
+                # below 1.0 keeps resolving and nothing here needs maintaining. At
+                # a 1.0 bump release-plz rewrites these to `1` itself.
+                bumpProof = d: d.req == "*" || builtins.elem d.req [ "0" "^0" ];
+                narrow = lib.filter (d: ok d && !(bumpProof d)) deps;
               in
+              assert lib.assertMsg (narrow == [ ]) ''
+                Internal path dependencies pinned more narrowly than `0`:
+                ${lib.concatStringsSep "\n" (map describe narrow)}
+                These satisfy the current workspace version ${version}, so they look
+                fine today, but they will fail the next release that crosses the
+                bound — release-plz bumps the depended-on member and `cargo update`
+                can no longer select it:
+                  failed to select a version for the requirement `<crate> = "^X.Y.Z"`
+                  candidate versions found which didn't match: <new version>
+                Use `version = "0"` and declare the dep in [workspace.dependencies],
+                consumed as `<crate>.workspace = true` — see the note there.
+              '';
               assert lib.assertMsg (offenders == [ ]) ''
                 Internal path dependencies without a usable version requirement
                 (workspace version ${version}):
