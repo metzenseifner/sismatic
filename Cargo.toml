@@ -61,11 +61,14 @@ sismatic-sync = { path = "crates/sismatic-sync", version = "0" }
 # framework itself rather than pulling a compression toolchain into every build
 # and every license audit. Turn a feature back on in the member that needs it.
 #
-# One feature comes back regardless of this line: `utoipa-swagger-ui` declares
-# actix-web with `macros`, and cargo unifies features across the graph, so the
-# routing macros are compiled whether or not a handler here uses them. That is
-# the whole of the leak — it does not re-enable the compressors, cookies or
-# HTTP/2, which is why it is recorded rather than worked around.
+# This line is now the whole story. It used to leak one feature back:
+# `utoipa-swagger-ui` declared actix-web with `macros`, and cargo unifies
+# features across the graph, so the routing macros were compiled whether or not
+# a handler used them. The Scalar crate that replaced it is taken without its
+# `actix-web` feature — see `scalar_api_reference` below — so nothing in the
+# graph asks actix-web for a feature any more and `actix-web-codegen` is no
+# longer built at all. Check with `cargo tree -e features -i actix-web`: the
+# edge into `sismatic-http-api` should be the only one, unmarked.
 actix-web = { version = "4.13", default-features = false }
 anyhow = "1"
 async-trait = "0.1"
@@ -119,20 +122,37 @@ ts-rs = "12"
 # `ts-rs` is: the wire contract stays a serde-only crate for anyone who wants
 # nothing but the DTOs, and a plain build never compiles the proc-macro tree.
 utoipa = { version = "5.5", features = ["macros"] }
-# Serves the Swagger UI bundle from inside the binary — no CDN, no static-file
+# Where the Scalar API reference bundle comes from — no CDN, no static-file
 # deployment step, and the docs a server shows are the docs that server was
 # built with.
 #
-# `vendored` is load-bearing, not a preference: without it this crate's build
-# script *downloads* the Swagger UI zip from GitHub, which cannot work in the
-# `nix flake check` sandbox (no network) and would make every build depend on a
-# release asset staying up. `vendored` takes the zip from the
-# `utoipa-swagger-ui-vendored` crate in the lockfile instead, so the UI is
-# pinned like any other dependency. `default-features = false` then drops `url`,
-# which only the download path it replaces ever used.
-utoipa-swagger-ui = { version = "9", default-features = false, features = [
-  "actix-web",
-  "vendored",
+# Scalar's own Rust crate rather than `utoipa-scalar`, and the reason is the
+# property above: `utoipa-scalar` ships an HTML shell whose one `<script>` points
+# at jsdelivr, so its page is blank on a host with no route off the LAN — which
+# is the normal case for the installations this serves. This crate carries
+# `ui/scalar.js` inside the `.crate` file, so the bundle is pinned in the
+# lockfile like any other dependency and no build step ever reaches the network.
+#
+# A *build*-dependency, which is the whole of how it is used: `sismatic-http-api`'s
+# build script asks it for the bundle once, compresses it, and embeds the result.
+# Nothing links it at runtime — see that crate's manifest for what that keeps out
+# of the shipped binary, and `src/openapi.rs` for why the bundle is stored
+# compressed at all.
+#
+# No features either way. The crate's `actix-web` feature is a four-line
+# `ServiceConfig` helper, and it declares actix-web *with* default features —
+# cargo unifies those across the graph, so taking the helper would undo the
+# narrowing above and compile the compressors, cookies and HTTP/2 back into every
+# build. The routes are four lines in `startup`; the feature is not worth its
+# blast radius.
+scalar_api_reference = { version = "0.2.2", default-features = false }
+# gzip, both ends of it: the build script compresses the Scalar bundle, and the
+# one handler that serves it inflates again for the rare client that refuses a
+# compressed response. `rust_backend` is the pure-Rust deflate (miniz_oxide);
+# the alternative backends bind to a system zlib, which would put a C toolchain
+# and a native library on the path of a build that has neither.
+flate2 = { version = "1", default-features = false, features = [
+  "rust_backend",
 ] }
 winnow = "1.0.3"
 tracing = { version = "0.1", features = ["log"] }

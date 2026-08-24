@@ -61,11 +61,10 @@ jobs:
       - name: Evaluate flake
         run: nix flake check --no-build --print-build-logs
 
-      # Both layers, so no matrix cell below has to compile one itself. They
-      # build concurrently, and on an unchanged Cargo.lock this is a cache hit
-      # and a no-op.
-      - name: Build dependency layers
-        run: nix build .#deps .#server-deps --no-link --print-build-logs
+      # The layer every check builds on, so no matrix cell below has to compile
+      # it itself. On an unchanged Cargo.lock this is a cache hit and a no-op.
+      - name: Build dependency layer
+        run: nix build .#deps --no-link --print-build-logs
 
       - name: Enumerate checks
         id: enumerate

@@ -26,9 +26,10 @@ use sismatic_store::group::{DynGroupState, GroupState};
 use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
 use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
-use utoipa_swagger_ui::SwaggerUi;
 
-use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
+use crate::openapi::{
+    Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
+};
 use crate::routes::{
     field_history, group_field_history, health_check, list_commands, list_devices, list_fields,
     list_group_commands, list_group_fields, list_groups, pause_group_recording, pause_recording,
@@ -120,9 +121,10 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     let stamp = web::Data::new(stamp);
 
     // Built once and cloned per worker, for the same reason the store handle is:
-    // the document is identical on every worker, and assembling it inside the
-    // closure would rebuild the whole thing once per thread at startup.
-    let api_doc = ApiDoc::document();
+    // the docs are identical on every worker, and assembling them inside the
+    // closure would rebuild the whole thing — document, page and a four-megabyte
+    // bundle — once per thread at startup.
+    let docs = web::Data::new(Docs::render());
 
     let server = HttpServer::new(move || {
         // Run once per worker thread, so everything captured here is cloned per
@@ -136,6 +138,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             .app_data(log.clone())
             .app_data(group_state.clone())
             .app_data(stamp.clone())
+            .app_data(docs.clone())
             .service(
                 // A `resource` rather than `App::route`, which is otherwise the
                 // same thing spelled shorter: `route` hoists the method guard onto
@@ -261,28 +264,33 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                     .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
                     .service(web::resource("/groups").route(web::get().to(list_groups))),
             )
-            // Registered last, and this time the order *is* load-bearing: the
-            // UI is mounted on a tail match (`/swagger-ui/{_:.*}`), which is
-            // precisely the kind of resource the note above says the ordering
-            // exists to protect against. It is also unversioned and outside the
-            // scope, because a document that described only `/v1` from a `/v1`
-            // path could not describe the route that lists the versions.
-            .service(SwaggerUi::new(SWAGGER_UI_PATH).url(OPENAPI_JSON_PATH, api_doc.clone()))
-            // `/swagger-ui` without the trailing slash, sent to `/swagger-ui/`.
+            // The docs, registered last and unversioned. Outside the scope
+            // because a document that described only `/v1` from a `/v1` path
+            // could not describe the route that lists the versions.
             //
-            // The pattern above is `/swagger-ui/{_:.*}`, whose literal prefix
-            // *includes* the slash, so the slashless form matches no resource
-            // and falls through to a bare 404. That is the URL a person types —
-            // this is the one route in the application reached by someone typing
-            // rather than by a program following a contract — so the trailing
-            // slash cannot be a thing they are expected to know.
+            // Three exact paths, no tail match: the page loads exactly one
+            // asset and it is named here, so there is no `{_:.*}` resource that
+            // has to be kept out of the way of everything registered above.
+            // Ordering is therefore not load-bearing for these three the way it
+            // is for the readings routes — the note there stands on its own.
+            .service(web::resource(OPENAPI_JSON_PATH).route(web::get().to(openapi_json)))
+            .service(web::resource(SCALAR_UI_PATH).route(web::get().to(scalar_ui)))
+            .service(web::resource(SCALAR_JS_PATH).route(web::get().to(scalar_js)))
+            // `/scalar/` with a trailing slash, sent to `/scalar`.
+            //
+            // The resource above is the exact path `/scalar`, so the slashed
+            // form matches nothing and falls through to a bare 404. That is a
+            // URL a person types — this is the one route in the application
+            // reached by someone typing rather than by a program following a
+            // contract — so the trailing slash cannot be a thing they are
+            // expected to get right.
             //
             // A redirect rather than `NormalizePath` middleware: that would fold
             // the slash on *every* path, quietly making `/health_check/` a
             // working alias for `/health_check` and turning the deliberate 404s
             // and 405s above into a set of near-misses that all resolve. The
             // problem is one path's, and so is the fix.
-            .service(web::redirect("/swagger-ui", "/swagger-ui/"))
+            .service(web::redirect("/api/", SCALAR_UI_PATH))
     })
     .listen(listener)?
     // The composition root owns the process's shutdown signal (it has a sync

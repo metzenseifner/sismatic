@@ -24,46 +24,6 @@
 //! which is a question about stored data — see [`health_check()`] for where that
 //! line is drawn.
 //!
-//! # The routes
-//!
-//! ```text
-//! GET  /health_check                               liveness; consults nothing
-//!
-//! GET  /v1/devices                                 every configured device
-//! GET  /v1/devices/{id}                            one device + its readings
-//! GET  /v1/groups                                  every configured group
-//! GET  /v1/groups/{id}                             one group and its members
-//!
-//! GET  /v1/devices/{id}/fields                     every field's latest value
-//! GET  /v1/devices/{id}/fields/{field}             one field's latest value
-//! GET  /v1/devices/{id}/fields/{field}/history     one field over a time span
-//!
-//! GET  /v1/groups/{id}/fields                      every field, every member
-//! GET  /v1/groups/{id}/fields/{field}              one field, every member
-//! GET  /v1/groups/{id}/fields/{field}/history      one field over time, per member
-//!
-//! POST /v1/devices/{id}/recording/start            begin a recording
-//! POST /v1/devices/{id}/recording/stop             end one
-//! POST /v1/devices/{id}/recording/pause            suspend one
-//! PUT  /v1/devices/{id}/metadata/{field}           write a metadata register
-//! PUT  /v1/devices/{id}/settings/{field}           write a device setting
-//! GET  /v1/devices/{id}/recording                  the write side's phase/epoch
-//! GET  /v1/devices/{id}/commands                   what this device was asked
-//!
-//! POST /v1/groups/{id}/recording/start             the same five, addressed to
-//! POST /v1/groups/{id}/recording/stop              a device group
-//! POST /v1/groups/{id}/recording/pause
-//! PUT  /v1/groups/{id}/metadata/{field}
-//! PUT  /v1/groups/{id}/settings/{field}
-//! GET  /v1/groups/{id}/recording                   every member's phase
-//! GET  /v1/groups/{id}/commands                    what each member was asked
-//!
-//! GET  /v1/commands/{id}                           what became of one request
-//!
-//! GET  /swagger-ui/                                the routes above, browsable
-//! GET  /api-docs/openapi.json                      the same, as OpenAPI 3.1
-//! ```
-//!
 //! Three routes cover every field core can query, and will still cover them
 //! after core's catalog grows, because `{field}` is a path parameter passed
 //! through to the store rather than a symbol this crate was compiled against.
@@ -85,10 +45,10 @@
 //! answer correctly for a group at all.
 //!
 //! The last two are the same routes described to a reader: an OpenAPI document
-//! derived from the handlers and the DTOs themselves, and Swagger UI served over
-//! it so the API can be browsed and exercised from a browser with nothing
-//! installed. Both are compiled in — no CDN, no static-asset step — for the
-//! reasons in [`openapi`].
+//! derived from the handlers and the DTOs themselves, and the Scalar API
+//! reference served over it so the API can be browsed and exercised from a
+//! browser with nothing installed. Both are compiled in — no CDN, no
+//! static-asset step — for the reasons in [`openapi`].
 //!
 //! # Capability, not connection
 //!
