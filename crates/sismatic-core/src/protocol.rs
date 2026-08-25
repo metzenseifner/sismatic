@@ -203,6 +203,50 @@ mod tests {
     }
 
     #[test]
+    fn parses_stream_1_name() {
+        let instr = Query::Stream1Name.instruction();
+        assert_eq!(instr.payload, "\u{1b}N1STRC\r");
+        assert_eq!(
+            drive(&instr, "Lecture Hall A\r\n"),
+            Step::Done(Value::Text("Lecture Hall A".into()))
+        );
+    }
+
+    #[test]
+    fn parses_stream_2_name() {
+        let instr = Query::Stream2Name.instruction();
+        assert_eq!(instr.payload, "\u{1b}N2STRC\r");
+        assert_eq!(
+            drive(&instr, "Lecture Hall B\r\n"),
+            Step::Done(Value::Text("Lecture Hall B".into()))
+        );
+    }
+
+    #[test]
+    fn parses_stream_3_name() {
+        let instr = Query::Stream3Name.instruction();
+        assert_eq!(instr.payload, "\u{1b}N3STRC\r");
+        assert_eq!(
+            drive(&instr, "Lecture Hall C\r\n"),
+            Step::Done(Value::Text("Lecture Hall C".into()))
+        );
+    }
+
+    /// The enable-state read is the name read's verb without the `N`, so the
+    /// two payloads are pinned together — a typo in either would silently make
+    /// one of them the other.
+    #[test]
+    fn parses_stream_state_as_a_flag() {
+        let instr = Query::Stream2State.instruction();
+        assert_eq!(instr.payload, "\u{1b}2STRC\r");
+        assert_eq!(drive(&instr, "1\r\n"), Step::Done(Value::Flag(true)));
+        assert_eq!(
+            drive(&Query::Stream3State.instruction(), "0\r\n"),
+            Step::Done(Value::Flag(false))
+        );
+    }
+
+    #[test]
     fn parses_port_as_u16() {
         let instr = Query::SshPort.instruction();
         assert_eq!(drive(&instr, "22023\r\n"), Step::Done(Value::Port(22023)));

@@ -11,6 +11,12 @@
 from typing import Literal
 
 QueryName = Literal[
+    "stream_1_name",
+    "stream_name_1",
+    "stream_2_name",
+    "stream_name_2",
+    "stream_3_name",
+    "stream_name_3",
     "firmware",
     "running_state",
     "unit_name",
@@ -48,6 +54,15 @@ QueryName = Literal[
     "systemname",
     "title",
     "type",
+    "stream_1_state",
+    "stream_1_enabled",
+    "stream_1_status",
+    "stream_2_state",
+    "stream_2_enabled",
+    "stream_2_status",
+    "stream_3_state",
+    "stream_3_enabled",
+    "stream_3_status",
 ]
 
 CommandName = Literal[

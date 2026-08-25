@@ -13,6 +13,9 @@ use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
 instruction_catalog! {
     /// A built-in field that can be queried.
     pub enum Query {
+        Stream1Name { name: "STREAM_1_NAME", aliases: ["STREAM_NAME_1"], doc: "Name of stream 1." },
+        Stream2Name { name: "STREAM_2_NAME", aliases: ["STREAM_NAME_2"], doc: "Name of stream 2." },
+        Stream3Name { name: "STREAM_3_NAME", aliases: ["STREAM_NAME_3"], doc: "Name of stream 3." },
         Firmware { name: "FIRMWARE", aliases: [], doc: "Firmware/version string, e.g. 2.11." },
         RunningState { name: "RUNNING_STATE", aliases: [], doc: "Current recording state (stopped, started, or paused)." },
         UnitName { name: "UNIT_NAME", aliases: [], doc: "Configured unit name." },
@@ -50,6 +53,13 @@ instruction_catalog! {
         SystemName {name:"SYSTEMNAME", aliases:[], doc: "System Name"},
         Title { name: "TITLE", aliases: [], doc: "Recording title metadata register (read)." },
         Type {name: "TYPE", aliases:[], doc: "Dublin Core Type (read)"},
+        // Enable state per stream. The index is part of the name for the same
+        // reason it is in the three entries above: a `Query` carries no
+        // argument, so the address has to live in the variant. `_STATE` follows
+        // `SNMP_STATE`/`DHCP_MODE`; `_ENABLED` and `_STATUS` are accepted too.
+        Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
+        Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
+        Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
     }
 }
 
@@ -58,6 +68,15 @@ impl Query {
     pub fn instruction(self) -> Instruction {
         use Query::*;
         let (payload, parser): (String, ParseFn) = match self {
+            Stream1Name => (esc_cr("N1STRC"), plain_text()),
+            Stream2Name => (esc_cr("N2STRC"), plain_text()),
+            Stream3Name => (esc_cr("N3STRC"), plain_text()),
+            // `ESC <n> STRC CR` -> `(0|1) CR LF`. The name read one line up is
+            // the same verb with an `N` in front of the index, so the two
+            // differ on the wire by exactly that letter.
+            Stream1State => (esc_cr("1STRC"), boolean_flag()),
+            Stream2State => (esc_cr("2STRC"), boolean_flag()),
+            Stream3State => (esc_cr("3STRC"), boolean_flag()),
             Firmware => ("Q".into(), plain_text()),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),
