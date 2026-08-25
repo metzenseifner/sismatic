@@ -245,7 +245,7 @@ fn a_missing_config_file_is_reported() {
 
 /// ...and the *binary* answers that failure with help rather than a panic, so
 /// an operator who has not yet written a config is told which flag to reach
-/// for. Drives the real executable, because the behaviour under test is the
+/// for. Drives the real executable, because the behavior under test is the
 /// composition root's — exit code and stderr, neither of which is a value any
 /// unit test can inspect.
 #[test]
