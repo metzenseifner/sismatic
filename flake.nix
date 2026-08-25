@@ -824,7 +824,13 @@
                 # i.e. `0` (or `^0`, or `*`). `^0` matches every 0.x, so every bump
                 # below 1.0 keeps resolving and nothing here needs maintaining. At
                 # a 1.0 bump release-plz rewrites these to `1` itself.
-                bumpProof = d: d.req == "*" || builtins.elem d.req [ "0" "^0" ];
+                bumpProof =
+                  d:
+                  d.req == "*"
+                  || builtins.elem d.req [
+                    "0"
+                    "^0"
+                  ];
                 narrow = lib.filter (d: ok d && !(bumpProof d)) deps;
               in
               assert lib.assertMsg (narrow == [ ]) ''
@@ -957,6 +963,7 @@
           }
           # Code coverage
           # Tarpaulin only works on Linux, hence the gate.
+          # cargo-llvm-cov is an alternative to tarpaulin
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             coverage = craneLib.cargoTarpaulin (
               commonArgs
