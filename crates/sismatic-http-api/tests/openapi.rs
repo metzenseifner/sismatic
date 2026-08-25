@@ -252,8 +252,8 @@ async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
     assert_eq!(declared, ["readings", "inventory", "commands", "health"]);
 
     // Every operation carries exactly one tag, and it is one of those four. An
-    // untagged operation lands in Swagger UI's "default" bucket, which is how a
-    // route goes missing from the rendered document without going missing from
+    // untagged operation lands in the renderer's catch-all bucket, which is how
+    // a route goes missing from the rendered document without going missing from
     // the server.
     for (template, item) in doc["paths"].as_object().expect("paths is an object") {
         for (method, operation) in item.as_object().expect("a path item is an object") {
@@ -375,21 +375,22 @@ async fn the_string_aliases_are_documented_as_strings() {
 }
 
 #[tokio::test]
-async fn the_ui_is_reachable_without_the_trailing_slash() {
-    // `/swagger-ui/{_:.*}` has the slash in its literal prefix, so the slashless
-    // form matches no resource at all. This is the one route in the application
-    // that a person reaches by typing it, so it redirects rather than 404s.
+async fn the_ui_is_reachable_with_a_trailing_slash() {
+    // The UI is the exact resource `/scalar`, so the slashed form matches no
+    // resource at all. This is the one route in the application that a person
+    // reaches by typing it, so it redirects rather than 404s.
     let address = spawn_app().await;
 
-    let response = reqwest::get(format!("{address}/swagger-ui"))
+    let response = reqwest::get(format!("{address}/api/"))
         .await
-        .expect("requesting the ui without a trailing slash");
+        .expect("requesting the ui with a trailing slash");
 
     // The client followed the redirect, which is what a browser does.
     assert_eq!(response.status().as_u16(), 200);
-    assert!(
-        response.url().path().ends_with("/swagger-ui/"),
-        "expected to land on the slashed path, got {}",
+    assert_eq!(
+        response.url().path(),
+        "/api",
+        "expected to land on the slashless path, got {}",
         response.url()
     );
 }
@@ -414,22 +415,15 @@ async fn the_slash_is_folded_for_the_ui_only() {
 }
 
 #[tokio::test]
-async fn swagger_ui_is_served_and_points_at_the_document() {
+async fn the_ui_is_served_and_points_at_the_document() {
     let address = spawn_app().await;
 
-    let response = reqwest::get(format!("{address}/swagger-ui/"))
+    let response = reqwest::get(format!("{address}/api"))
         .await
-        .expect("requesting the swagger ui");
+        .expect("requesting the api reference");
 
     assert_eq!(response.status().as_u16(), 200);
-    // Served from the binary, not fetched from a CDN — so this is a real page
-    // even on a host with no route off the LAN.
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+    let content_type = content_type(&response);
     assert!(
         content_type.starts_with("text/html"),
         "expected HTML, got {content_type}"
@@ -437,7 +431,184 @@ async fn swagger_ui_is_served_and_points_at_the_document() {
 
     let body = response.text().await.expect("reading the page");
     assert!(
-        body.contains("swagger-ui"),
-        "the page should be the Swagger UI shell"
+        body.contains("Scalar.createApiReference"),
+        "the page should be the Scalar shell"
     );
+    // Relative, so the page reads the document from whatever host served it.
+    // An absolute URL here would pin the docs to one deployment's hostname.
+    assert!(
+        body.contains(r#""url":"/api-docs/openapi.json""#),
+        "the page should point at this server's document, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_ui_reaches_for_nothing_off_this_server() {
+    // The reason the bundle is embedded at all: these installations routinely
+    // have no route off the LAN. A page served from the binary that then loads
+    // its JavaScript — or its webfonts, or an AI assistant — from a CDN is
+    // exactly as blank as one that was never embedded, so what is worth pinning
+    // is the absence of an external host anywhere in the page rather than the
+    // presence of the local one.
+    //
+    // One of these would matter even with a route off the LAN: left undefined,
+    // `proxyUrl` sends every "Try it" request through `proxy.scalar.com`, auth
+    // panel and all. See `openapi::scalar_config`.
+    let address = spawn_app().await;
+
+    let body = reqwest::get(format!("{address}/api"))
+        .await
+        .expect("requesting the api reference")
+        .text()
+        .await
+        .expect("reading the page");
+
+    // Three passes, because "off-host" hides in three different places. First
+    // the hosts the upstream defaults are known to name — these turn up inside
+    // the configuration object as readily as in an attribute, where no amount
+    // of markup parsing would find them.
+    for host in [
+        "cdn.jsdelivr.net",
+        "unpkg.com",
+        "fonts.googleapis.com",
+        "fonts.scalar.com",
+        "proxy.scalar.com",
+    ] {
+        assert!(!body.contains(host), "the page reaches for {host}: {body}");
+    }
+
+    // Then the two settings whose host lives inside the bundle rather than
+    // here, so there is no name for the pass above to scan for: the webfonts,
+    // and the request proxy every "Try it" call is routed through when
+    // `proxyUrl` is left undefined. Both are off by being spelled out, so a
+    // regression looks like the key going missing — which a test can see and a
+    // scan for hostnames cannot.
+    for setting in [r#""withDefaultFonts":false"#, r#""proxyUrl":"""#] {
+        assert!(
+            body.contains(setting),
+            "the page does not carry {setting}: {body}"
+        );
+    }
+
+    // Then every URL the markup actually references, whatever host it names:
+    // each must be rooted at `/` and must not be the `//host/path` form, which
+    // is an off-host reference that spells no scheme and so passes any check
+    // looking for `http`.
+    for attribute in ["src=\"", "href=\""] {
+        for (at, matched) in body.match_indices(attribute) {
+            let url = body[at + matched.len()..]
+                .split('"')
+                .next()
+                .expect("a quoted attribute value");
+            assert!(
+                url.starts_with('/') && !url.starts_with("//"),
+                "the page references {url}, which this server does not serve"
+            );
+        }
+    }
+
+    // And the one thing it does load is served from here.
+    let response = reqwest::get(format!("{address}/scalar/scalar.js"))
+        .await
+        .expect("requesting the bundle");
+
+    assert_eq!(response.status().as_u16(), 200);
+    let content_type = content_type(&response);
+    assert!(
+        content_type.contains("javascript"),
+        "expected JavaScript, got {content_type}"
+    );
+    assert!(
+        !response
+            .bytes()
+            .await
+            .expect("reading the bundle")
+            .is_empty(),
+        "the bundle should not be empty"
+    );
+}
+
+#[tokio::test]
+async fn the_bundle_is_served_compressed_to_a_client_that_takes_it() {
+    // The binary stores the bundle gzipped and hands those bytes straight out,
+    // which is what makes it a megabyte in the binary rather than four. The
+    // check that it is *actually* compressed on the wire is the gzip magic
+    // number, because a `Content-Encoding` header is a claim and the two bytes
+    // are the thing itself.
+    let address = spawn_app().await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{address}/scalar/scalar.js"))
+        .header("accept-encoding", "gzip, deflate, br")
+        .send()
+        .await
+        .expect("requesting the bundle");
+
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        header(&response, "content-encoding"),
+        "gzip",
+        "the bundle should have been served compressed"
+    );
+    // One URL, two possible bodies, so a cache between here and there has to
+    // key on the request header that decides which.
+    assert_eq!(header(&response, "vary"), "accept-encoding");
+
+    let body = response.bytes().await.expect("reading the bundle");
+    assert_eq!(
+        &body[..2],
+        &[0x1f, 0x8b],
+        "expected a gzip stream, got {:?}",
+        &body[..body.len().min(8)]
+    );
+    assert!(
+        body.len() < 2_000_000,
+        "the compressed bundle is {} bytes — is it still compressed?",
+        body.len()
+    );
+}
+
+#[tokio::test]
+async fn the_bundle_is_inflated_for_a_client_that_refuses_it() {
+    // The rare half, and the reason the handler keeps a decompressor at all: a
+    // client that names an encoding set gzip is not in gets real JavaScript
+    // rather than bytes it cannot read.
+    let address = spawn_app().await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{address}/scalar/scalar.js"))
+        .header("accept-encoding", "identity")
+        .send()
+        .await
+        .expect("requesting the bundle");
+
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        header(&response, "content-encoding"),
+        "",
+        "an identity-only client should not have been sent a coding"
+    );
+
+    let body = response.text().await.expect("reading the bundle");
+    assert!(
+        body.contains("createApiReference"),
+        "expected the Scalar bundle as plain JavaScript"
+    );
+}
+
+/// The `Content-Type` of a response, or the empty string if it carries none.
+fn content_type(response: &reqwest::Response) -> String {
+    header(response, "content-type")
+}
+
+/// One header of a response, or the empty string if it carries none — so an
+/// absent header and an unreadable one assert the same way a client would see
+/// them, rather than needing an `Option` at every call site.
+fn header(response: &reqwest::Response, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
 }

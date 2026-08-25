@@ -170,38 +170,30 @@
           # The composition-root binary (`sismatic-server`) — the deployable
           # artifact, wired up from core, the HTTP API, the store and sync.
           #
-          # Unlike cli this one gets a dependency layer of its own,
-          # scoped exactly the way the build is scoped. The shared
-          # `cargoArtifacts` is resolved workspace-wide, and for
-          # `utoipa-swagger-ui` that lands on a different feature variant than
-          # `-p sismatic-server` does: the shared layer carries only an .rmeta
-          # for the variant this build wants, so cargo recompiles the crate
-          # while reusing the *cached* output of its build script. That script
-          # writes an embed.rs holding an absolute path to the Swagger bundle
-          # it unpacked, which no longer exists in this sandbox, so rust-embed
-          # silently emits a `SwaggerUiDist` with no `Embed` impl and the build
-          # dies on "no function or associated item named `get`". Scoping the
-          # layer means the .rlib is already present and nothing recompiles.
+          # This used to carry a dependency layer of its own, scoped to
+          # `-p sismatic-server`, to work around `utoipa-swagger-ui`: the shared
+          # `cargoArtifacts` is resolved workspace-wide, that crate resolved to a
+          # different feature variant per scope, and cargo would recompile it
+          # while reusing the *cached* output of its build script — a script that
+          # writes an embed.rs holding an absolute path to the bundle it unzipped
+          # into a sandbox that no longer exists. Its replacement,
+          # `scalar_api_reference`, ships its bundle in the .crate file, has no
+          # build script, and resolves to the same featureless variant either
+          # way, so there is nothing left to scope around and this shares the
+          # cached layer like `cli` does.
           #
-          # This only ever bites on macOS: Linux builds are sandboxed into a
-          # build dir that is always /build, so the stale absolute path happens
-          # to resolve and the bug stays invisible.
-          serverDeps = craneLib.buildDepsOnly (
-            commonArgs
-            // {
-              pname = "sismatic-server-deps";
-              cargoExtraArgs = "-p sismatic-server";
-            }
-          );
-
+          # There *is* a build script in the graph again — `sismatic-http-api`'s,
+          # which gzips that bundle — but it cannot reproduce the bug, and the
+          # difference is worth naming rather than trusting. It belongs to a
+          # workspace member, and `buildDepsOnly` caches third-party dependencies
+          # only, so its output is never the stale half of a half-rebuilt crate.
+          # What it writes is bytes rather than a path, so nothing it produces
+          # can refer to a sandbox that has gone away.
           server = craneLib.buildPackage (
-            commonArgs
+            individualCrateArgs
             // {
               pname = "sismatic-server";
-              cargoArtifacts = serverDeps;
               cargoExtraArgs = "-p sismatic-server";
-              # Tests run in the dedicated nextest check.
-              doCheck = false;
               meta.mainProgram = "sismatic-server";
             }
           );
@@ -832,7 +824,13 @@
                 # i.e. `0` (or `^0`, or `*`). `^0` matches every 0.x, so every bump
                 # below 1.0 keeps resolving and nothing here needs maintaining. At
                 # a 1.0 bump release-plz rewrites these to `1` itself.
-                bumpProof = d: d.req == "*" || builtins.elem d.req [ "0" "^0" ];
+                bumpProof =
+                  d:
+                  d.req == "*"
+                  || builtins.elem d.req [
+                    "0"
+                    "^0"
+                  ];
                 narrow = lib.filter (d: ok d && !(bumpProof d)) deps;
               in
               assert lib.assertMsg (narrow == [ ]) ''
@@ -965,11 +963,33 @@
           }
           # Code coverage
           # Tarpaulin only works on Linux, hence the gate.
+          # cargo-llvm-cov is an alternative to tarpaulin
           // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             coverage = craneLib.cargoTarpaulin (
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # `--engine llvm` rather than tarpaulin's default, which is
+                # ptrace: that one single-steps the test binary through an INT3
+                # written over every address DWARF calls a statement, and crane
+                # builds every check `--release`, where a statement no longer
+                # maps onto one address. Some breakpoints land mid-instruction,
+                # and stepping over them resumes the process in the middle of
+                # one — it miscomputes rather than crashes, which is the bad kind
+                # of wrong. The run that found this had
+                # `openapi::tests::the_page_carries_the_bundle_path_and_the_configuration`
+                # observe `scalar_config()` as `false` instead of the object it
+                # is, while `nextest` ran the same test out of the same
+                # `--release` profile on the same commit and passed.
+                #
+                # The llvm engine instruments at compile time and reads the
+                # `.profraw` afterwards, so nothing patches the running process
+                # and optimization stops being a correctness question. It is also
+                # what cargo-llvm-cov does, the alternative named above.
+                #
+                # The three flags after it are crane's own default tail, which
+                # this attribute replaces wholesale rather than appends to.
+                cargoTarpaulinExtraArgs = "--engine llvm --skip-clean --out xml --output-dir $out";
               }
             );
           };
@@ -984,14 +1004,13 @@
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
 
-            # The dependency layers on their own. Nothing consumes these
-            # directly — they exist so one machine (locally, or one CI job) can
-            # compile the expensive Cargo.lock-keyed layers once and populate a
-            # store the checks then hit instead of rebuilding. `server-deps` is
-            # separate because sismatic-server needs its own scoped layer; see
-            # the comment on `serverDeps`.
+            # The dependency layer on its own. Nothing consumes this directly —
+            # it exists so one machine (locally, or one CI job) can compile the
+            # expensive Cargo.lock-keyed layer once and populate a store the
+            # checks then hit instead of rebuilding. One layer now covers every
+            # build; `server-deps` was a second one scoped to sismatic-server,
+            # and the comment on `server` says why it is gone.
             deps = cargoArtifacts;
-            server-deps = serverDeps;
 
             # `nix build .#server-portable` -> a sismatic-server that runs on
             # a machine with no Nix; `.#server-release` -> that binary packed

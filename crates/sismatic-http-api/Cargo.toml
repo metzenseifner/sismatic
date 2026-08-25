@@ -15,13 +15,29 @@ sismatic-store = { workspace = true }
 # One request body of this crate's own (`routes::commands::ValueWrite`). Every
 # other type on the wire comes from `api-types`, which derives its own.
 serde.workspace = true
+# Serializing the document once at startup, and building the small JSON object
+# the UI is configured with. A dev-dependency until the document route became
+# this crate's own — the tests still use it to read response bodies as values
+# rather than re-deriving the DTOs, so what they pin is the bytes on the wire
+# and not just a round-trip.
+serde_json.workspace = true
 # The `#[utoipa::path]` attributes on the handlers and the `OpenApi` derive that
 # collects them — see `src/openapi.rs`.
 utoipa.workspace = true
-# Serves the browsable UI over the document above. Its `actix-web` feature makes
-# `SwaggerUi` an actix `HttpServiceFactory`, so it mounts with `.service()` like
-# any other route rather than needing a static-file handler wired by hand.
-utoipa-swagger-ui.workspace = true
+# Inflating the Scalar bundle back to plain JavaScript for a client that will not
+# take it compressed. See `build.rs` for the other half.
+flate2.workspace = true
+
+[build-dependencies]
+# The two halves of embedding the browsable UI: the bundle itself, and the
+# compressor that shrinks it before `src/openapi.rs` includes the result.
+#
+# Build-only, both of them, and that is worth stating as a property rather than
+# an accident — it is what keeps `rust-embed`, `mime_guess` and `sha2` out of the
+# shipped binary's dependency cone entirely. The only thing that crosses from
+# here into the binary is a `Vec<u8>` written to `OUT_DIR`.
+scalar_api_reference.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 # Needed to implement `ReadStore` for the test doubles in `tests/` — the store
@@ -32,9 +48,6 @@ reqwest = { workspace = true, features = ["json"] }
 # `rt` (current-thread) is enough: actix runs its workers on their own threads,
 # and the test's runtime only has to poll the client and the server handle.
 tokio = { workspace = true, features = ["macros", "rt"] }
-# The response-body assertions read the JSON as values rather than re-deriving
-# the DTOs, so a test pins the bytes on the wire and not just a round-trip.
-serde_json.workspace = true
 # The readings tests run the handlers over the *real* in-memory adapter rather
 # than a hand-written double. A double would have to restate the port's ordering
 # and filtering semantics, and a test of a handler over a double that drifted
