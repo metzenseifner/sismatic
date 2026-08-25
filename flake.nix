@@ -969,6 +969,27 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # `--engine llvm` rather than tarpaulin's default, which is
+                # ptrace: that one single-steps the test binary through an INT3
+                # written over every address DWARF calls a statement, and crane
+                # builds every check `--release`, where a statement no longer
+                # maps onto one address. Some breakpoints land mid-instruction,
+                # and stepping over them resumes the process in the middle of
+                # one — it miscomputes rather than crashes, which is the bad kind
+                # of wrong. The run that found this had
+                # `openapi::tests::the_page_carries_the_bundle_path_and_the_configuration`
+                # observe `scalar_config()` as `false` instead of the object it
+                # is, while `nextest` ran the same test out of the same
+                # `--release` profile on the same commit and passed.
+                #
+                # The llvm engine instruments at compile time and reads the
+                # `.profraw` afterwards, so nothing patches the running process
+                # and optimization stops being a correctness question. It is also
+                # what cargo-llvm-cov does, the alternative named above.
+                #
+                # The three flags after it are crane's own default tail, which
+                # this attribute replaces wholesale rather than appends to.
+                cargoTarpaulinExtraArgs = "--engine llvm --skip-clean --out xml --output-dir $out";
               }
             );
           };
