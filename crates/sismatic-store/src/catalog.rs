@@ -14,7 +14,7 @@
 //!
 //! # Why the write side needs it
 //!
-//! Without a catalog, `POST /v1/devices/typo/recording/start` is accepted: the
+//! Without a catalog, `POST /v1/commands/devices/typo/recording/start` is accepted: the
 //! outbox holds what was submitted and no list of what exists, so it admits the
 //! command against a fresh idle phase and answers `202`. The caller then learns
 //! its recording never started by polling a command that fails at dispatch,

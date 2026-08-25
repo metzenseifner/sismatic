@@ -26,8 +26,10 @@
 //! does not route one. See that file for how a route-miss is told apart from a
 //! handler's own 404.
 //!
-//! `context_path = "/v1"` carries the [`web::scope`] the readings routes are
-//! mounted under; the same test is what keeps that honest too.
+//! `context_path` carries the two [`web::scope`]s a route is nested in —
+//! `/v1/readings`, `/v1/commands` or `/v1/inventory` — which is a third literal
+//! written twice, and the one a reader of the document depends on to build a
+//! URL that works at all. The same test is what keeps it honest.
 //!
 //! # Why the UI is embedded rather than linked
 //!
@@ -135,32 +137,32 @@ const SCALAR_HTML: &str = r#"<!doctype html>
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        crate::routes::health_check::health_check,
-        crate::routes::readings::list_fields,
-        crate::routes::readings::read_field,
-        crate::routes::readings::field_history,
-        crate::routes::commands::start_recording,
-        crate::routes::commands::stop_recording,
-        crate::routes::commands::pause_recording,
-        crate::routes::commands::set_metadata,
-        crate::routes::commands::set_setting,
-        crate::routes::commands::read_phase,
-        crate::routes::commands::list_commands,
-        crate::routes::commands::read_command,
-        crate::routes::devices::list_devices,
-        crate::routes::devices::read_device,
-        crate::routes::devices::list_groups,
-        crate::routes::devices::read_group,
-        crate::routes::group_readings::list_group_fields,
-        crate::routes::group_readings::read_group_field,
-        crate::routes::group_readings::group_field_history,
-        crate::routes::commands::start_group_recording,
-        crate::routes::commands::stop_group_recording,
-        crate::routes::commands::pause_group_recording,
-        crate::routes::commands::set_group_metadata,
-        crate::routes::commands::set_group_setting,
-        crate::routes::commands::read_group_phase,
-        crate::routes::commands::list_group_commands,
+        crate::handlers::health_check::health_check,
+        crate::handlers::readings::list_fields,
+        crate::handlers::readings::read_field,
+        crate::handlers::readings::field_history,
+        crate::handlers::commands::start_recording,
+        crate::handlers::commands::stop_recording,
+        crate::handlers::commands::pause_recording,
+        crate::handlers::commands::set_metadata,
+        crate::handlers::commands::set_setting,
+        crate::handlers::commands::read_phase,
+        crate::handlers::commands::list_commands,
+        crate::handlers::commands::read_command,
+        crate::handlers::devices::list_devices,
+        crate::handlers::devices::read_device,
+        crate::handlers::devices::list_groups,
+        crate::handlers::devices::read_group,
+        crate::handlers::group_readings::list_group_fields,
+        crate::handlers::group_readings::read_group_field,
+        crate::handlers::group_readings::group_field_history,
+        crate::handlers::commands::start_group_recording,
+        crate::handlers::commands::stop_group_recording,
+        crate::handlers::commands::pause_group_recording,
+        crate::handlers::commands::set_group_metadata,
+        crate::handlers::commands::set_group_setting,
+        crate::handlers::commands::read_group_phase,
+        crate::handlers::commands::list_group_commands,
     ),
     components(schemas(
         sismatic_api_types::Reading,
@@ -173,7 +175,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::CommandRecord,
         sismatic_api_types::CommandList,
         sismatic_api_types::RecordingPhase,
-        crate::routes::commands::ValueWrite,
+        crate::handlers::commands::ValueWrite,
         // The inventory bodies. `DeviceSummary` and `ConnectionStatus` arrive
         // by being reachable from these.
         sismatic_api_types::DeviceList,

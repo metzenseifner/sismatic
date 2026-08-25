@@ -53,8 +53,8 @@
 //! store cannot tell "no such device" from "this one has not answered yet".
 //! A *device group* id is different — the catalog holds the configured set, so
 //! "this id is a group" is a fact rather than an inference from absence — and it
-//! is refused with the `/v1/groups` URL that answers instead. See
-//! [`crate::routes::target`] for why only the positive hit is a claim these
+//! is refused with the `/v1/readings/groups` URL that answers instead. See
+//! [`crate::handlers::target`] for why only the positive hit is a claim these
 //! routes are entitled to make.
 
 use actix_web::web;
@@ -66,8 +66,8 @@ use sismatic_api_types::{
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 
-use crate::routes::error::ApiFailure;
-use crate::routes::target::reject_group;
+use crate::handlers::error::ApiFailure;
+use crate::handlers::target::{READINGS, reject_group};
 
 /// The most readings one request can return.
 ///
@@ -165,7 +165,7 @@ pub(crate) fn reject_conflicting_field(
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(("id" = String, Path, description = "Device id, as configured on the write side.")),
     responses(
@@ -173,7 +173,7 @@ pub(crate) fn reject_conflicting_field(
              yields an empty list rather than a 404 — see the handler's docs.",
          body = ReadingList),
         (status = 404, description = "This id names a device group, not a device. \
-             The body carries the `/v1/groups` URL that answers instead.",
+             The body carries the `/v1/readings/groups` URL that answers instead.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -184,7 +184,7 @@ pub async fn list_fields(
     path: web::Path<String>,
 ) -> Result<web::Json<ReadingList>, ApiFailure> {
     let device = path.into_inner();
-    reject_group(&**catalog, &device, "fields").await?;
+    reject_group(&**catalog, &device, READINGS, "fields").await?;
     let readings = store.latest_all(device).await?;
     Ok(web::Json(ReadingList { readings }))
 }
@@ -197,7 +197,7 @@ pub async fn list_fields(
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(
         ("id" = String, Path, description = "Device id, as configured on the write side."),
@@ -212,7 +212,7 @@ pub async fn list_fields(
              or the id names a device group. The first is not a claim that either \
              does not exist — an unknown device, an unpolled field and a device that \
              has not answered yet are one answer from here — while the second is, and \
-             carries the `/v1/groups` URL that answers instead.",
+             carries the `/v1/readings/groups` URL that answers instead.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -224,7 +224,7 @@ pub async fn read_field(
 ) -> Result<web::Json<Reading>, ApiFailure> {
     let (device, field) = path.into_inner();
     let field = normalize_field(&field);
-    reject_group(&**catalog, &device, &format!("fields/{field}")).await?;
+    reject_group(&**catalog, &device, READINGS, &format!("fields/{field}")).await?;
 
     store
         .latest(device.clone(), field.clone())
@@ -245,7 +245,7 @@ pub async fn read_field(
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}/history",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(
         ("id" = String, Path, description = "Device id, as configured on the write side."),
@@ -281,7 +281,13 @@ pub async fn field_history(
     let field = normalize_field(&field);
     let query = query.into_inner();
     reject_conflicting_field(&query, &field)?;
-    reject_group(&**catalog, &device, &format!("fields/{field}/history")).await?;
+    reject_group(
+        &**catalog,
+        &device,
+        READINGS,
+        &format!("fields/{field}/history"),
+    )
+    .await?;
 
     let mut readings = store.between(device, field, span_of(&query)).await?;
     truncate(&mut readings, query.limit);

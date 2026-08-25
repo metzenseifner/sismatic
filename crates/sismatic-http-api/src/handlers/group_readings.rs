@@ -1,5 +1,5 @@
 //! The group readings routes — the same three questions as
-//! [`readings`](crate::routes::readings), asked of a device group.
+//! [`readings`](crate::handlers::readings), asked of a device group.
 //!
 //! ```text
 //! GET /groups/{id}/fields                     every field, every member
@@ -14,10 +14,10 @@
 //! is not a new way to read a device, it is the same read fanned out and
 //! answered as one object.
 //!
-//! The write side has its own `/v1/groups` space, in
-//! [`commands`](crate::routes::commands). Both spaces resolve an id through
-//! [`target`](crate::routes::target), so a device id is refused identically
-//! wherever it appears under `/v1/groups`.
+//! The write side has its own `/v1/commands/groups` space, in
+//! [`commands`](crate::handlers::commands). Both spaces resolve an id through
+//! [`target`](crate::handlers::target), so a device id is refused identically
+//! wherever it appears under either.
 //!
 //! # What these add, and why it needs three ports
 //!
@@ -74,9 +74,9 @@ use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::group::{GroupState, satisfies};
 
-use crate::routes::error::ApiFailure;
-use crate::routes::readings::{normalize_field, reject_conflicting_field, span_of, truncate};
-use crate::routes::target::group_members;
+use crate::handlers::error::ApiFailure;
+use crate::handlers::readings::{normalize_field, reject_conflicting_field, span_of, truncate};
+use crate::handlers::target::{READINGS, group_members};
 
 /// `GET /groups/{id}/fields` — every field any member has reported or the group
 /// has been told about, with each member's latest value.
@@ -89,7 +89,7 @@ use crate::routes::target::group_members;
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(("id" = String, Path, description = "Group id, as written in the devices file.")),
     responses(
@@ -110,7 +110,7 @@ pub async fn list_group_fields(
     path: web::Path<String>,
 ) -> Result<web::Json<GroupFieldStateList>, ApiFailure> {
     let group = path.into_inner();
-    let members = group_members(&**catalog, &group, "fields").await?;
+    let members = group_members(&**catalog, &group, READINGS, "fields").await?;
 
     // One store read per member rather than one per (member, field): the port
     // answers "everything known about this device" in a single call, and the
@@ -163,7 +163,7 @@ pub async fn list_group_fields(
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields/{field}",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(
         ("id" = String, Path, description = "Group id, as written in the devices file."),
@@ -189,7 +189,7 @@ pub async fn read_group_field(
 ) -> Result<web::Json<GroupFieldState>, ApiFailure> {
     let (group, field) = path.into_inner();
     let field = normalize_field(&field);
-    let members = group_members(&**catalog, &group, "fields").await?;
+    let members = group_members(&**catalog, &group, READINGS, "fields").await?;
 
     let expected = state.expected(group.clone(), field.clone()).await?;
 
@@ -219,7 +219,7 @@ pub async fn read_group_field(
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields/{field}/history",
-    context_path = "/v1",
+    context_path = "/v1/readings",
     tag = "readings",
     params(
         ("id" = String, Path, description = "Group id, as written in the devices file."),
@@ -254,7 +254,7 @@ pub async fn group_field_history(
     let query = query.into_inner();
     reject_conflicting_field(&query, &field)?;
 
-    let member_ids = group_members(&**catalog, &group, "fields").await?;
+    let member_ids = group_members(&**catalog, &group, READINGS, "fields").await?;
     let span = span_of(&query);
 
     let mut members = Vec::with_capacity(member_ids.len());

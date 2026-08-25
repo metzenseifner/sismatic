@@ -1,6 +1,6 @@
 //! tests/openapi.rs — the API description, and whether it describes *this* API.
 //!
-//! Black-box like the other two suites: the real server on a real socket, and
+//! Black-box like the scope suites: the real server on a real socket, and
 //! the document read back over HTTP rather than built in-process. What is worth
 //! pinning is what a browser pointed at a running server receives.
 //!
@@ -14,7 +14,7 @@
 //! nothing pairs. Move a route in one and not the other and the document
 //! confidently advertises a URL that answers 404.
 //!
-//! So [`every_documented_path_is_a_path_the_server_serves`] closes the loop from
+//! So [`every_documented_operation_is_one_the_server_serves`] closes the loop from
 //! the outside: it reads the paths the *server* published, fills their
 //! parameters with data the store has been seeded with, and requests each one.
 //! A documented-but-unrouted path is the only way that test fails, which is
@@ -40,7 +40,7 @@ mod harness;
 /// does not hold now answers 404, which this suite reads as a missing route.
 const DEVICE: &str = harness::DEVICE;
 const FIELD: &str = "RUNNING_STATE";
-/// The command id `{id}` becomes under `/v1/commands/`. The first id the
+/// The command id `{id}` becomes on the `/v1/commands` scope root. The first id the
 /// harness's counting stamp issues, which is the one the seeded submission
 /// below receives.
 const COMMAND: &str = "cmd-1";
@@ -78,7 +78,7 @@ async fn spawn_app() -> String {
         .submit(Submission {
             ids: vec![COMMAND.to_owned()],
             targets: vec![DEVICE.to_owned()],
-            // Filed against the group as well, so `/v1/groups/{id}/fields`
+            // Filed against the group as well, so `/v1/readings/groups/{id}/fields`
             // has an expectation to return and cannot 404 or 500 of its own
             // accord — the same reason the store below is seeded.
             group: Some(harness::GROUP.to_owned()),
@@ -169,7 +169,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
             // path — and those are what this rules out. The store and the
             // outbox are seeded so that no handler reached at all can 404 of
             // its own accord. What each route answers on its own terms is
-            // `tests/commands.rs`.
+            // `tests/commands/`.
             assert!(
                 status != 404 && status != 405,
                 "the document advertises {method} {template}, but {method} {url} \
@@ -189,15 +189,20 @@ async fn every_documented_operation_is_one_the_server_serves() {
 /// Substitute a documented path template's parameters with data the fixtures
 /// hold.
 ///
-/// `{id}` means three different things depending on where it sits: a command id
-/// under `/v1/commands/`, a group id under `/v1/groups/`, and a device id
-/// everywhere else. They share a spelling and nothing else, and filling one
-/// route with another's id produces a handler's own honest 404 that looks
-/// exactly like a missing route.
+/// `{id}` means three different things depending on where it sits: a group id
+/// in the `/groups/` half of any scope, a device id in the `/devices/` half, and
+/// a command id on the one route that sits on a scope root rather than in either
+/// half. They share a spelling and nothing else, and filling one route with
+/// another's id produces a handler's own honest 404 that looks exactly like a
+/// missing route.
+///
+/// The command route is matched whole rather than by prefix: every write route
+/// is *also* under `/v1/commands/`, and a prefix test would hand them all a
+/// command id.
 fn fill(template: &str) -> String {
-    let id = if template.starts_with("/v1/commands/") {
+    let id = if template == "/v1/commands/{id}" {
         COMMAND
-    } else if template.starts_with("/v1/groups/") {
+    } else if template.contains("/groups/") {
         harness::GROUP
     } else {
         DEVICE
@@ -235,7 +240,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 /// `readings` covers the device field routes and the group field routes both.
 /// The axis is worth pinning because the other one is the tempting mistake: a
 /// tag named after a resource would file `/v1/groups/{id}` and
-/// `/v1/groups/{id}/fields` in different sections of one document while leaving
+/// `/v1/readings/groups/{id}/fields` in different sections of one document while leaving
 /// `/v1/groups` beside `/v1/devices`, and would hand a generated client a
 /// `GroupsApi` that does not contain `listGroups`.
 #[tokio::test]
@@ -275,8 +280,8 @@ async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
     // The pairing the axis exists for: one device route and one group route,
     // asking the same question, filed together.
     for path in [
-        "/v1/devices/{id}/fields/{field}",
-        "/v1/groups/{id}/fields/{field}",
+        "/v1/readings/devices/{id}/fields/{field}",
+        "/v1/readings/groups/{id}/fields/{field}",
     ] {
         assert_eq!(
             doc["paths"][path]["get"]["tags"][0], "readings",
@@ -286,7 +291,7 @@ async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
     // ...and the counterpart: two paths sharing the `/v1/groups` prefix that
     // answer different questions, filed apart.
     assert_eq!(
-        doc["paths"]["/v1/groups/{id}"]["get"]["tags"][0],
+        doc["paths"]["/v1/inventory/groups/{id}"]["get"]["tags"][0],
         "inventory"
     );
 }
@@ -299,9 +304,10 @@ async fn the_history_route_documents_the_query_filters() {
     let address = spawn_app().await;
     let doc = document(&address).await;
 
-    let params = doc["paths"]["/v1/devices/{id}/fields/{field}/history"]["get"]["parameters"]
-        .as_array()
-        .expect("the history route documents parameters");
+    let params =
+        doc["paths"]["/v1/readings/devices/{id}/fields/{field}/history"]["get"]["parameters"]
+            .as_array()
+            .expect("the history route documents parameters");
 
     let query: Vec<&str> = params
         .iter()
@@ -319,7 +325,8 @@ async fn the_error_envelope_is_documented_where_it_can_be_returned() {
     let address = spawn_app().await;
     let doc = document(&address).await;
 
-    let not_found = &doc["paths"]["/v1/devices/{id}/fields/{field}"]["get"]["responses"]["404"];
+    let not_found =
+        &doc["paths"]["/v1/readings/devices/{id}/fields/{field}"]["get"]["responses"]["404"];
     assert!(
         !not_found.is_null(),
         "the latest-value route should document its 404"
@@ -403,7 +410,7 @@ async fn the_slash_is_folded_for_the_ui_only() {
     // folded trailing slashes everywhere would quietly turn them into aliases.
     let address = spawn_app().await;
 
-    for path in ["/health_check/", "/v1/devices/atrium-101/fields/"] {
+    for path in ["/health_check/", "/v1/readings/devices/atrium-101/fields/"] {
         let status = reqwest::get(format!("{address}{path}"))
             .await
             .expect("requesting a slashed path")

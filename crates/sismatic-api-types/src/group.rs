@@ -205,7 +205,7 @@ pub struct MemberPhase {
     pub epoch: u64,
 }
 
-/// A device group's write-side state, as `GET /v1/groups/{id}/recording`
+/// A device group's write-side state, as `GET /v1/commands/groups/{id}/recording`
 /// reports it.
 ///
 /// The write-side counterpart of [`GroupFieldState`] over `RUNNING_STATE`, and
