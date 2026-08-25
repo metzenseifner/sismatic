@@ -28,16 +28,16 @@ use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 
 use crate::handlers::target::{COMMANDS, INVENTORY, READINGS};
-use crate::openapi::{ApiDoc, OPENAPI_JSON_PATH, SWAGGER_UI_PATH};
-use crate::openapi::{
-    Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
-};
-use crate::routes::{
-    field_history, group_field_history, health_check, list_commands, list_devices, list_fields,
+use crate::handlers::{
+    field_history, group_field_history, list_commands, list_devices, list_fields,
     list_group_commands, list_group_fields, list_groups, pause_group_recording, pause_recording,
     read_command, read_device, read_field, read_group, read_group_field, read_group_phase,
     read_phase, set_group_metadata, set_group_setting, set_metadata, set_setting,
     start_group_recording, start_recording, stop_group_recording, stop_recording,
+};
+use crate::health_check;
+use crate::openapi::{
+    Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
 };
 use crate::stamp::Stamp;
 
