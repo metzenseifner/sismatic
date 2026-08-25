@@ -29,20 +29,23 @@
 //! through to the store rather than a symbol this crate was compiled against.
 //! A field added to core's catalog is expanded by the `'*'` sync schedule,
 //! polled, and stored — and then served here with no code change in any crate.
-//! [`routes::readings`] has the argument for why that is a better property than
+//! [`handlers::readings`] has the argument for why that is a better property than
 //! a route generated per field would be.
 //!
-//! The `/v1/groups` space asks those same questions of a *device group* —
-//! every member's answer in one object, beside what the device group was last
-//! told to be, so a member that quietly did not start is visible without
-//! comparing five responses by hand.
+//! The `/groups` half of each scope asks those same questions of a *device
+//! group* — every member's answer in one object, beside what the device group
+//! was last told to be, so a member that quietly did not start is visible
+//! without comparing five responses by hand.
 //!
-//! Devices and groups share one id namespace, so `/v1/devices/{id}` accepts a
-//! group id too and a group-addressed write still expands into one command per
-//! member either way. What the `/v1/groups` space adds is that its *answers*
-//! are group-shaped: [`routes::group_readings`] for the reads, and
-//! [`routes::commands`] for the two status routes the device space cannot
-//! answer correctly for a group at all.
+//! Devices and groups share one id namespace, but the two halves of a scope are
+//! not interchangeable: a group id under `/devices` is refused with the
+//! `/groups` URL that answers instead, and a device id under `/groups` likewise.
+//! The alternative — fanning a group id out from the device space — cannot be
+//! made correct for the two status routes, which read an outbox keyed by device
+//! and would report an idle device that does not exist. See
+//! [`handlers::target`] for the whole argument, [`handlers::group_readings`]
+//! for the group-shaped reads, and [`handlers::commands`] for the status routes
+//! themselves.
 //!
 //! The last two are the same routes described to a reader: an OpenAPI document
 //! derived from the handlers and the DTOs themselves, and the Scalar API
@@ -89,13 +92,13 @@
 //! [`DynReadStore`]: sismatic_store::DynReadStore
 //! [`web::Data::from`]: actix_web::web::Data
 
+pub mod handlers;
 pub mod openapi;
-pub mod routes;
 pub mod stamp;
 pub mod startup;
 
+pub use handlers::health_check;
 pub use openapi::ApiDoc;
-pub use routes::health_check;
 pub use stamp::Stamp;
 pub use startup::{Ports, run};
 

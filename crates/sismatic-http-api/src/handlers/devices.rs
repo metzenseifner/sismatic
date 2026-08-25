@@ -1,6 +1,9 @@
 //! The inventory routes — what devices and groups this server was configured
 //! with.
 //!
+//! Every path below is relative to the `/v1/inventory` scope
+//! [`crate::startup`] mounts them under.
+//!
 //! ```text
 //! GET /devices             every configured device
 //! GET /devices/{id}        one device, with the latest value of each field
@@ -16,7 +19,7 @@
 //! four answer from the [`DeviceCatalog`] instead, which is the configured set,
 //! so here a `404` is a real claim: the id is not in the devices file.
 //!
-//! That distinction is what makes the index useful. `GET /devices` returning
+//! That distinction is what makes the index useful. `GET /v1/inventory/devices` returning
 //! `[]` from the store would mean "nothing has been polled yet"; returning `[]`
 //! from the catalog means "no devices are configured", and those call for very
 //! different actions.
@@ -44,14 +47,14 @@ use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::status::DeviceStatus;
 
-use crate::routes::error::ApiFailure;
-use crate::routes::target::reject_group_bare;
+use crate::handlers::error::ApiFailure;
+use crate::handlers::target::{INVENTORY, reject_group_bare};
 
 /// `GET /devices` — every configured device, ordered by id.
 #[utoipa::path(
     get,
     path = "/devices",
-    context_path = "/v1",
+    context_path = "/v1/inventory",
     tag = "inventory",
     responses(
         (status = 200, description = "Every device in the devices file, ordered by \
@@ -94,7 +97,7 @@ pub async fn list_devices(
 #[utoipa::path(
     get,
     path = "/devices/{id}",
-    context_path = "/v1",
+    context_path = "/v1/inventory",
     tag = "inventory",
     params(("id" = String, Path, description = "Device id, as written in the devices file.")),
     responses(
@@ -102,7 +105,7 @@ pub async fn list_devices(
              answered. `latest` is empty for a device that is configured but has \
              never been reached.", body = DeviceDetail),
         (status = 404, description = "No device has this id, or the id names a device \
-             group — in which case the body carries `/v1/groups/{id}`. Unlike the \
+             group — in which case the body carries `/v1/inventory/groups/{id}`. Unlike the \
              readings routes' 404, this one is a claim about configuration.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
@@ -117,7 +120,7 @@ pub async fn read_device(
     let id = path.into_inner();
     // A group id was already a 404 here, since the lookup is device-only. What
     // this adds is the other half of the message: which URL answers instead.
-    reject_group_bare(&**catalog, &id).await?;
+    reject_group_bare(&**catalog, &id, INVENTORY).await?;
     let mut device = catalog
         .device(&id)
         .await
@@ -134,7 +137,7 @@ pub async fn read_device(
 #[utoipa::path(
     get,
     path = "/groups",
-    context_path = "/v1",
+    context_path = "/v1/inventory",
     tag = "inventory",
     responses(
         (status = 200, description = "Every group in the devices file, ordered by id. \
@@ -152,7 +155,7 @@ pub async fn list_groups(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<Gro
 #[utoipa::path(
     get,
     path = "/groups/{id}",
-    context_path = "/v1",
+    context_path = "/v1/inventory",
     tag = "inventory",
     params(("id" = String, Path, description = "Group id, as written in the devices file.")),
     responses(
@@ -175,7 +178,7 @@ pub async fn read_group(
     // different id. Saying which saves the caller a second round trip to find
     // out.
     let message = if catalog.device(&id).await.is_some() {
-        format!("'{id}' is a device, not a group; try /v1/devices/{id}")
+        format!("'{id}' is a device, not a group; try /v1/inventory/devices/{id}")
     } else {
         format!("no group '{id}' is configured")
     };

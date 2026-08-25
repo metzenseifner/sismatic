@@ -27,15 +27,17 @@ use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynComman
 use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 
-use crate::openapi::{
-    Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
-};
-use crate::routes::{
-    field_history, group_field_history, health_check, list_commands, list_devices, list_fields,
+use crate::handlers::target::{COMMANDS, INVENTORY, READINGS};
+use crate::handlers::{
+    field_history, group_field_history, list_commands, list_devices, list_fields,
     list_group_commands, list_group_fields, list_groups, pause_group_recording, pause_recording,
     read_command, read_device, read_field, read_group, read_group_field, read_group_phase,
     read_phase, set_group_metadata, set_group_setting, set_metadata, set_setting,
     start_group_recording, start_recording, stop_group_recording, stop_recording,
+};
+use crate::health_check;
+use crate::openapi::{
+    Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
 };
 use crate::stamp::Stamp;
 
@@ -152,7 +154,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             // The readings routes. Three resources cover every queryable field
             // of every device, because `{field}` is a path parameter carried
             // through to the store rather than a symbol compiled in — see
-            // `routes::readings` for why this is not a generated route per
+            // `handlers::readings` for why this is not a generated route per
             // field.
             //
             // Registered longest-path-first. actix matches in registration
@@ -163,106 +165,134 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             // becomes a tail match.
             // Grouping the versioned API paths under a "/v1" scope
             .service(
-                web::scope("v1")
-                    // TODO .wrap(YourAuthMiddleware::default())
+                web::scope("/v1")
+                    // Each scope's segment comes from `handlers::target` rather
+                    // than a literal here, because that module builds the "try
+                    // this URL instead" half of every cross-space 404 out of the
+                    // same constant. Two literals could disagree, and the way
+                    // they would disagree is a refusal pointing at a second 404.
                     .service(
-                        web::resource("/devices/{id}/fields/{field}/history")
-                            .route(web::get().to(field_history)),
+                        web::scope(READINGS)
+                            // TODO .wrap(YourAuthMiddleware::default())
+                            .service(
+                                web::resource("/devices/{id}/fields/{field}/history")
+                                    .route(web::get().to(field_history)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/fields/{field}")
+                                    .route(web::get().to(read_field)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/fields")
+                                    .route(web::get().to(list_fields)),
+                            )
+                            // The group routes, read and write, in the same
+                            // longest-path-first order and ahead of the bare
+                            // `/groups/{id}` for the same reason `/devices/{id}` comes
+                            // after everything under it.
+                            .service(
+                                web::resource("/groups/{id}/fields/{field}/history")
+                                    .route(web::get().to(group_field_history)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/fields/{field}")
+                                    .route(web::get().to(read_group_field)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/fields")
+                                    .route(web::get().to(list_group_fields)),
+                            ),
                     )
                     .service(
-                        web::resource("/devices/{id}/fields/{field}")
-                            .route(web::get().to(read_field)),
+                        web::scope(COMMANDS)
+                            // The write routes. Same longest-path-first discipline, and
+                            // here it earns its keep: `/recording/start` must be
+                            // registered before `/recording`, or the shorter resource
+                            // is tried first. It does not match (a literal segment is
+                            // not a path parameter), so the order is still not
+                            // load-bearing today — but the two now differ by a suffix
+                            // rather than by a whole segment, which is one edit away
+                            // from mattering.
+                            .service(
+                                web::resource("/devices/{id}/recording/start")
+                                    .route(web::post().to(start_recording)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/recording/stop")
+                                    .route(web::post().to(stop_recording)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/recording/pause")
+                                    .route(web::post().to(pause_recording)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/recording")
+                                    .route(web::get().to(read_phase)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/metadata/{field}")
+                                    .route(web::put().to(set_metadata)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/settings/{field}")
+                                    .route(web::put().to(set_setting)),
+                            )
+                            .service(
+                                web::resource("/devices/{id}/commands")
+                                    .route(web::get().to(list_commands)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/recording/start")
+                                    .route(web::post().to(start_group_recording)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/recording/stop")
+                                    .route(web::post().to(stop_group_recording)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/recording/pause")
+                                    .route(web::post().to(pause_group_recording)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/recording")
+                                    .route(web::get().to(read_group_phase)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/metadata/{field}")
+                                    .route(web::put().to(set_group_metadata)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/settings/{field}")
+                                    .route(web::put().to(set_group_setting)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/commands")
+                                    .route(web::get().to(list_group_commands)),
+                            )
+                            // Last in the scope, and this is the registration
+                            // whose order carries weight. `/{id}` is a single
+                            // path parameter on the scope root, so it would
+                            // match `devices` or `groups` if it were tried
+                            // first — every route above it would become
+                            // `GET /v1/commands/{id}` with the id `devices`.
+                            // A path parameter stops at the `/`, so a longer
+                            // path cannot reach it, and one segment is exactly
+                            // what a command id is.
+                            .service(web::resource("/{id}").route(web::get().to(read_command))),
                     )
                     .service(
-                        web::resource("/devices/{id}/fields").route(web::get().to(list_fields)),
-                    )
-                    // The write routes. Same longest-path-first discipline, and
-                    // here it earns its keep: `/recording/start` must be
-                    // registered before `/recording`, or the shorter resource
-                    // is tried first. It does not match (a literal segment is
-                    // not a path parameter), so the order is still not
-                    // load-bearing today — but the two now differ by a suffix
-                    // rather than by a whole segment, which is one edit away
-                    // from mattering.
-                    .service(
-                        web::resource("/devices/{id}/recording/start")
-                            .route(web::post().to(start_recording)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/recording/stop")
-                            .route(web::post().to(stop_recording)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/recording/pause")
-                            .route(web::post().to(pause_recording)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/recording").route(web::get().to(read_phase)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/metadata/{field}")
-                            .route(web::put().to(set_metadata)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/settings/{field}")
-                            .route(web::put().to(set_setting)),
-                    )
-                    .service(
-                        web::resource("/devices/{id}/commands").route(web::get().to(list_commands)),
-                    )
-                    .service(web::resource("/commands/{id}").route(web::get().to(read_command)))
-                    // The inventory routes, registered after everything under
-                    // `/devices/{id}/…` so the bare `{id}` resource cannot be
-                    // tried against a longer path first. `/devices` last of the
-                    // three, because it is the shortest.
-                    .service(web::resource("/devices/{id}").route(web::get().to(read_device)))
-                    .service(web::resource("/devices").route(web::get().to(list_devices)))
-                    // The group routes, read and write, in the same
-                    // longest-path-first order and ahead of the bare
-                    // `/groups/{id}` for the same reason `/devices/{id}` comes
-                    // after everything under it.
-                    .service(
-                        web::resource("/groups/{id}/fields/{field}/history")
-                            .route(web::get().to(group_field_history)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/fields/{field}")
-                            .route(web::get().to(read_group_field)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/fields")
-                            .route(web::get().to(list_group_fields)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/recording/start")
-                            .route(web::post().to(start_group_recording)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/recording/stop")
-                            .route(web::post().to(stop_group_recording)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/recording/pause")
-                            .route(web::post().to(pause_group_recording)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/recording")
-                            .route(web::get().to(read_group_phase)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/metadata/{field}")
-                            .route(web::put().to(set_group_metadata)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/settings/{field}")
-                            .route(web::put().to(set_group_setting)),
-                    )
-                    .service(
-                        web::resource("/groups/{id}/commands")
-                            .route(web::get().to(list_group_commands)),
-                    )
-                    .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
-                    .service(web::resource("/groups").route(web::get().to(list_groups))),
+                        web::scope(INVENTORY)
+                            // The inventory routes, registered after everything under
+                            // `/devices/{id}/…` so the bare `{id}` resource cannot be
+                            // tried against a longer path first. `/devices` last of the
+                            // three, because it is the shortest.
+                            .service(
+                                web::resource("/devices/{id}").route(web::get().to(read_device)),
+                            )
+                            .service(web::resource("/devices").route(web::get().to(list_devices)))
+                            .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
+                            .service(web::resource("/groups").route(web::get().to(list_groups))),
+                    ),
             )
             // The docs, registered last and unversioned. Outside the scope
             // because a document that described only `/v1` from a `/v1` path

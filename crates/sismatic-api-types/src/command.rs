@@ -154,7 +154,7 @@ pub enum CommandStatus {
     Failed { reason: String },
 }
 
-/// A device's write-side state, as `GET /v1/devices/{id}/recording` reports it.
+/// A device's write-side state, as `GET /v1/commands/devices/{id}/recording` reports it.
 /// A product type because the two fields are only meaningful together: an epoch
 /// without a phase does not say whether metadata is writable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

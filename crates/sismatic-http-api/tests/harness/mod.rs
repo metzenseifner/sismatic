@@ -1,13 +1,13 @@
 //! Wiring shared by the black-box suites.
 //!
-//! [`run`](sismatic_http_api::run) takes five collaborators, and rarely more
+//! [`run`](sismatic_http_api::run) takes six collaborators, and rarely more
 //! than one of them is what a given suite is actually about. This module
 //! supplies the rest so a test file states the part it cares about and nothing
 //! else — and so the next collaborator is one edit here rather than one per
 //! suite, which is what this already saved when the catalog arrived.
 //!
 //! The outbox and the catalog are the real adapters rather than doubles, for
-//! the reason `tests/readings.rs` already gives for using the real
+//! the reason `tests/readings/` already gives for using the real
 //! `MemoryStore`: a double would have to restate the admission table and the
 //! epoch rules, and a test of a handler over a double that drifted from the
 //! adapter would pass while the server was wrong.
