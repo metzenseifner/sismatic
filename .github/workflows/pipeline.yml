@@ -285,6 +285,46 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # The single required status check on `main` (ruleset: protect-trunk).
+  #
+  # The jobs above fan out into names that cannot be enumerated in a branch
+  # ruleset: the `check` matrix reads its names out of flake.nix at run time, so
+  # a hand-typed list in the ruleset would go stale on the next flake edit — and
+  # stale in the dangerous direction, since a newly added check could fail while
+  # the ruleset kept watching only the names it already knew. This job collapses
+  # all of them into one stable context, "All checks passed", which is the only
+  # name the ruleset has to know.
+  #
+  # `release` and `publish-pypi` are deliberately absent: both are refs/tags/
+  # only and would be permanently `skipped` on a pull request.
+  #
+  # Consequence to keep in mind: `pipeline.yml` must never grow a `paths:`
+  # filter. A required check that does not run is not "passed", it is *pending*,
+  # and the PR becomes unmergeable forever. Skip work at the step level instead.
+  gate:
+    name: All checks passed
+    # Must run even when a dependency fails. Without this the job is skipped on
+    # any red job, the required check never reports, and the PR blocks on a
+    # check that will never arrive.
+    if: always()
+    needs: [deps, check, crate, binaries, wheels, sdist, prune-cargo-cache]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every dependency succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<<"$NEEDS" | sort
+          # `skipped` is tolerated: prune-cargo-cache skips itself on fork PRs
+          # by design. `cancelled` is not — a cancelled job proved nothing.
+          if jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' \
+               <<<"$NEEDS" >/dev/null; then
+            echo "::error::one or more pipeline jobs did not succeed"
+            exit 1
+          fi
+
   # On a v* tag, gather every artifact and attach it to a GitHub Release.
   release:
     name: GitHub Release
