@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::value::ReadingValue;
-use crate::{DeviceId, FieldName};
+use crate::{DeviceId, FieldName, GroupId};
 
 /// An instant on the wire, as an RFC 3339 / ISO 8601 string, e.g.
 /// `"2026-07-23T14:03:11Z"`.
@@ -154,4 +154,154 @@ pub struct ReadingQuery {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReadingList {
     pub readings: Vec<Reading>,
+}
+
+/// One device's latest-value snapshot, as the fleet index reports it.
+///
+/// Deliberately *not* [`DeviceDetail`], which carries a whole
+/// [`DeviceSummary`] — host, port, `eager`, live connection status. That shape
+/// answers an *inventory* question and needs the status port to fill in; this
+/// one answers a *readings* question, where the id is all of the device a
+/// reading is filed under. Keeping them apart is what lets the fleet route be
+/// answered from the store plus a membership list, and keeps the scope split
+/// (`/v1/readings` reads what was written, `/v1/inventory` reads what was
+/// configured) from blurring at its widest route.
+///
+/// [`DeviceDetail`]: crate::device::DeviceDetail
+/// [`DeviceSummary`]: crate::device::DeviceSummary
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeviceReadings {
+    // See `Reading::device` for why the alias is spelled out for utoipa.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub device: DeviceId,
+    /// The latest reading of each field, ordered by field name.
+    ///
+    /// Empty for a device that is configured and has never answered. That is a
+    /// finding rather than an omission — "this recorder has told us nothing" is
+    /// the row worth seeing on a fleet page — so the device is still listed.
+    pub latest: Vec<Reading>,
+}
+
+/// A page of the fleet's latest readings, one row per device.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FleetReadings {
+    /// The devices on this page, ordered by id.
+    pub devices: Vec<DeviceReadings>,
+    /// The `after` value that fetches the next page, or `null` when this page is
+    /// the last one.
+    ///
+    /// Always present, so a client can loop on `while next != null` without
+    /// having to tell "no more pages" from "the server does not paginate". It is
+    /// the id of the last device on this page rather than an opaque token,
+    /// because the page order *is* id order — an opaque token would hide a
+    /// cursor a caller can already construct, and would have to be decoded
+    /// somewhere to mean anything.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub next: Option<DeviceId>,
+}
+
+/// Filters for the fleet readings route, deserialized from the query string,
+/// e.g. `?fields=RUNNING_STATE,FIRMWARE&where=RUNNING_STATE:stopped&limit=50`.
+///
+/// Separate from [`ReadingQuery`] rather than an extension of it, because the
+/// two describe different questions. `ReadingQuery` scopes *one series* — one
+/// field of one device, over a time span — so it carries `start`/`end` and a
+/// singular `field`. This one scopes *a set of devices at one instant*, so it
+/// carries no span at all and every filter it does carry is plural. Folding them
+/// into one struct would document four parameters on each route that the route
+/// ignores.
+///
+/// Every field is optional, and an omitted filter means "do not narrow on this
+/// axis".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+// `IntoParams` for the same reason `ReadingQuery` derives it: the route
+// documents the struct the handler actually deserializes, so a renamed
+// parameter is renamed in the document rather than leaving the document
+// describing one the server stopped reading.
+#[cfg_attr(
+    feature = "openapi",
+    derive(utoipa::ToSchema, utoipa::IntoParams),
+    into_params(parameter_in = Query)
+)]
+pub struct FleetQuery {
+    /// Which fields to report, comma-separated and by canonical name — e.g.
+    /// `RUNNING_STATE,FIRMWARE`. Omitted means every field each device has
+    /// reported.
+    ///
+    /// Names are normalized as they are in a path segment: case-insensitive,
+    /// and `-` read as `_`. A field nothing has reported is not an error — the
+    /// store cannot tell a misspelling from an unpolled field — it simply
+    /// contributes nothing to any row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RUNNING_STATE,FIRMWARE"),
+        schema(value_type = Option<String>)
+    )]
+    pub fields: Option<String>,
+    /// Which devices to report, comma-separated by id. Omitted means the whole
+    /// configured fleet.
+    ///
+    /// Every id must name a configured device; one that does not is a `404`
+    /// naming it, rather than a page that silently excludes it. Intersected with
+    /// `group` when both are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "atrium-101,annex-7"),
+        schema(value_type = Option<String>)
+    )]
+    pub devices: Option<String>,
+    /// Restrict to one device group's members, by group id. Intersected with
+    /// `devices` when both are given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "atrium-room"),
+        schema(value_type = Option<String>)
+    )]
+    pub group: Option<GroupId>,
+    /// Keep only devices whose readings satisfy every `FIELD:value` predicate,
+    /// comma-separated — e.g. `RUNNING_STATE:stopped,FIRMWARE:2.11`.
+    ///
+    /// A predicate selects *devices*, not readings: a row that satisfies it
+    /// still carries every field `fields` asked for, so
+    /// `?fields=FIRMWARE&where=RUNNING_STATE:stopped` reads "the firmware of
+    /// every stopped recorder". The value is compared in whatever shape the
+    /// device answered in, so `8080` matches a port and `stopped` matches a
+    /// recording state without the caller spelling out a type.
+    ///
+    /// A device that has never reported the named field cannot satisfy the
+    /// predicate and is excluded — which does not distinguish "not stopped"
+    /// from "never answered". A row-less device is exactly what the unfiltered
+    /// page shows, so that distinction is one request away.
+    ///
+    /// The separator is `:` so a value needs no percent-encoding, and the list
+    /// separator is `,` — which a value therefore cannot contain.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RUNNING_STATE:stopped"),
+        schema(value_type = Option<String>)
+    )]
+    pub predicates: Option<String>,
+    /// Maximum devices to return. Omitted means the server's default page size;
+    /// the server also caps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", param(example = 50))]
+    pub limit: Option<u32>,
+    /// Resume after this device id, exclusive — the `next` of the previous page.
+    /// Omitted starts at the first device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "atrium-101"),
+        schema(value_type = Option<String>)
+    )]
+    pub after: Option<DeviceId>,
 }

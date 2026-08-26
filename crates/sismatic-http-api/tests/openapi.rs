@@ -159,7 +159,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        26,
+        27,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -208,7 +208,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // One operation per path here, but asserted rather than assumed: a path
     // that gained a second method and lost it in `startup` would otherwise slip
     // through as "26 paths, still fine".
-    assert_eq!(checked, 26, "expected one operation per documented path");
+    assert_eq!(checked, 27, "expected one operation per documented path");
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
@@ -407,7 +407,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        25,
+        26,
         "expected every readings, group, commands and inventory route under /v1, \
          got {:?}",
         paths.keys().collect::<Vec<_>>()
@@ -500,6 +500,33 @@ async fn the_history_route_documents_the_query_filters() {
         .collect();
 
     assert_eq!(query, ["field", "start", "end", "limit"]);
+}
+
+#[tokio::test]
+async fn the_fleet_route_documents_its_filters_under_their_wire_names() {
+    // Same derivation as the history route's four, plus the one parameter in
+    // the API whose field name and wire name differ: `where` is a Rust keyword,
+    // so `FleetQuery` spells the field `predicates` and renames it. The document
+    // has to show the name a caller sends — a client generated against
+    // `predicates` would put its filter in a parameter the server never reads,
+    // and would silently receive the whole unfiltered fleet.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let params = doc["paths"]["/v1/readings/devices"]["get"]["parameters"]
+        .as_array()
+        .expect("the fleet route documents parameters");
+
+    let query: Vec<&str> = params
+        .iter()
+        .filter(|p| p["in"] == "query")
+        .map(|p| p["name"].as_str().expect("a parameter name"))
+        .collect();
+
+    assert_eq!(
+        query,
+        ["fields", "devices", "group", "where", "limit", "after"]
+    );
 }
 
 #[tokio::test]
