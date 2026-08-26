@@ -7,6 +7,13 @@
 //! GET /devices/{id}/fields/{field}/history     one field over a time span
 //! ```
 //!
+//! The bare `GET /devices` above these is a different question — every device at
+//! once, filtered and paged — and lives in
+//! [`fleet_readings`](crate::handlers::fleet_readings), which has to consult the
+//! catalog to know what to enumerate and therefore answers an unknown id
+//! differently from the three routes here. It shares [`normalize_field`] with
+//! them, so a field is spelled the same way whichever of the four is asked.
+//!
 //! # Why the field is a parameter and not a route each
 //!
 //! The obvious alternative is to generate one route per queryable field —

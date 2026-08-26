@@ -138,6 +138,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
 #[openapi(
     paths(
         crate::handlers::health_check::health_check,
+        crate::handlers::fleet_readings::list_fleet,
         crate::handlers::readings::list_fields,
         crate::handlers::readings::read_field,
         crate::handlers::readings::field_history,
@@ -167,6 +168,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     components(schemas(
         sismatic_api_types::Reading,
         sismatic_api_types::ReadingList,
+        // The fleet index's page. `DeviceReadings` arrives by being reachable
+        // from it, for the same reason `ReadingValue` does.
+        sismatic_api_types::FleetReadings,
         sismatic_api_types::ApiError,
         // The write side's top-level bodies. `Intent`, `CommandStatus`,
         // `Phase`, `Rejection` and `Accepted` are reachable from these and so
@@ -195,20 +199,26 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     )),
     tags(
         (name = "readings", description =
-            "Stored readings, of one device or of a whole device group. Every \
-             queryable field of every device is reachable through these six \
-             routes, because the field is a path parameter passed through to the \
-             store rather than a symbol the server was compiled against — a field \
-             added to the device catalog is served here with no code change.\n\n\
-             The `/v1/readings/devices` half answers from the store alone, so an \
-             unknown id there is `nothing stored` rather than a `404`. The \
-             `/v1/readings/groups` half \
+            "Stored readings, of one device, of a whole device group, or of the \
+             fleet. Every queryable field of every device is reachable through \
+             these seven routes, because the field is a path parameter passed \
+             through to the store rather than a symbol the server was compiled \
+             against — a field added to the device catalog is served here with no \
+             code change.\n\n\
+             The per-device routes under `/v1/readings/devices` answer from the \
+             store alone, so an unknown id there is `nothing stored` rather than a \
+             `404`. The `/v1/readings/groups` half \
              also consults the catalog, because a device group has no readings of \
              its own and its membership has to come from somewhere — so an unknown \
              *group* is a `404`, and each response additionally carries what the \
              device group was last told to be, which is what makes a device group \
              that ignored a request detectable when its members agree perfectly \
-             with each other."),
+             with each other.\n\n\
+             The fleet index `/v1/readings/devices` consults the catalog for the \
+             same reason the group routes do — it has to know what to enumerate — \
+             so an id named in one of its filters is a `404` when nothing is \
+             configured under it, and a configured device that has never answered \
+             is a row with no readings rather than a missing one."),
         (name = "inventory", description =
             "What this server was configured with. Answered from the device catalog \
              rather than the store, so an unknown id here is a `404` — a real claim \

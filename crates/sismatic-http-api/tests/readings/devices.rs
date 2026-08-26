@@ -7,10 +7,9 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{DeviceId, FieldName, Reading, ReadingValue, TimeSpan};
-use sismatic_store::{ReadError, ReadStore};
+use sismatic_api_types::{Reading, ReadingValue};
 
-use crate::{SCOPE, get, reading_at, spawn_app, spawn_over};
+use crate::{FailingStore, SCOPE, get, reading_at, spawn_app, spawn_over};
 
 const DEVICE: &str = "atrium-101";
 
@@ -23,33 +22,6 @@ fn reading(device: &str, field: &str, value: u32, at: &str) -> Reading {
 /// holding [`DEVICE`] — so nothing here trips the configured-set check.
 async fn spawn_with(readings: impl IntoIterator<Item = Reading>) -> String {
     spawn_over(readings, &[DEVICE]).await
-}
-
-/// A store whose every read fails, for the one test about a backend outage.
-struct FailingStore;
-
-#[async_trait::async_trait]
-impl ReadStore for FailingStore {
-    async fn latest(
-        &self,
-        _dev: DeviceId,
-        _field: FieldName,
-    ) -> Result<Option<Reading>, ReadError> {
-        Err(ReadError::backend("the disk caught fire"))
-    }
-
-    async fn latest_all(&self, _dev: DeviceId) -> Result<Vec<Reading>, ReadError> {
-        Err(ReadError::backend("the disk caught fire"))
-    }
-
-    async fn between(
-        &self,
-        _dev: DeviceId,
-        _field: FieldName,
-        _span: TimeSpan,
-    ) -> Result<Vec<Reading>, ReadError> {
-        Err(ReadError::backend("the disk caught fire"))
-    }
 }
 
 #[tokio::test]

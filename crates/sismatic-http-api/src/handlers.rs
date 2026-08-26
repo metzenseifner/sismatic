@@ -12,12 +12,15 @@
 pub mod commands;
 pub mod devices;
 pub mod error;
+pub mod fleet_readings;
 pub mod group_readings;
 pub mod health_check;
 pub mod readings;
 pub mod target;
 
 pub use devices::{list_devices, list_groups, read_device, read_group};
+
+pub use fleet_readings::list_fleet;
 
 pub use group_readings::{group_field_history, list_group_fields, read_group_field};
 

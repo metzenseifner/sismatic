@@ -21,7 +21,8 @@
 //! # Layout
 //!
 //! - [`value`] — the decoded value model ([`ReadingValue`], [`RecordingState`], …)
-//! - [`reading`] — [`Reading`], [`Timestamp`], and the history-query DTOs
+//! - [`reading`] — [`Reading`], [`Timestamp`], the history-query DTOs, and the
+//!   fleet-wide [`FleetReadings`] page
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
 //! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
 //!   member-wise response shapes
@@ -78,5 +79,8 @@ pub use group::{
     GroupCommandList, GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory,
     GroupPhase, MemberCommands, MemberHistory, MemberPhase, MemberState, SyncState,
 };
-pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
+pub use reading::{
+    DeviceReadings, FleetQuery, FleetReadings, Reading, ReadingList, ReadingQuery, TimeSpan,
+    Timestamp,
+};
 pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};

@@ -11,13 +11,15 @@
 //! restating those semantics would be the thing under test rather than the thing
 //! being tested against.
 //!
-//! # The two halves
+//! # The three halves
 //!
 //! One suite per URL scope, and one module per id-space inside it, which is the
 //! shape `src/handlers` has: [`devices`] covers `/v1/readings/devices/…`
-//! against `handlers::readings`, and [`groups`] covers `/v1/readings/groups/…`
-//! against `handlers::group_readings`. They are modules of one binary rather
-//! than two top-level suites because the helpers below are shared by both, and
+//! against `handlers::readings`, [`groups`] covers `/v1/readings/groups/…`
+//! against `handlers::group_readings`, and [`fleet`] covers the bare
+//! `/v1/readings/devices` against `handlers::fleet_readings`. They are modules
+//! of one binary rather
+//! than three top-level suites because the helpers below are shared by them, and
 //! because a scope is the unit worth being able to run on its own —
 //! `cargo test --test readings` is then exactly "the readings scope".
 //!
@@ -31,8 +33,8 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{Reading, ReadingValue, Timestamp};
-use sismatic_store::{DynReadStore, WriteStore};
+use sismatic_api_types::{DeviceId, FieldName, Reading, ReadingValue, TimeSpan, Timestamp};
+use sismatic_store::{DynReadStore, ReadError, ReadStore, WriteStore};
 use sismatic_store_memory::MemoryStore;
 
 // Shared with the other scope suites, so it lives beside them rather than in
@@ -42,6 +44,7 @@ use sismatic_store_memory::MemoryStore;
 mod harness;
 
 mod devices;
+mod fleet;
 mod groups;
 
 /// The scope every path in this suite is built under.
@@ -100,6 +103,37 @@ async fn spawn_over(readings: impl IntoIterator<Item = Reading>, members: &[&str
     harness::serve_with(listener, Arc::new(store), harness::device_group(members));
 
     format!("http://127.0.0.1:{port}")
+}
+
+/// A store whose every read fails, for the tests about a backend outage.
+///
+/// Shared by the suites rather than declared in each, because "the disk caught
+/// fire" is one condition and every route in the scope owes the same answer to
+/// it: a `500`, never the `404` that would tell a dashboard to stop asking.
+pub struct FailingStore;
+
+#[async_trait::async_trait]
+impl ReadStore for FailingStore {
+    async fn latest(
+        &self,
+        _dev: DeviceId,
+        _field: FieldName,
+    ) -> Result<Option<Reading>, ReadError> {
+        Err(ReadError::backend("the disk caught fire"))
+    }
+
+    async fn latest_all(&self, _dev: DeviceId) -> Result<Vec<Reading>, ReadError> {
+        Err(ReadError::backend("the disk caught fire"))
+    }
+
+    async fn between(
+        &self,
+        _dev: DeviceId,
+        _field: FieldName,
+        _span: TimeSpan,
+    ) -> Result<Vec<Reading>, ReadError> {
+        Err(ReadError::backend("the disk caught fire"))
+    }
 }
 
 /// `GET url`, returning the status and the parsed JSON body together — most
