@@ -63,6 +63,18 @@ QueryName = Literal[
     "stream_3_state",
     "stream_3_enabled",
     "stream_3_status",
+    "rtmp_1_live_state",
+    "rtmp_live_state_1",
+    "rtmp_2_live_state",
+    "rtmp_live_state_2",
+    "rtmp_3_live_state",
+    "rtmp_live_state_3",
+    "rtmp_1_backup_live_state",
+    "rtmp_backup_live_state_1",
+    "rtmp_2_backup_live_state",
+    "rtmp_backup_live_state_2",
+    "rtmp_3_backup_live_state",
+    "rtmp_backup_live_state_3",
 ]
 
 CommandName = Literal[

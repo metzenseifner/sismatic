@@ -175,6 +175,7 @@ mod tests {
         commands::Command,
         query::Query,
         register::{MAX_VALUE_LEN, Register},
+        setting::Setting,
     };
 
     use super::*;
@@ -244,6 +245,40 @@ mod tests {
             drive(&Query::Stream3State.instruction(), "0\r\n"),
             Step::Done(Value::Flag(false))
         );
+    }
+
+    /// `ESC S<i>*<n>RTMP CR` -> `RtmpS<i>*<n>*(0|1) CR LF`. Unlike the `STRC`
+    /// reads above, the reply repeats its own address, so the flag is anchored
+    /// rather than bare.
+    #[test]
+    fn parses_rtmp_live_state_as_an_addressed_flag() {
+        let instr = Query::Rtmp2LiveState.instruction();
+        assert_eq!(instr.payload, "\u{1b}S1*2RTMP\r");
+        assert_eq!(
+            drive(&instr, "RtmpS1*2*1\r\n"),
+            Step::Done(Value::Flag(true))
+        );
+
+        let backup = Query::Rtmp2BackupLiveState.instruction();
+        assert_eq!(backup.payload, "\u{1b}S2*2RTMP\r");
+        assert_eq!(
+            drive(&backup, "RtmpS2*2*0\r\n"),
+            Step::Done(Value::Flag(false))
+        );
+    }
+
+    /// The six live states differ only by address, and `search` tries a parser
+    /// at every offset in a shared buffer. Without the anchor, whichever reply
+    /// arrived first would answer all six reads — reporting stream 2's primary
+    /// push as live because stream 1's is.
+    #[test]
+    fn an_rtmp_live_state_does_not_accept_another_targets_reply() {
+        let instr = Query::Rtmp1LiveState.instruction();
+        assert_eq!(drive(&instr, "RtmpS1*2*1\r\n"), Step::NeedMore);
+        assert_eq!(drive(&instr, "RtmpS2*1*1\r\n"), Step::NeedMore);
+        // The echoed request must not satisfy it either: it contains `S1*1`,
+        // but the anchor demands the title-cased verb in front.
+        assert_eq!(drive(&instr, "\u{1b}S1*1RTMP\r\n"), Step::NeedMore);
     }
 
     #[test]
@@ -368,5 +403,56 @@ mod tests {
         );
         assert_eq!(Command::from_str("start").unwrap(), Command::Start);
         assert!(Query::from_str("nope").is_err());
+    }
+
+    /// Every spelling a catalog advertises must be one `FromStr` accepts —
+    /// across all four catalogs, and for aliases as well as canonical names.
+    ///
+    /// The hole this closes: `FromStr` normalizes its *input* and matches it
+    /// against the name literals as written, so a literal that is not itself
+    /// normalized — `RTMP_Stream_1_State`, say — is matched by nothing at all.
+    /// The variant is still in `ALL`, still rendered into the generated docs and
+    /// the Python stub, and still unreachable by name, which is a failure no
+    /// caller can distinguish from a typo of their own. `accepted()` is the same
+    /// list the stub and the docs are built from, so this pins the whole
+    /// advertised surface rather than one sample of it.
+    #[test]
+    fn every_advertised_spelling_resolves_in_every_catalog() {
+        fn check<T>(all: &'static [T], accepted: fn(T) -> &'static [&'static str])
+        where
+            T: Copy + PartialEq + fmt::Debug + FromStr,
+            <T as FromStr>::Err: fmt::Debug,
+        {
+            for &variant in all {
+                for spelling in accepted(variant) {
+                    // The macro's rule, asserted directly rather than inferred
+                    // from the lookup below: a *canonical* name that is not
+                    // normalized can still resolve, if some alias happens to
+                    // normalize to the same string and rescues it. It would
+                    // nonetheless be advertised in mixed case by `name()` — in
+                    // the generated docs, the stub, and the `{field}` routes —
+                    // which is the inconsistency the rule exists to prevent.
+                    assert_eq!(
+                        *spelling,
+                        crate::protocol::payload_helpers::normalize(spelling),
+                        "{variant:?} advertises {spelling:?}, which is not in normalized form"
+                    );
+                    let got = T::from_str(spelling)
+                        .unwrap_or_else(|e| panic!("{variant:?} advertises {spelling:?}: {e:?}"));
+                    assert_eq!(got, variant, "{spelling:?} resolves to the wrong variant");
+                    // The lowercase form is what the Python stub publishes.
+                    assert_eq!(
+                        T::from_str(&spelling.to_ascii_lowercase()).unwrap(),
+                        variant,
+                        "{spelling:?} does not resolve in the lowercase form the stub publishes"
+                    );
+                }
+            }
+        }
+
+        check(Query::ALL, Query::accepted);
+        check(Command::ALL, Command::accepted);
+        check(Register::ALL, Register::accepted);
+        check(Setting::ALL, Setting::accepted);
     }
 }

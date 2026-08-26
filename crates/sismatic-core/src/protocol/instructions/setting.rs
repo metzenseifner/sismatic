@@ -6,7 +6,7 @@ use winnow::token::{literal, take_while};
 use crate::protocol::control_chars::{CR, ESC};
 use crate::protocol::instructions::Instruction;
 use crate::protocol::instructions::catalog::instruction_catalog;
-use crate::protocol::payload_helpers::is_not_cr;
+use crate::protocol::payload_helpers::{echoed, is_not_cr};
 use crate::protocol::{In, ParseFn, Value, parser_of};
 
 instruction_catalog! {
@@ -35,28 +35,46 @@ instruction_catalog! {
         Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
         Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
         Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
-        RTMPStream1PublishURL {name:"RTMP_1_URL", aliases: ["RTMP_URL_1"], doc:"Real-time messaging protocol push stream 1 URL target"},
-        RTMPStream1BackupPublishURL {name:"RTMP_1_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_1"], doc:"Real-time messaging protocol push stream 1 backup URL target"},
-        RTMPStream2PublishURL {name:"RTMP_2_URL", aliases: ["RTMP_URL_2"], doc:"Real-time messaging protocol push stream 2 URL target"},
-        RTMPStream2BackupPublishURL {name:"RTMP_2_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_2"], doc:"Real-time messaging protocol push stream 2 backup URL target"},
-        RTMPStream3PublishURL {name:"RTMP_3_URL", aliases: ["RTMP_URL_3"], doc:"Real-time messaging protocol push stream 3 URL target"},
-        RTMPStream3BackupPublishURL {name:"RTMP_3_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_3"], doc:"Real-time messaging protocol push stream 3 backup URL target"},
-        RTMPStream1State { name: "RTMP_Stream_1_State", aliases: [], doc: "Whether Archive Channel A RTMP push stream enabled."},
-        RTMPStream2State { name: "RTMP_Stream_2_State", aliases: [], doc: "Whether  Archive Channel B RTMP push stream enabled."},
-        RTMPStream3State { name: "RTMP_Stream_3_State", aliases: [], doc: "Whether Confidence RTMP push stream enabled."},
-        // Live stream status sync with schedule, return error code if scheduling is off or not
-        // supported
-        RTMPStream1LiveState { name:"RTMP_1_LIVE_STATE", aliases: [], doc:"Whether stream 1 offline or live."},
-        RTMPStream2LiveState { name:"RTMP_2_LIVE_STATE", aliases: [], doc:"Whether stream 2 offline or live."},
-        RTMPStream3LiveState { name:"RTMP_3_LIVE_STATE", aliases: [], doc:"Whether stream 3 offline or live."},
+        // The RTMP push targets. Named `RTMP_<n>_<FIELD>` with a
+        // `RTMP_<FIELD>_<n>` alias, which is the `STREAM_1_NAME` /
+        // `STREAM_NAME_1` pattern above with `RTMP` in place of `STREAM` — the
+        // index sits in the same place across the whole catalog, so a caller
+        // that guesses one name from another guesses right.
+        //
+        // `<n>` is the stream throughout: 1 is Archive Channel A, 2 is Archive
+        // Channel B (Dual Mode only), 3 is Confidence. Each stream publishes to
+        // a primary and a backup target, which the wire selects with a separate
+        // index — hence a `BACKUP` variant of every field that has one, rather
+        // than six streams.
+        RTMPStream1PublishURL { name: "RTMP_1_URL", aliases: ["RTMP_URL_1"], doc: "Primary RTMP push target URL for stream 1." },
+        RTMPStream1BackupPublishURL { name: "RTMP_1_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_1"], doc: "Backup RTMP push target URL for stream 1." },
+        RTMPStream2PublishURL { name: "RTMP_2_URL", aliases: ["RTMP_URL_2"], doc: "Primary RTMP push target URL for stream 2." },
+        RTMPStream2BackupPublishURL { name: "RTMP_2_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_2"], doc: "Backup RTMP push target URL for stream 2." },
+        RTMPStream3PublishURL { name: "RTMP_3_URL", aliases: ["RTMP_URL_3"], doc: "Primary RTMP push target URL for stream 3." },
+        RTMPStream3BackupPublishURL { name: "RTMP_3_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_3"], doc: "Backup RTMP push target URL for stream 3." },
+        // Enable state per push stream, aliased like `STREAM_1_STATE` is. The
+        // `RTMP_STREAM_<n>_STATE` spelling is carried as an alias rather than as
+        // the canonical name: a name literal must be normalized (uppercase, `_`
+        // for `-`) or `FromStr` — which normalizes its *input* before matching —
+        // can never reach it.
+        RTMPStream1State { name: "RTMP_1_STATE", aliases: ["RTMP_1_ENABLED", "RTMP_1_STATUS", "RTMP_STREAM_1_STATE"], doc: "Whether the Archive Channel A RTMP push stream is enabled." },
+        RTMPStream2State { name: "RTMP_2_STATE", aliases: ["RTMP_2_ENABLED", "RTMP_2_STATUS", "RTMP_STREAM_2_STATE"], doc: "Whether the Archive Channel B RTMP push stream is enabled." },
+        RTMPStream3State { name: "RTMP_3_STATE", aliases: ["RTMP_3_ENABLED", "RTMP_3_STATUS", "RTMP_STREAM_3_STATE"], doc: "Whether the Confidence RTMP push stream is enabled." },
+        // Whether a push is actually *live* is not here, and not because its
+        // wire form is unknown: SIS offers no write for it. Enabling a stream
+        // arms it; what puts it on air is a scheduled session, which this
+        // protocol does not reach. So live state is a reading, and lives in
+        // `Query` alone — the one RTMP field where the read and the write of a
+        // name do not pair up, because the write does not exist.
     }
 }
 
 /// What a setting's value must look like on the wire.
 ///
-/// One shape per *kind* of value rather than one validator per field, so eight
-/// settings need three encoders. A ninth setting of an existing kind adds a
-/// catalog line and a match arm and no new code.
+/// One shape per *kind* of value rather than one validator per field, so a
+/// catalog of twenty-three settings needs five encoders. A setting of a kind
+/// that already exists adds a catalog line and a match arm and no new code; only
+/// a genuinely new kind of value — `Url`, most recently — adds a variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// `0` or `1`. Accepts the same spellings a human writes.
@@ -69,6 +87,21 @@ enum Shape {
     /// [`Form::Addressed`]. Same ceiling as [`Shape::Text`], plus the
     /// characters that would re-cut the payload the device receives.
     Token { max: usize },
+    /// An RTMP publish target: everything [`Shape::Token`] demands, plus an
+    /// `rtmp://` or `rtmps://` scheme.
+    ///
+    /// The scheme is checked here rather than left to the device because of how
+    /// a bad push target fails. A malformed URL is not refused at write time —
+    /// the device stores the string and reports success, and the mistake only
+    /// surfaces later as a stream that never reaches the CDN, by which point
+    /// the lecture is already running. That is the same class of silent-success
+    /// failure [`Shape::Text`] refuses to truncate its way into.
+    ///
+    /// Deliberately shallow: scheme and non-empty host only. Host, path and
+    /// stream key are the CDN's grammar, not the device's, and a validator that
+    /// second-guesses them would refuse targets the device would have published
+    /// to. The empty string is accepted and clears the target.
+    Url { max: usize },
 }
 
 /// Where the value sits in the payload, and so what the device echoes back.
@@ -82,6 +115,15 @@ enum Form {
     /// `ESC <value><verb> CR`, echoed as `<verb><value> CR LF`.
     Prefixed,
     /// `ESC <addr>*<value><verb> CR`, echoed as `<Verb><addr>*<value> CR LF`.
+    ///
+    /// The address is whatever selects the field, and it may itself be
+    /// compound: `STRC` needs one component (`N1`, the name of stream 1), while
+    /// an RTMP publish URL needs two (`U1*1`, the *primary* target of stream 1)
+    /// and so carries the separator inside the address. Nothing here has to
+    /// change for that — `<addr>*<value>` reads the same either way, and the
+    /// echo anchor is built from the whole address — but it is why the value's
+    /// own `*` ban lives in [`Shape::Token`] rather than in this frame: the
+    /// separator is legal in the address and illegal in the value.
     Addressed(&'static str),
 }
 
@@ -102,6 +144,10 @@ pub enum ValueError {
     /// that separates address from value, or a control character such as the
     /// CR that terminates the whole message.
     IllegalCharacter(char),
+    /// Not an RTMP publish target: a push URL must carry an `rtmp://` or
+    /// `rtmps://` scheme and name a host. The empty string is not this error —
+    /// it clears the target.
+    NotAnRtmpUrl(String),
 }
 
 impl std::fmt::Display for ValueError {
@@ -118,6 +164,11 @@ impl std::fmt::Display for ValueError {
                 f,
                 "'{}' cannot appear in this value; it delimits the field on the wire",
                 c.escape_debug()
+            ),
+            ValueError::NotAnRtmpUrl(v) => write!(
+                f,
+                "'{v}' is not an RTMP publish target; expected rtmp://host/... or rtmps://host/... \
+                 (empty clears the target)"
             ),
         }
     }
@@ -163,7 +214,34 @@ fn encode(shape: Shape, value: &str) -> Result<String, ValueError> {
                 None => Ok(text),
             }
         }
+        // Layered on `Token` for the same reason `Token` layers on `Text`: the
+        // length rule and the framing rule each live in exactly one place, and
+        // this arm adds only what a URL itself demands.
+        Shape::Url { max } => {
+            let text = encode(Shape::Token { max }, value)?;
+            if text.is_empty() || is_rtmp_url(&text) {
+                Ok(text)
+            } else {
+                Err(ValueError::NotAnRtmpUrl(value.to_owned()))
+            }
+        }
     }
+}
+
+/// An `rtmp://` or `rtmps://` URL with a non-empty authority.
+///
+/// The scheme is matched case-insensitively (RFC 3986 §3.1) but the value is
+/// stored as written: the authority and the stream key that follow are not the
+/// device's to case-fold, and a lowercased stream key is a dead stream.
+fn is_rtmp_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("rtmp://")
+        .or_else(|| lower.strip_prefix("rtmps://"));
+    // The leading-`/` check is what rejects `rtmp:///live/key`: that is a
+    // well-formed URL with an *empty* authority, and so names no host to
+    // publish to.
+    rest.is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
 }
 
 impl Setting {
@@ -189,16 +267,17 @@ impl Setting {
             Setting::RTMPStream1State | Setting::RTMPStream2State | Setting::RTMPStream3State => {
                 Shape::Flag
             }
-            // Reuse flag, although semantics are subtly different: 0=off, 1=live.
-            Setting::RTMPStream1LiveState
-            | Setting::RTMPStream2LiveState
-            | Setting::RTMPStream3LiveState => Shape::Flag,
+            // Same 127 ceiling as the stream names, and provisional for the same
+            // reason — it is the longest value attested for a SIS write on this
+            // model, not a limit confirmed for this field. It is the one worth
+            // confirming first: a push URL carries a CDN-issued stream key, so
+            // it is the longest value anything here is likely to write.
             Setting::RTMPStream1PublishURL
             | Setting::RTMPStream2PublishURL
-            | Setting::RTMPStream3PublishURL => todo!(),
-            Setting::RTMPStream1BackupPublishURL
+            | Setting::RTMPStream3PublishURL
+            | Setting::RTMPStream1BackupPublishURL
             | Setting::RTMPStream2BackupPublishURL
-            | Setting::RTMPStream3BackupPublishURL => todo!(),
+            | Setting::RTMPStream3BackupPublishURL => Shape::Url { max: 127 },
         }
     }
 
@@ -222,18 +301,23 @@ impl Setting {
             | Setting::SnmpUnitContact
             | Setting::TelnetPort
             | Setting::HttpPort => Form::Prefixed,
-            Setting::RTMPStream1State => todo!(),
-            Setting::RTMPStream2State => todo!(),
-            Setting::RTMPStream3State => todo!(),
-            Setting::RTMPStream1LiveState => todo!(),
-            Setting::RTMPStream2LiveState => todo!(),
-            Setting::RTMPStream3LiveState => todo!(),
-            Setting::RTMPStream1PublishURL => todo!(),
-            Setting::RTMPStream2PublishURL => todo!(),
-            Setting::RTMPStream3PublishURL => todo!(),
-            Setting::RTMPStream1BackupPublishURL => todo!(),
-            Setting::RTMPStream2BackupPublishURL => todo!(),
-            Setting::RTMPStream3BackupPublishURL => todo!(),
+            // RTMP addresses the field with a letter and the stream with a
+            // digit, and where a field exists per target it takes a second
+            // index ahead of the stream: `U1` is the primary URL and `U2` the
+            // backup, `S1` the primary live state and `S2` the backup. So
+            // `U2*3` is "backup publish URL of stream 3".
+            //
+            // The enable state is the odd one out at one component: a stream is
+            // armed as a whole, not per target.
+            Setting::RTMPStream1State => Form::Addressed("E1"),
+            Setting::RTMPStream2State => Form::Addressed("E2"),
+            Setting::RTMPStream3State => Form::Addressed("E3"),
+            Setting::RTMPStream1PublishURL => Form::Addressed("U1*1"),
+            Setting::RTMPStream2PublishURL => Form::Addressed("U1*2"),
+            Setting::RTMPStream3PublishURL => Form::Addressed("U1*3"),
+            Setting::RTMPStream1BackupPublishURL => Form::Addressed("U2*1"),
+            Setting::RTMPStream2BackupPublishURL => Form::Addressed("U2*2"),
+            Setting::RTMPStream3BackupPublishURL => Form::Addressed("U2*3"),
         }
     }
 
@@ -265,9 +349,6 @@ impl Setting {
             Setting::RTMPStream1State
             | Setting::RTMPStream2State
             | Setting::RTMPStream3State
-            | Setting::RTMPStream1LiveState
-            | Setting::RTMPStream2LiveState
-            | Setting::RTMPStream3LiveState
             | Setting::RTMPStream1PublishURL
             | Setting::RTMPStream2PublishURL
             | Setting::RTMPStream3PublishURL
@@ -341,23 +422,6 @@ fn addressed_echo(verb: &'static str, addr: &'static str) -> ParseFn {
         },
         Value::Text,
     )
-}
-
-/// A verb as the device echoes it: title case, `STRC` -> `Strc`.
-///
-/// Derived rather than tabled because the device applies one rule to both verbs
-/// attested so far — the recorder's `RCDR` comes back as `Rcdr` (see
-/// `control_chars::RCDR_LOWER`) and stream control's `STRC` as `Strc`.
-fn echoed(verb: &str) -> String {
-    let mut chars = verb.chars();
-    match chars.next() {
-        Some(first) => format!(
-            "{}{}",
-            first.to_ascii_uppercase(),
-            chars.as_str().to_ascii_lowercase()
-        ),
-        None => String::new(),
-    }
 }
 
 fn setting_echo(verb: &'static str) -> ParseFn {
@@ -459,9 +523,190 @@ mod tests {
         );
     }
 
+    /// `ESC U1*<n>*<url>RTMP CR` -> `RtmpU1*<n>*<url> CR LF`. The address is
+    /// compound, so the payload carries two separators before the value and the
+    /// value carries none.
+    #[test]
+    fn an_rtmp_url_write_frames_the_url_after_a_compound_address() {
+        let instr = Setting::RTMPStream3PublishURL
+            .instruction("rtmp://live.example.org/app/s3cret-key")
+            .unwrap();
+        assert_eq!(
+            instr.payload,
+            "\u{1b}U1*3*rtmp://live.example.org/app/s3cret-keyRTMP\r"
+        );
+        assert_eq!(
+            drive(
+                &instr,
+                "RtmpU1*3*rtmp://live.example.org/app/s3cret-key\r\n"
+            ),
+            Step::Done(Value::Text("rtmp://live.example.org/app/s3cret-key".into()))
+        );
+    }
+
+    /// Primary and backup differ only in the first index, which is exactly the
+    /// kind of distinction that would go unnoticed: writing the primary target
+    /// into the backup slot leaves a stream that publishes correctly and fails
+    /// over to nothing.
+    #[test]
+    fn the_backup_target_is_a_different_address_from_the_primary() {
+        let primary = Setting::RTMPStream1PublishURL
+            .instruction("rtmp://a.example.org/app/key")
+            .unwrap();
+        let backup = Setting::RTMPStream1BackupPublishURL
+            .instruction("rtmp://a.example.org/app/key")
+            .unwrap();
+        assert_eq!(
+            primary.payload,
+            "\u{1b}U1*1*rtmp://a.example.org/app/keyRTMP\r"
+        );
+        assert_eq!(
+            backup.payload,
+            "\u{1b}U2*1*rtmp://a.example.org/app/keyRTMP\r"
+        );
+        // ...and neither accepts the other's reply.
+        assert_eq!(
+            drive(&primary, "RtmpU2*1*rtmp://a.example.org/app/key\r\n"),
+            Step::NeedMore
+        );
+    }
+
+    /// A push target the device would have stored and never published to. The
+    /// device reports success on a write like this, so refusing it here is the
+    /// only place the mistake is visible before the stream is due to go live.
+    #[test]
+    fn a_target_that_is_not_an_rtmp_url_never_becomes_a_payload() {
+        for bad in [
+            "https://live.example.org/app/key",
+            "live.example.org/app/key",
+            // Well-formed, but with an empty authority: no host to publish to.
+            "rtmp:///app/key",
+            "rtmp://",
+        ] {
+            assert_eq!(
+                Setting::RTMPStream1PublishURL.instruction(bad).unwrap_err(),
+                ValueError::NotAnRtmpUrl(bad.into()),
+                "{bad} should not have encoded"
+            );
+        }
+    }
+
+    /// `rtmps` is the same target over TLS, and the scheme is the only part of
+    /// the value that may be spelled in any case — a case-folded stream key is a
+    /// stream that authenticates against nothing.
+    #[test]
+    fn the_scheme_is_case_insensitive_and_the_stream_key_is_left_alone() {
+        let instr = Setting::RTMPStream2BackupPublishURL
+            .instruction("RTMPS://live.example.org/app/MixedCaseKey")
+            .unwrap();
+        assert!(
+            instr
+                .payload
+                .contains("RTMPS://live.example.org/app/MixedCaseKey"),
+            "payload rewrote the value: {:?}",
+            instr.payload
+        );
+    }
+
+    /// Clearing a push target is a normal operation — a stream that should no
+    /// longer publish — so the empty value is the one non-URL the shape accepts.
+    #[test]
+    fn an_empty_value_clears_a_push_target() {
+        let instr = Setting::RTMPStream3PublishURL.instruction("").unwrap();
+        assert_eq!(instr.payload, "\u{1b}U1*3*RTMP\r");
+    }
+
+    /// A URL is still a framed value, so the `*` rule survives the extra layer.
+    #[test]
+    fn a_separator_cannot_enter_a_url_either() {
+        assert_eq!(
+            Setting::RTMPStream1PublishURL
+                .instruction("rtmp://live.example.org/app/a*b")
+                .unwrap_err(),
+            ValueError::IllegalCharacter('*')
+        );
+    }
+
+    #[test]
+    fn an_rtmp_enable_write_folds_human_spellings_onto_the_wire_flag() {
+        let instr = Setting::RTMPStream1State.instruction("on").unwrap();
+        assert_eq!(instr.payload, "\u{1b}E1*1RTMP\r");
+        assert_eq!(
+            drive(&instr, "RtmpE1*1\r\n"),
+            Step::Done(Value::Text("1".into()))
+        );
+        // A live-state reply is not an enable reply, even though both are a
+        // flag under the same verb.
+        assert_eq!(drive(&instr, "RtmpS1*1*1\r\n"), Step::NeedMore);
+    }
+
+    /// Arming a push stream is a write; putting it on air is not reachable over
+    /// SIS at all — that is a scheduled session's doing. So `RTMP_1_STATE` is a
+    /// setting and `RTMP_1_LIVE_STATE` is only ever a reading, and asking to
+    /// write the latter has to fail as an unknown *setting* rather than
+    /// half-succeed as a write of the former.
+    #[test]
+    fn a_live_state_is_not_writable() {
+        use std::str::FromStr;
+
+        for name in [
+            "RTMP_1_LIVE_STATE",
+            "RTMP_2_LIVE_STATE",
+            "RTMP_3_LIVE_STATE",
+            "RTMP_1_BACKUP_LIVE_STATE",
+            "RTMP_2_BACKUP_LIVE_STATE",
+            "RTMP_3_BACKUP_LIVE_STATE",
+        ] {
+            assert!(
+                Setting::from_str(name).is_err(),
+                "{name} is writable; SIS has no write for a live state"
+            );
+        }
+    }
+
+    /// The whole writable RTMP address table in one place, pinned against the
+    /// SIS reference: `E<n>` enables a stream and `U<i>*<n>` is a publish URL,
+    /// where `i` selects primary (1) or backup (2). The read-only `S<i>*<n>`
+    /// live states are pinned beside their queries in `protocol.rs`.
+    ///
+    /// Worth pinning as a table rather than leaving to the per-field tests
+    /// because the failure mode is a *swap* — `U2*1` where `U1*2` was meant is
+    /// two valid addresses for two real fields, so it encodes cleanly, parses
+    /// cleanly, and writes the right value to the wrong stream.
+    #[test]
+    fn rtmp_addresses_follow_the_field_stream_scheme() {
+        for (setting, addr) in [
+            (Setting::RTMPStream1State, "E1"),
+            (Setting::RTMPStream2State, "E2"),
+            (Setting::RTMPStream3State, "E3"),
+            (Setting::RTMPStream1PublishURL, "U1*1"),
+            (Setting::RTMPStream2PublishURL, "U1*2"),
+            (Setting::RTMPStream3PublishURL, "U1*3"),
+            (Setting::RTMPStream1BackupPublishURL, "U2*1"),
+            (Setting::RTMPStream2BackupPublishURL, "U2*2"),
+            (Setting::RTMPStream3BackupPublishURL, "U2*3"),
+        ] {
+            assert_eq!(
+                setting.form(),
+                Form::Addressed(addr),
+                "{setting} is not addressed {addr}"
+            );
+            assert_eq!(
+                setting.verb(),
+                "RTMP",
+                "{setting} does not write through RTMP"
+            );
+        }
+    }
+
     /// The read and the write of a stream field are one name, which is what
     /// makes `GET .../fields/STREAM_1_NAME` and `PUT .../settings/STREAM_1_NAME`
     /// address the same thing.
+    ///
+    /// The RTMP settings are absent by design rather than by oversight: only the
+    /// live-state read form is attested, and a `Query` added on a guess is
+    /// polled on every sync cycle. See the note on
+    /// [`Query::instruction`](super::query::Query::instruction).
     #[test]
     fn every_stream_setting_names_a_query_of_the_same_name() {
         use crate::protocol::instructions::query::Query;
@@ -478,6 +723,27 @@ mod tests {
             assert!(
                 Query::from_str(setting.name()).is_ok(),
                 "{setting} has no matching query"
+            );
+        }
+    }
+
+    /// Aliases have to pair up too, not just canonical names: a caller who
+    /// reads `GET .../fields/RTMP_LIVE_STATE_1` and then writes
+    /// `PUT .../settings/RTMP_LIVE_STATE_1` must reach the same field, and a
+    /// spelling accepted on one side only is a 404 that looks like a typo.
+    #[test]
+    fn a_paired_field_accepts_the_same_spellings_on_both_sides() {
+        use crate::protocol::instructions::query::Query;
+        use std::str::FromStr;
+
+        for setting in Setting::ALL {
+            let Ok(query) = Query::from_str(setting.name()) else {
+                continue; // Write-only field; the test above governs the pairs.
+            };
+            assert_eq!(
+                setting.accepted(),
+                query.accepted(),
+                "{setting} and its query disagree about accepted spellings"
             );
         }
     }

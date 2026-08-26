@@ -6,7 +6,7 @@ use winnow::{ModalResult, Parser};
 // ---- Query (gettable) enum ------------------------------------------------
 use crate::protocol::instructions::Instruction;
 use crate::protocol::instructions::catalog::instruction_catalog;
-use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
+use crate::protocol::payload_helpers::{echoed, esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
 use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
 
@@ -60,11 +60,43 @@ instruction_catalog! {
         Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
         Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
         Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
+        // Whether each RTMP push target is actually publishing, as opposed to
+        // merely armed — the enable state is `Setting::RTMPStream1State`, and is
+        // not readable here yet for the reason given on `instruction` below.
+        //
+        // Read-only, and not for want of a wire form: SIS has no write for a
+        // live state. What puts a push on air is a scheduled session, which is
+        // outside this protocol entirely, so these are the one part of the RTMP
+        // catalog with no counterpart in `Setting`. A device with scheduling off
+        // or unsupported answers the read with an error code rather than a
+        // flag — an error token this catalog does not model, so it reaches a
+        // caller as a command timeout.
+        //
+        // Per target rather than per stream, because the wire addresses them
+        // that way: a stream's primary push can be live while its backup is not,
+        // so three streams give six live states.
+        Rtmp1LiveState { name: "RTMP_1_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_1"], doc: "Whether the primary RTMP push for stream 1 is live." },
+        Rtmp2LiveState { name: "RTMP_2_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_2"], doc: "Whether the primary RTMP push for stream 2 is live." },
+        Rtmp3LiveState { name: "RTMP_3_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_3"], doc: "Whether the primary RTMP push for stream 3 is live." },
+        Rtmp1BackupLiveState { name: "RTMP_1_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_1"], doc: "Whether the backup RTMP push for stream 1 is live." },
+        Rtmp2BackupLiveState { name: "RTMP_2_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_2"], doc: "Whether the backup RTMP push for stream 2 is live." },
+        Rtmp3BackupLiveState { name: "RTMP_3_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_3"], doc: "Whether the backup RTMP push for stream 3 is live." },
     }
 }
 
 impl Query {
     /// Build the wire instruction for this query.
+    ///
+    /// The RTMP entries read the live state only — the field that exists
+    /// *nowhere else*, since SIS offers no write for it. The other RTMP fields —
+    /// the enable state and the publish URLs — are writable through
+    /// [`Setting`](super::setting::Setting) but deliberately absent here until
+    /// their read forms are attested, because a `Query` is not free to guess at:
+    /// a wildcard `sync.fields` config polls every variant in
+    /// [`Query::ALL`](Self::ALL) on every cycle, so a payload the device does
+    /// not answer costs one command timeout per field per device per interval,
+    /// forever. A `Setting` with a wrong payload costs one timeout when someone
+    /// writes it.
     pub fn instruction(self) -> Instruction {
         use Query::*;
         let (payload, parser): (String, ParseFn) = match self {
@@ -77,6 +109,17 @@ impl Query {
             Stream1State => (esc_cr("1STRC"), boolean_flag()),
             Stream2State => (esc_cr("2STRC"), boolean_flag()),
             Stream3State => (esc_cr("3STRC"), boolean_flag()),
+            // `ESC S<i>*<n>RTMP CR` -> `RtmpS<i>*<n>*(0|1) CR LF`, where `i`
+            // selects the primary (1) or backup (2) target and `n` the stream.
+            // Unlike the `STRC` reads above, the reply repeats its own address
+            // instead of answering with a bare flag, so it needs an anchored
+            // parser rather than `boolean_flag`.
+            Rtmp1LiveState => (esc_cr("S1*1RTMP"), addressed_flag("RTMP", "S1*1")),
+            Rtmp2LiveState => (esc_cr("S1*2RTMP"), addressed_flag("RTMP", "S1*2")),
+            Rtmp3LiveState => (esc_cr("S1*3RTMP"), addressed_flag("RTMP", "S1*3")),
+            Rtmp1BackupLiveState => (esc_cr("S2*1RTMP"), addressed_flag("RTMP", "S2*1")),
+            Rtmp2BackupLiveState => (esc_cr("S2*2RTMP"), addressed_flag("RTMP", "S2*2")),
+            Rtmp3BackupLiveState => (esc_cr("S2*3RTMP"), addressed_flag("RTMP", "S2*3")),
             Firmware => ("Q".into(), plain_text()),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),
@@ -294,6 +337,32 @@ fn plain_number() -> ParseFn {
 //         Value::Number,
 //     )
 // }
+
+/// `<Verb><addr>*(0|1) CR LF` as a boolean flag — `RtmpS1*1*0` for the primary
+/// live state of stream 1.
+///
+/// Anchored on the whole `<Verb><addr>*` head for the reason
+/// `setting::addressed_echo` is: [`search`](crate::protocol) tries this parser
+/// at every offset in the accumulated buffer, and a device that echoes the
+/// request would otherwise satisfy it from the request's own bytes. The request
+/// does contain `S1*1`, but it cannot contain `RtmpS1*1*` — it spells the verb
+/// in upper case and puts it last.
+///
+/// That anchor is also what keeps the six live states apart: they differ only in
+/// the address, so a parser matching a bare flag would accept any of the six
+/// replies as the answer to any of the six reads.
+fn addressed_flag(verb: &'static str, addr: &'static str) -> ParseFn {
+    let head = format!("{}{addr}*", echoed(verb));
+    parser_of(
+        move |i: &mut In| {
+            literal(head.as_str()).parse_next(i)?;
+            let b = one_of(['0', '1']).parse_next(i)?;
+            literal("\r\n").parse_next(i)?;
+            Ok(b == '1')
+        },
+        Value::Flag,
+    )
+}
 
 /// `(0|1) CR LF` as a boolean flag.
 fn boolean_flag() -> ParseFn {

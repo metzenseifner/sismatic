@@ -85,19 +85,54 @@ mod tests {
         }
     }
 
-    /// The settings half of the same pin. `"x"` is not a flag and not a port,
-    /// so each setting is given a value its own shape accepts — the point being
-    /// that every name in the catalog is reachable, not that every value is.
+    /// The settings half of the same pin: every name in the catalog is
+    /// reachable, whatever its shape makes of the value.
+    ///
+    /// Split from the encoding assertion below because the two fail for
+    /// different reasons and only one of them is about routing. A name that no
+    /// longer resolves is a routing bug — `PUT /settings/<name>` 404s on a field
+    /// the catalog still advertises. A value the shape refuses is not: it is the
+    /// encoder doing its job, and `"1"` is not a plausible value for every kind
+    /// of setting there is (it is not an RTMP URL, for one).
     #[test]
-    fn every_device_setting_translates() {
+    fn every_device_setting_name_resolves() {
         for &setting in Setting::ALL {
             let intent = Intent::SetSetting {
                 field: setting.name().to_owned(),
                 value: "1".into(),
             };
+            match to_instruction(&intent) {
+                Ok(_) | Err(TranslateError::Value(_)) => {}
+                Err(e) => panic!("{setting} did not resolve: {e}"),
+            }
+        }
+    }
+
+    /// ...and every setting can actually be encoded, given a value its own shape
+    /// accepts.
+    ///
+    /// The candidates are tried rather than tabled per setting, because a table
+    /// keyed by variant is a second catalog to keep in step with the first — the
+    /// thing `instruction_catalog!` exists to avoid. What this pins is that no
+    /// setting refuses *everything*, which is what a shape wired to the wrong
+    /// field would do.
+    #[test]
+    fn every_device_setting_encodes_a_value_of_its_own_shape() {
+        const CANDIDATES: &[&str] = &[
+            "1",                               // flags, ports, plain text
+            "rtmp://live.example.org/app/key", // RTMP publish targets
+        ];
+        for &setting in Setting::ALL {
+            let encoded = CANDIDATES.iter().any(|value| {
+                to_instruction(&Intent::SetSetting {
+                    field: setting.name().to_owned(),
+                    value: (*value).into(),
+                })
+                .is_ok()
+            });
             assert!(
-                to_instruction(&intent).is_ok(),
-                "{setting} did not translate"
+                encoded,
+                "{setting} accepted none of {CANDIDATES:?}; is its shape wired to the right field?"
             );
         }
     }
