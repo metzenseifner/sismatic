@@ -13,6 +13,29 @@ permissions:
   contents: write
   pull-requests: write
 
+# At most one release-plz run acts on a given ref at a time. Both jobs below
+# decide what to do by comparing the version in the checked-out tree against the
+# tags visible in *that clone* — a reading that is only correct if no sibling run
+# is concurrently moving the tags.
+#
+# Two merges 14s apart on 2026-08-25 raced exactly there. Merging release PR #41
+# and then PR #40 started two runs; the second one's checkout fetched tags one
+# second before the first one pushed `v0.3.1`. Since #40 merged on top of the
+# release PR, its tree already carried version 0.3.1, so under git_only the
+# second run saw "version 0.3.1, no such tag", built the tag, and died on
+# `422 Reference already exists` — a no-op release that reddened main and, via
+# the `needs:` below, skipped the release PR for #40 until the next push.
+#
+# `cancel-in-progress: false` keeps one run pending and cancels a superseded
+# middle one. That is safe here: each job's decision is a pure function of tree
+# version vs. tags, so a later run always subsumes a cancelled earlier one — if
+# the cancelled run would have created a tag, the next one recomputes and
+# creates it. The cost is that a merge landing behind a release-PR merge waits
+# out that run's release-pr job.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Keeps a single open "release PR" up to date with the pending version bump +
   # changelog. Nothing is published here.
@@ -34,10 +57,6 @@ jobs:
     # computed off a failed release is worse than no PR. It cannot skip a
     # *release*, since that job still runs first and unconditionally.
     needs: release-plz-release
-    # Never run two release-PR updates concurrently against the same branch.
-    concurrency:
-      group: release-plz-pr-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       # Mint a token from the GitHub App (APP_ID / APP_PRIVATE_KEY secrets). Used
       # instead of the default GITHUB_TOKEN so the release PR — and later the tag
