@@ -301,6 +301,8 @@ async fn submit_group(
     submit(port, stamp, targets, summary, intent, idempotency_key).await
 }
 
+/// `POST /v1/commands/devices/{id}/recording/start` — begin a recording on one
+/// device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/start",
@@ -343,6 +345,8 @@ pub async fn start_recording(
     .await
 }
 
+/// `POST /v1/commands/devices/{id}/recording/stop` — end the recording in
+/// progress on one device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/stop",
@@ -382,6 +386,8 @@ pub async fn stop_recording(
     .await
 }
 
+/// `POST /v1/commands/devices/{id}/recording/pause` — suspend the recording in
+/// progress on one device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/pause",
@@ -422,6 +428,8 @@ pub async fn pause_recording(
     .await
 }
 
+/// `PUT /v1/commands/devices/{id}/metadata/{field}` — write one metadata
+/// register, which is refused while a recording is in progress.
 #[utoipa::path(
     put,
     path = "/devices/{id}/metadata/{field}",
@@ -477,6 +485,8 @@ pub async fn set_metadata(
     .await
 }
 
+/// `PUT /v1/commands/devices/{id}/settings/{field}` — write one device setting,
+/// which is accepted in every phase.
 #[utoipa::path(
     put,
     path = "/devices/{id}/settings/{field}",
@@ -531,8 +541,9 @@ pub async fn set_setting(
 /// The one route in this scope addressed by neither a device nor a group, and
 /// so the one mounted directly on the scope root: a command id is globally
 /// unique, so it needs no device to address it. That is also why it is
-/// registered *last* — `/{id}` is one segment, `/devices/…` and `/groups/…` are
-/// two or more, so it can only ever catch what the others did not.
+/// registered *last* — within the scope, `/v1/commands/{id}` is one segment
+/// where `/v1/commands/devices/…` and `/v1/commands/groups/…` are two or more,
+/// so it can only ever catch what the others did not.
 #[utoipa::path(
     get,
     path = "/{id}",
@@ -559,7 +570,8 @@ pub async fn read_command(
         .ok_or_else(|| ApiFailure::NotFound(format!("no command '{id}'")))
 }
 
-/// `GET /devices/{id}/recording` — the write side's phase and epoch.
+/// `GET /v1/commands/devices/{id}/recording` — the write side's phase and
+/// epoch.
 ///
 /// What the *outbox* believes, which is not the same as what the device last
 /// reported: the phase moves the moment a start is accepted, before any device
@@ -596,8 +608,8 @@ pub async fn read_phase(
     Ok(web::Json(log.phase(device).await?))
 }
 
-/// `GET /devices/{id}/commands` — everything this device has been asked to do,
-/// newest first.
+/// `GET /v1/commands/devices/{id}/commands` — everything this device has been
+/// asked to do, newest first.
 #[utoipa::path(
     get,
     path = "/devices/{id}/commands",
@@ -628,6 +640,8 @@ pub async fn list_commands(
 
 // ---- the same five verbs, addressed to a device group ---------------------
 
+/// `POST /v1/commands/groups/{id}/recording/start` — begin a recording on every
+/// member, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/start",
@@ -672,6 +686,8 @@ pub async fn start_group_recording(
     .await
 }
 
+/// `POST /v1/commands/groups/{id}/recording/stop` — end every member's
+/// recording, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/stop",
@@ -708,6 +724,8 @@ pub async fn stop_group_recording(
     .await
 }
 
+/// `POST /v1/commands/groups/{id}/recording/pause` — suspend every member's
+/// recording, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/pause",
@@ -744,6 +762,8 @@ pub async fn pause_group_recording(
     .await
 }
 
+/// `PUT /v1/commands/groups/{id}/metadata/{field}` — write one metadata
+/// register on every member, with no rendezvous.
 #[utoipa::path(
     put,
     path = "/groups/{id}/metadata/{field}",
@@ -794,6 +814,8 @@ pub async fn set_group_metadata(
     .await
 }
 
+/// `PUT /v1/commands/groups/{id}/settings/{field}` — write one setting on every
+/// member, with no rendezvous.
 #[utoipa::path(
     put,
     path = "/groups/{id}/settings/{field}",
@@ -840,8 +862,8 @@ pub async fn set_group_setting(
     .await
 }
 
-/// `GET /groups/{id}/recording` — every member's phase, and the one they agree
-/// on.
+/// `GET /v1/commands/groups/{id}/recording` — every member's phase, and the one
+/// they agree on.
 ///
 /// Not an alias of the device route with a group id, and cannot be: the outbox
 /// keys its logs by device, so that route answers `idle` at epoch `0` for a
@@ -900,8 +922,8 @@ pub async fn read_group_phase(
     }))
 }
 
-/// `GET /groups/{id}/commands` — what each member has been asked to do, newest
-/// first within each member.
+/// `GET /v1/commands/groups/{id}/commands` — what each member has been asked to
+/// do, newest first within each member.
 ///
 /// Partitioned rather than merged, for the reason the device route is a flat
 /// list and this one is not: two submissions can share an instant, so a merged

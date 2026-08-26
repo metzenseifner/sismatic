@@ -155,7 +155,8 @@ pub(crate) fn reject_conflicting_field(
     Ok(())
 }
 
-/// `GET /devices/{id}/fields` — every field's most recent value for one device.
+/// `GET /v1/readings/devices/{id}/fields` — every field's most recent value for
+/// one device.
 ///
 /// An unknown device yields an empty list rather than a 404: the store cannot
 /// tell "no such device" from "this device has answered nothing yet", and
@@ -189,7 +190,8 @@ pub async fn list_fields(
     Ok(web::Json(ReadingList { readings }))
 }
 
-/// `GET /devices/{id}/fields/{field}` — one field's most recent value.
+/// `GET /v1/readings/devices/{id}/fields/{field}` — one field's most recent
+/// value.
 ///
 /// A bare [`Reading`] rather than a one-element list: the response answers a
 /// point question, and its `at` is the freshness of *this* value, which is the
@@ -235,8 +237,8 @@ pub async fn read_field(
         })
 }
 
-/// `GET /devices/{id}/fields/{field}/history?start=&end=&limit=` — one field
-/// over time, oldest first.
+/// `GET /v1/readings/devices/{id}/fields/{field}/history?start=&end=&limit=` —
+/// one field over time, oldest first.
 ///
 /// Every parameter is optional: omit the bounds for all of recorded history,
 /// omit `limit` for `DEFAULT_LIMIT`. An empty result is a `200` with an empty
