@@ -35,6 +35,20 @@ instruction_catalog! {
         Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
         Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
         Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
+        RTMPStream1PublishURL {name:"RTMP_1_URL", aliases: ["RTMP_URL_1"], doc:"Real-time messaging protocol push stream 1 URL target"},
+        RTMPStream1BackupPublishURL {name:"RTMP_1_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_1"], doc:"Real-time messaging protocol push stream 1 backup URL target"},
+        RTMPStream2PublishURL {name:"RTMP_2_URL", aliases: ["RTMP_URL_2"], doc:"Real-time messaging protocol push stream 2 URL target"},
+        RTMPStream2BackupPublishURL {name:"RTMP_2_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_2"], doc:"Real-time messaging protocol push stream 2 backup URL target"},
+        RTMPStream3PublishURL {name:"RTMP_3_URL", aliases: ["RTMP_URL_3"], doc:"Real-time messaging protocol push stream 3 URL target"},
+        RTMPStream3BackupPublishURL {name:"RTMP_3_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_3"], doc:"Real-time messaging protocol push stream 3 backup URL target"},
+        RTMPStream1State { name: "RTMP_Stream_1_State", aliases: [], doc: "Whether Archive Channel A RTMP push stream enabled."},
+        RTMPStream2State { name: "RTMP_Stream_2_State", aliases: [], doc: "Whether  Archive Channel B RTMP push stream enabled."},
+        RTMPStream3State { name: "RTMP_Stream_3_State", aliases: [], doc: "Whether Confidence RTMP push stream enabled."},
+        // Live stream status sync with schedule, return error code if scheduling is off or not
+        // supported
+        RTMPStream1LiveState { name:"RTMP_1_LIVE_STATE", aliases: [], doc:"Whether stream 1 offline or live."},
+        RTMPStream2LiveState { name:"RTMP_2_LIVE_STATE", aliases: [], doc:"Whether stream 2 offline or live."},
+        RTMPStream3LiveState { name:"RTMP_3_LIVE_STATE", aliases: [], doc:"Whether stream 3 offline or live."},
     }
 }
 
@@ -172,6 +186,19 @@ impl Setting {
             Setting::Stream1Name | Setting::Stream2Name | Setting::Stream3Name => {
                 Shape::Token { max: 127 }
             }
+            Setting::RTMPStream1State | Setting::RTMPStream2State | Setting::RTMPStream3State => {
+                Shape::Flag
+            }
+            // Reuse flag, although semantics are subtly different: 0=off, 1=live.
+            Setting::RTMPStream1LiveState
+            | Setting::RTMPStream2LiveState
+            | Setting::RTMPStream3LiveState => Shape::Flag,
+            Setting::RTMPStream1PublishURL
+            | Setting::RTMPStream2PublishURL
+            | Setting::RTMPStream3PublishURL => todo!(),
+            Setting::RTMPStream1BackupPublishURL
+            | Setting::RTMPStream2BackupPublishURL
+            | Setting::RTMPStream3BackupPublishURL => todo!(),
         }
     }
 
@@ -195,6 +222,18 @@ impl Setting {
             | Setting::SnmpUnitContact
             | Setting::TelnetPort
             | Setting::HttpPort => Form::Prefixed,
+            Setting::RTMPStream1State => todo!(),
+            Setting::RTMPStream2State => todo!(),
+            Setting::RTMPStream3State => todo!(),
+            Setting::RTMPStream1LiveState => todo!(),
+            Setting::RTMPStream2LiveState => todo!(),
+            Setting::RTMPStream3LiveState => todo!(),
+            Setting::RTMPStream1PublishURL => todo!(),
+            Setting::RTMPStream2PublishURL => todo!(),
+            Setting::RTMPStream3PublishURL => todo!(),
+            Setting::RTMPStream1BackupPublishURL => todo!(),
+            Setting::RTMPStream2BackupPublishURL => todo!(),
+            Setting::RTMPStream3BackupPublishURL => todo!(),
         }
     }
 
@@ -223,6 +262,18 @@ impl Setting {
             | Setting::Stream1State
             | Setting::Stream2State
             | Setting::Stream3State => "STRC",
+            Setting::RTMPStream1State
+            | Setting::RTMPStream2State
+            | Setting::RTMPStream3State
+            | Setting::RTMPStream1LiveState
+            | Setting::RTMPStream2LiveState
+            | Setting::RTMPStream3LiveState
+            | Setting::RTMPStream1PublishURL
+            | Setting::RTMPStream2PublishURL
+            | Setting::RTMPStream3PublishURL
+            | Setting::RTMPStream1BackupPublishURL
+            | Setting::RTMPStream2BackupPublishURL
+            | Setting::RTMPStream3BackupPublishURL => "RTMP",
         }
     }
 
