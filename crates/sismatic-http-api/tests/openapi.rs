@@ -23,6 +23,31 @@
 //! It closes one direction only. A route added to `startup` and never given a
 //! `#[utoipa::path]` is invisible to a test that starts from the document — it
 //! is missing, not wrong, and nothing here will say so.
+//!
+//! # The other place a path is written by hand: the prose
+//!
+//! A route attribute is not the only literal naming a URL. utoipa lifts each
+//! handler's doc comment into the operation — first paragraph to `summary`, the
+//! rest to `description` — and the response and tag descriptions are prose too,
+//! so a path named in any of them is rendered beside the real one in Scalar with
+//! nothing pairing the two.
+//!
+//! That is exactly where this drifted. Each handler opens with the route it
+//! serves, and the handlers are written *inside* a scope module, so the natural
+//! thing to write is the path as the attribute spells it — `GET
+//! /devices/{id}/commands`. But the attribute's `path` is only half a URL; the
+//! `context_path` above it carries the rest. Scalar renders the whole one, so
+//! the summary said `/devices/{id}/commands` while the request example beside it
+//! said `/v1/commands/devices/{id}/commands`, and a reader had two paths and no
+//! way to tell which was the API.
+//!
+//! Two tests hold the prose to the document it is rendered in:
+//! [`every_operation_summary_opens_with_the_route_it_documents`] requires each
+//! summary to open with the operation's own method and full path, so the
+//! scope-relative form cannot survive; and
+//! [`every_path_in_the_prose_is_one_this_document_declares`] checks every other
+//! URL mentioned anywhere in the document — cross-references between routes,
+//! mostly, which are the ones that rot silently when a scope moves.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -208,6 +233,165 @@ fn fill(template: &str) -> String {
         DEVICE
     };
     template.replace("{id}", id).replace("{field}", FIELD)
+}
+
+#[tokio::test]
+async fn every_operation_summary_opens_with_the_route_it_documents() {
+    // The convention every handler follows — open the doc comment with the route
+    // — turned into an invariant, because the convention on its own is what
+    // drifted: written next to `path = "/devices/{id}/commands"`, the obvious
+    // thing to write is that same string, and it is not the URL. Requiring the
+    // *document's* own path here means the only spelling that passes is the one
+    // a reader can paste into a client.
+    //
+    // Only the opening span is pinned, and only as far as the path: what follows
+    // it is free prose, and a query string inside it is the history routes
+    // spelling out their filters. What is held is that a summary exists at all
+    // and that the route it opens with is this operation's own.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    for (template, item) in doc["paths"].as_object().expect("paths is an object") {
+        for (method, operation) in item.as_object().expect("a path item is an object") {
+            let summary = operation["summary"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "{method} {template} carries no summary; Scalar renders the \
+                     operation with no title at all"
+                )
+            });
+            // The source wraps a long summary across `///` lines, which reaches
+            // the document as a newline that may fall inside the backticks.
+            // Whitespace is not the subject here, so it is flattened first.
+            let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+            let opening = summary
+                .strip_prefix('`')
+                .and_then(|rest| rest.split('`').next())
+                .map(|span| span.split('?').next().unwrap_or(span).to_owned());
+            let expected = format!("{} {template}", method.to_uppercase());
+            assert_eq!(
+                opening.as_deref(),
+                Some(expected.as_str()),
+                "{method} {template} opens its summary with {summary:?}, which does \
+                 not name the route it documents"
+            );
+        }
+    }
+}
+
+/// Every URL named in the document's prose, as `(where it was written, the URL)`.
+///
+/// Only inside backticks: that is how this codebase writes a path, and it keeps
+/// the scan off prose that merely contains a slash. Anything `/`-initial within
+/// a code span is a claim about this API's URL space, and the caller checks it.
+fn quoted_paths(doc: &serde_json::Value) -> Vec<(String, String)> {
+    fn scan(found: &mut Vec<(String, String)>, where_: &str, prose: &serde_json::Value) {
+        let Some(prose) = prose.as_str() else { return };
+        // Odd indices are the spans between backticks; an unterminated final
+        // span cannot exist, since `split` yields the tail at an even index.
+        for span in prose.split('`').skip(1).step_by(2) {
+            for token in span.split_whitespace() {
+                let token = token.trim_end_matches(['.', ',', ';', ':']);
+                // A query string is not part of the path, and the history routes
+                // document theirs in the summary.
+                let token = token.split('?').next().unwrap_or(token);
+                if token.starts_with('/') && token.len() > 1 {
+                    found.push((where_.to_owned(), token.to_owned()));
+                }
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    scan(&mut found, "info", &doc["info"]["description"]);
+    for tag in doc["tags"].as_array().expect("the document declares tags") {
+        let where_ = format!("the '{}' tag", tag["name"].as_str().expect("a tag name"));
+        scan(&mut found, &where_, &tag["description"]);
+    }
+    for (template, item) in doc["paths"].as_object().expect("paths is an object") {
+        for (method, operation) in item.as_object().expect("a path item is an object") {
+            let where_ = format!("{method} {template}");
+            scan(&mut found, &where_, &operation["summary"]);
+            scan(&mut found, &where_, &operation["description"]);
+            for parameter in operation["parameters"].as_array().unwrap_or(&Vec::new()) {
+                scan(&mut found, &where_, &parameter["description"]);
+            }
+            let responses = operation["responses"].as_object();
+            for (status, response) in responses.into_iter().flatten() {
+                scan(
+                    &mut found,
+                    &format!("{where_} [{status}]"),
+                    &response["description"],
+                );
+            }
+        }
+    }
+    found
+}
+
+/// Whether `quoted` could be a real URL of a server serving `declared`.
+///
+/// True when it is a segment-wise prefix of some declared path, comparing a
+/// `{parameter}` on either side as a wildcard. Three shapes have to pass, and
+/// they are all things the prose legitimately writes:
+///
+/// * the path itself — `/v1/commands/groups/{id}/commands`;
+/// * a *prefix* of one, which is how a whole half of a scope is named in a
+///   sentence — `/v1/commands/groups`, meaning "the group routes";
+/// * a template with a parameter filled in, which is how a concrete example is
+///   given — `/v1/readings/devices/{id}/fields/RUNNING_STATE`.
+///
+/// What it rejects is the drift: `/devices/{id}/commands` is a prefix of nothing
+/// this server serves, because every path starts with a scope.
+fn is_documented(quoted: &str, declared: &[&String]) -> bool {
+    fn segments(path: &str) -> Vec<&str> {
+        path.trim_matches('/').split('/').collect()
+    }
+
+    let quoted = segments(quoted);
+    declared.iter().any(|path| {
+        let path = segments(path);
+        quoted.len() <= path.len()
+            && quoted
+                .iter()
+                .zip(&path)
+                .all(|(q, p)| q == p || q.starts_with('{') || p.starts_with('{'))
+    })
+}
+
+#[tokio::test]
+async fn every_path_in_the_prose_is_one_this_document_declares() {
+    // The summaries are held down route by route above. This is the rest of the
+    // prose, where a path is named to point at a *different* route than the one
+    // being described — "this id names a device group; `/v1/commands/groups/{id}/commands`
+    // is the answer". Those are the most useful sentences in the document and
+    // the ones nothing else checks: the route they name is not the route they
+    // are attached to, so moving a scope leaves them pointing at a 404 while
+    // every other test still passes.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let declared: Vec<&String> = doc["paths"]
+        .as_object()
+        .expect("paths is an object")
+        .keys()
+        .collect();
+
+    let quoted = quoted_paths(&doc);
+    // A scan that found nothing would pass while saying nothing, and the
+    // cross-references it exists for are the reason it is worth running.
+    assert!(
+        quoted.len() > 20,
+        "expected the prose to reference paths, found {quoted:?}"
+    );
+
+    for (where_, path) in &quoted {
+        assert!(
+            is_documented(path, &declared),
+            "{where_} names `{path}`, which is not a path this server serves — \
+             a scope-relative path from a `#[utoipa::path]` attribute, or a \
+             cross-reference left behind when a route moved"
+        );
+    }
 }
 
 #[tokio::test]

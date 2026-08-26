@@ -200,8 +200,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              routes, because the field is a path parameter passed through to the \
              store rather than a symbol the server was compiled against — a field \
              added to the device catalog is served here with no code change.\n\n\
-             The `/devices` half answers from the store alone, so an unknown id \
-             there is `nothing stored` rather than a `404`. The `/groups` half \
+             The `/v1/readings/devices` half answers from the store alone, so an \
+             unknown id there is `nothing stored` rather than a `404`. The \
+             `/v1/readings/groups` half \
              also consults the catalog, because a device group has no readings of \
              its own and its membership has to come from somewhere — so an unknown \
              *group* is a `404`, and each response additionally carries what the \

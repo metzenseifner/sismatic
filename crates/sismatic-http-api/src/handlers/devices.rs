@@ -50,7 +50,7 @@ use sismatic_store::status::DeviceStatus;
 use crate::handlers::error::ApiFailure;
 use crate::handlers::target::{INVENTORY, reject_group_bare};
 
-/// `GET /devices` — every configured device, ordered by id.
+/// `GET /v1/inventory/devices` — every configured device, ordered by id.
 #[utoipa::path(
     get,
     path = "/devices",
@@ -92,8 +92,8 @@ pub async fn list_devices(
     web::Json(DeviceList { devices })
 }
 
-/// `GET /devices/{id}` — one device and the latest value of every field it has
-/// reported.
+/// `GET /v1/inventory/devices/{id}` — one device and the latest value of every
+/// field it has reported.
 #[utoipa::path(
     get,
     path = "/devices/{id}",
@@ -133,7 +133,7 @@ pub async fn read_device(
     Ok(web::Json(DeviceDetail { device, latest }))
 }
 
-/// `GET /groups` — every configured group, ordered by id.
+/// `GET /v1/inventory/groups` — every configured group, ordered by id.
 #[utoipa::path(
     get,
     path = "/groups",
@@ -151,7 +151,7 @@ pub async fn list_groups(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<Gro
     })
 }
 
-/// `GET /groups/{id}` — one group and the devices it addresses.
+/// `GET /v1/inventory/groups/{id}` — one group and the devices it addresses.
 #[utoipa::path(
     get,
     path = "/groups/{id}",

@@ -2,13 +2,14 @@
 
 use actix_web::HttpResponse;
 
-/// Answer `200 OK` with an empty body.
+/// `GET /health_check` — is this process alive and serving?
 ///
-/// The status *is* the payload. A probe — a load balancer deciding whether to
-/// keep sending traffic here, a supervisor deciding whether to restart the
-/// process, a deployment script waiting for the new version to come up — reads a
-/// status code, and a body would only add a shape to parse and a schema to
-/// version for a question whose answer is one bit.
+/// Answers `200 OK` with an empty body, and the status *is* the payload. A
+/// probe — a load balancer deciding whether to keep sending traffic here, a
+/// supervisor deciding whether to restart the process, a deployment script
+/// waiting for the new version to come up — reads a status code, and a body
+/// would only add a shape to parse and a schema to version for a question whose
+/// answer is one bit.
 ///
 /// # Liveness, not readiness
 ///

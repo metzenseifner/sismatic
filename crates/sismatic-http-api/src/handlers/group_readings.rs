@@ -78,8 +78,8 @@ use crate::handlers::error::ApiFailure;
 use crate::handlers::readings::{normalize_field, reject_conflicting_field, span_of, truncate};
 use crate::handlers::target::{READINGS, group_members};
 
-/// `GET /groups/{id}/fields` — every field any member has reported or the group
-/// has been told about, with each member's latest value.
+/// `GET /v1/readings/groups/{id}/fields` — every field any member has reported
+/// or the group has been told about, with each member's latest value.
 ///
 /// The field set is the *union* of the two: a field only some members have
 /// reported still appears (with `null` for the silent ones, which is the point
@@ -155,7 +155,8 @@ pub async fn list_group_fields(
     Ok(web::Json(GroupFieldStateList { group, fields }))
 }
 
-/// `GET /groups/{id}/fields/{field}` — one field across the whole group.
+/// `GET /v1/readings/groups/{id}/fields/{field}` — one field across the whole
+/// group.
 ///
 /// The route a dashboard polls to answer "is this device group recording?", and
 /// the one place the two comparisons are both in view: `sync` against what was
@@ -207,8 +208,8 @@ pub async fn read_group_field(
     )))
 }
 
-/// `GET /groups/{id}/fields/{field}/history?start=&end=&limit=` — one field
-/// over time, one series per member.
+/// `GET /v1/readings/groups/{id}/fields/{field}/history?start=&end=&limit=` —
+/// one field over time, one series per member.
 ///
 /// `limit` is **per member**, not per response: a caller asking for the last
 /// hundred points of `RUNNING_STATE` in a five-member device group wants a
