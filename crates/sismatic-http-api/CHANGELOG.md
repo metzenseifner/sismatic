@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/metzenseifner/sismatic/compare/v0.3.1...v0.4.0) - 2026-08-26
+
+### Added
+
+- routes are now scoped by domain ([#40](https://github.com/metzenseifner/sismatic/pull/40))
+
+### Fixed
+
+- *(http-api)* drift from commands to actual paths served
+
 ## [0.3.1](https://github.com/metzenseifner/sismatic/compare/v0.3.0...v0.3.1) - 2026-08-25
 
 ### Added
