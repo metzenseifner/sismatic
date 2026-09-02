@@ -642,25 +642,40 @@ mod tests {
 
     /// Arming a push stream is a write; putting it on air is not reachable over
     /// SIS at all — that is a scheduled session's doing. So `RTMP_1_STATE` is a
-    /// setting and `RTMP_1_STREAM_STATE` is only ever a reading, and asking to
-    /// write the latter has to fail as an unknown *setting* rather than
+    /// setting and `RTMP_STREAM_1_LIVE_STATE` is only ever a reading, and asking
+    /// to write the latter has to fail as an unknown *setting* rather than
     /// half-succeed as a write of the former.
+    ///
+    /// Every accepted spelling, not just the canonical one, and that is the
+    /// lesson of how this test previously failed to fire: it listed
+    /// `RTMP_1_STREAM_STATE`, which no catalog has ever answered to, so it
+    /// asserted that six non-existent names are not writable — true, vacuous,
+    /// and green — while `RTMP_STREAM_1_STATE` really did name a query *and* a
+    /// setting alias at the same time. Reading the names off the catalog instead
+    /// of retyping them is what keeps the assertion attached to reality.
     #[test]
-    fn a_live_state_is_not_writable() {
+    fn a_live_state_is_not_writable_under_any_of_its_spellings() {
+        use crate::protocol::instructions::query::Query;
         use std::str::FromStr;
 
-        for name in [
-            "RTMP_1_STREAM_STATE",
-            "RTMP_2_STREAM_STATE",
-            "RTMP_3_STREAM_STATE",
-            "RTMP_1_BACKUP_STREAM_STATE",
-            "RTMP_2_BACKUP_STREAM_STATE",
-            "RTMP_3_BACKUP_STREAM_STATE",
-        ] {
-            assert!(
-                Setting::from_str(name).is_err(),
-                "{name} is writable; SIS has no write for a live state"
-            );
+        let live_states = [
+            Query::RtmpStream1LiveState,
+            Query::RtmpStream2LiveState,
+            Query::RtmpStream3LiveState,
+            Query::RtmpBackupStream1LiveState,
+            Query::RtmpBackupStream2LiveState,
+            Query::RtmpBackupStream3LiveState,
+        ];
+        for query in live_states {
+            for name in query.accepted() {
+                assert!(
+                    Setting::from_str(name).is_err(),
+                    "{name} reads as {} but writes as {:?}; SIS has no write for \
+                     a live state, so one name must not reach both",
+                    query.name(),
+                    Setting::from_str(name).map(|s| s.name()),
+                );
+            }
         }
     }
 

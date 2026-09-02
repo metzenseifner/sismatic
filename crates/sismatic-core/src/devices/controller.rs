@@ -14,6 +14,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::protocol::SisError;
 use crate::protocol::Step;
 use crate::protocol::Value;
 use crate::protocol::instructions::Instruction;
@@ -22,13 +23,23 @@ use super::transport::{Transport, TransportError};
 
 /// Why a single exchange failed. The device layer reads these to decide whether
 /// the cached connection is still usable (it is not, after a transport error or
-/// an early close).
+/// an early close — but it is, after a [`Rejected`](ControllerError::Rejected)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerError {
     /// No complete reply arrived within `command_timeout`.
     Timeout {
         instruction: String,
         after: Duration,
+    },
+    /// The device answered, and the answer was a refusal.
+    ///
+    /// The odd one out among these variants, and the distinction the device
+    /// layer turns on: this is a *complete* exchange whose outcome happens to be
+    /// "no". The channel is in sync and the connection is fine, so unlike every
+    /// other variant it is not evidence against the connection.
+    Rejected {
+        instruction: String,
+        error: SisError,
     },
     /// The channel closed before a complete reply was parsed.
     ConnectionClosed { instruction: String },
@@ -44,6 +55,9 @@ impl fmt::Display for ControllerError {
         match self {
             ControllerError::Timeout { instruction, after } => {
                 write!(f, "`{instruction}` timed out after {after:?}")
+            }
+            ControllerError::Rejected { instruction, error } => {
+                write!(f, "device refused `{instruction}` with {error}")
             }
             ControllerError::ConnectionClosed { instruction } => {
                 write!(f, "channel closed during `{instruction}`")
@@ -113,8 +127,22 @@ impl Controller {
                 });
             }
             acc.extend_from_slice(&buf[..n]);
+            let reply = valid_prefix(&acc);
 
-            if let Step::Done(value) = instruction.parse_step(valid_prefix(&acc)) {
+            // Before the instruction's own parser, not after it, and the order
+            // is the whole point. A refusal is a bare `E13\r\n`, which a parser
+            // expecting a value either cannot match — and then reads until
+            // `command_timeout` on a reply that already arrived — or, for the
+            // free-text fields, matches all too well and stores `"E13"` as the
+            // unit's name. Asking this first is what makes both impossible.
+            if let Some(error) = SisError::in_reply(reply) {
+                return Err(ControllerError::Rejected {
+                    instruction: instruction.name.clone(),
+                    error,
+                });
+            }
+
+            if let Step::Done(value) = instruction.parse_step(reply) {
                 return Ok(value);
             }
         }
@@ -179,6 +207,78 @@ mod tests {
             ControllerError::Timeout {
                 instruction: instr.name.clone(),
                 after: Duration::from_millis(20),
+            }
+        );
+    }
+
+    /// The regression this whole path exists for. `Exhausted::Stall` is the
+    /// point: nothing follows the refusal, so if it were not recognised the
+    /// only way out would be the timeout — which is exactly what a fleet of
+    /// SMP 351s did on every poll of a field they do not implement.
+    #[tokio::test]
+    async fn a_refusal_ends_the_exchange_instead_of_waiting_out_the_timeout() {
+        let instr = Query::RtmpStream2LiveState.instruction();
+        let fake = FakeTransport::with_reads(["E13\r\n"]).on_exhausted(Exhausted::Stall);
+        let mut ctrl = controller(fake, 500);
+
+        assert_eq!(
+            ctrl.run(&instr).await.unwrap_err(),
+            ControllerError::Rejected {
+                instruction: instr.name.clone(),
+                error: SisError { code: 13 },
+            }
+        );
+    }
+
+    /// A refusal must win over the instruction's own parser, not merely be
+    /// consulted when that parser has nothing to say. `plain_text` accepts any
+    /// line, so left to itself it reads `E13` as the unit's *name* and stores
+    /// it — a failure that never times out and never logs, which is worse than
+    /// the one above.
+    #[tokio::test]
+    async fn a_refusal_is_not_mistaken_for_a_free_text_value() {
+        let instr = Query::UnitName.instruction();
+        let fake = FakeTransport::with_reads(["E13\r\n"]).on_exhausted(Exhausted::Stall);
+        let mut ctrl = controller(fake, 500);
+
+        assert_eq!(
+            ctrl.run(&instr).await.unwrap_err(),
+            ControllerError::Rejected {
+                instruction: instr.name.clone(),
+                error: SisError { code: 13 },
+            }
+        );
+    }
+
+    /// The other side of that coin: the anchor has to hold when the refusal is
+    /// only a substring, or naming a room after a lecture hall breaks its poll.
+    #[tokio::test]
+    async fn a_value_containing_an_error_code_is_still_a_value() {
+        let instr = Query::UnitName.instruction();
+        let fake = FakeTransport::with_reads(["HALL E13\r\n"]).on_exhausted(Exhausted::Stall);
+        let mut ctrl = controller(fake, 500);
+
+        assert_eq!(
+            ctrl.run(&instr).await.unwrap(),
+            Value::Text("HALL E13".into())
+        );
+    }
+
+    /// A refusal arrives in fragments like anything else, and the intermediate
+    /// buffers (`E`, `E1`, `E13`) must not be mistaken for the finished token —
+    /// nor for a reason to keep reading once it *is* finished.
+    #[tokio::test]
+    async fn recognises_a_refusal_that_arrives_one_byte_at_a_time() {
+        let instr = Query::RtmpBackupStream3LiveState.instruction();
+        let fake = FakeTransport::with_reads("E22\r\n".chars().map(|c| c.to_string()))
+            .on_exhausted(Exhausted::Stall);
+        let mut ctrl = controller(fake, 500);
+
+        assert_eq!(
+            ctrl.run(&instr).await.unwrap_err(),
+            ControllerError::Rejected {
+                instruction: instr.name.clone(),
+                error: SisError { code: 22 },
             }
         );
     }

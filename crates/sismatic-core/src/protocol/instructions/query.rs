@@ -6,7 +6,7 @@ use winnow::{ModalResult, Parser};
 // ---- Query (gettable) enum ------------------------------------------------
 use crate::protocol::instructions::Instruction;
 use crate::protocol::instructions::catalog::instruction_catalog;
-use crate::protocol::payload_helpers::{echoed, esc_cr, esc_rcdr, is_not_cr};
+use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
 use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
 
@@ -69,18 +69,30 @@ instruction_catalog! {
         // outside this protocol entirely, so these are the one part of the RTMP
         // catalog with no counterpart in `Setting`. A device with scheduling off
         // or unsupported answers the read with an error code rather than a
-        // flag — an error token this catalog does not model, so it reaches a
-        // caller as a command timeout.
+        // flag — see `SisError`, which is what keeps that from costing a
+        // `command_timeout` per poll.
         //
         // Per target rather than per stream, because the wire addresses them
         // that way: a stream's primary push can be live while its backup is not,
         // so three streams give six live states.
-        RtmpStream1State { name: "RTMP_STREAM_1_STATE", aliases: ["RTMP_STREAM_STATE_1"], doc: "Whether the primary RTMP push for stream 1 is live." },
-        RtmpStream2State { name: "RTMP_STREAM_2_STATE", aliases: ["RTMP_STREAM_STATE_2"], doc: "Whether the primary RTMP push for stream 2 is live." },
-        RtmpStream3tate { name: "RTMP_STREAM_3_STATE", aliases: ["RTMP_STREAM_STATE_3"], doc: "Whether the primary RTMP push for stream 3 is live." },
-        RtmpBackupStream1State { name: "RTMP_BACKUP_STREAM_1_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_1"], doc: "Whether the backup RTMP push for stream 1 is live." },
-        RtmpBackupStream2State { name: "RTMP_BACKUP_STREAM_2_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_2"], doc: "Whether the backup RTMP push for stream 2 is live." },
-        RtmpBackupStream3State { name: "RTMP_BACKUP_STREAM_3_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_3"], doc: "Whether the backup RTMP push for stream 3 is live." },
+        //
+        // `LIVE_STATE` is load-bearing, not decoration. Without it these read
+        // `RTMP_STREAM_<n>_STATE`, which is an accepted spelling of
+        // `Setting::RTMPStream<n>State` — the *enable* state, a different field
+        // with a write behind it. One name for two fields means a caller can
+        // read whether a push is on air and write whether it is armed through
+        // the same string and never be told they are not the same thing.
+        //
+        // The trailing alias is the spelling these shipped under before the
+        // index moved behind `STREAM_`; a `sync.fields` config naming fields
+        // explicitly would otherwise stop polling them, silently, at the next
+        // deploy.
+        RtmpStream1LiveState { name: "RTMP_STREAM_1_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_1", "RTMP_1_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 1 is live." },
+        RtmpStream2LiveState { name: "RTMP_STREAM_2_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_2", "RTMP_2_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 2 is live." },
+        RtmpStream3LiveState { name: "RTMP_STREAM_3_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_3", "RTMP_3_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 3 is live." },
+        RtmpBackupStream1LiveState { name: "RTMP_BACKUP_STREAM_1_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_1", "RTMP_1_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 1 is live." },
+        RtmpBackupStream2LiveState { name: "RTMP_BACKUP_STREAM_2_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_2", "RTMP_2_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 2 is live." },
+        RtmpBackupStream3LiveState { name: "RTMP_BACKUP_STREAM_3_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_3", "RTMP_3_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 3 is live." },
     }
 }
 
@@ -109,17 +121,17 @@ impl Query {
             Stream1State => (esc_cr("1STRC"), boolean_flag()),
             Stream2State => (esc_cr("2STRC"), boolean_flag()),
             Stream3State => (esc_cr("3STRC"), boolean_flag()),
-            // `ESC S<i>*<n>RTMP CR` -> `RtmpS<i>*<n>*(0|1) CR LF`, where `i`
-            // selects the primary (1) or backup (2) target and `n` the stream.
-            // Unlike the `STRC` reads above, the reply repeats its own address
-            // instead of answering with a bare flag, so it needs an anchored
-            // parser rather than `boolean_flag`.
-            RtmpStream1State => (esc_cr("S1*1RTMP"), boolean_flag()),
-            RtmpStream2State => (esc_cr("S1*2RTMP"), boolean_flag()),
-            RtmpStream3tate => (esc_cr("S1*3RTMP"), boolean_flag()),
-            RtmpBackupStream1State => (esc_cr("S2*1RTMP"), addressed_flag("RTMP", "S2*1")),
-            RtmpBackupStream2State => (esc_cr("S2*2RTMP"), addressed_flag("RTMP", "S2*2")),
-            RtmpBackupStream3State => (esc_cr("S2*3RTMP"), addressed_flag("RTMP", "S2*3")),
+            // `ESC S<i>*<n>RTMP CR` -> `(0|1) CR LF`, where `i` selects the
+            // primary (1) or backup (2) target and `n` the stream. All six
+            // answer with a bare flag, exactly as the `STRC` reads above do —
+            // attested against an SMP 351 on V3.06 (60-1324-01), which never
+            // echoes the address back on any of the six.
+            RtmpStream1LiveState => (esc_cr("S1*1RTMP"), boolean_flag()),
+            RtmpStream2LiveState => (esc_cr("S1*2RTMP"), boolean_flag()),
+            RtmpStream3LiveState => (esc_cr("S1*3RTMP"), boolean_flag()),
+            RtmpBackupStream1LiveState => (esc_cr("S2*1RTMP"), boolean_flag()),
+            RtmpBackupStream2LiveState => (esc_cr("S2*2RTMP"), boolean_flag()),
+            RtmpBackupStream3LiveState => (esc_cr("S2*3RTMP"), boolean_flag()),
             Firmware => ("Q".into(), plain_text()),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),
@@ -338,33 +350,20 @@ fn plain_number() -> ParseFn {
 //     )
 // }
 
-/// `<Verb><addr>*(0|1) CR LF` as a boolean flag — `RtmpS1*1*0` for the primary
-/// live state of stream 1.
-///
-/// Anchored on the whole `<Verb><addr>*` head for the reason
-/// `setting::addressed_echo` is: [`search`](crate::protocol) tries this parser
-/// at every offset in the accumulated buffer, and a device that echoes the
-/// request would otherwise satisfy it from the request's own bytes. The request
-/// does contain `S1*1`, but it cannot contain `RtmpS1*1*` — it spells the verb
-/// in upper case and puts it last.
-///
-/// That anchor is also what keeps the six live states apart: they differ only in
-/// the address, so a parser matching a bare flag would accept any of the six
-/// replies as the answer to any of the six reads.
-fn addressed_flag(verb: &'static str, addr: &'static str) -> ParseFn {
-    let head = format!("{}{addr}*", echoed(verb));
-    parser_of(
-        move |i: &mut In| {
-            literal(head.as_str()).parse_next(i)?;
-            let b = one_of(['0', '1']).parse_next(i)?;
-            literal("\r\n").parse_next(i)?;
-            Ok(b == '1')
-        },
-        Value::Flag,
-    )
-}
-
 /// `(0|1) CR LF` as a boolean flag.
+///
+/// The RTMP live states used to read through an `addressed_flag` here, on the
+/// belief that they answer `RtmpS1*1*0` — the address echoed back — and were
+/// anchored on that head so the six could not be confused for one another. The
+/// device does not do this: it answers all six with a bare flag, the same as
+/// `STRC`. The anchor therefore never matched, and since a parser that cannot
+/// match simply asks for more bytes, each read spent the full `command_timeout`
+/// waiting for a reply that had already arrived.
+///
+/// Nothing takes over the "keeps the six apart" job the anchor was doing,
+/// because on this wire there is nothing to do it with — a bare `0` carries no
+/// address. What keeps a reply attached to its request is that a device holds
+/// one connection under one lock and answers one instruction at a time.
 fn boolean_flag() -> ParseFn {
     parser_of(
         move |i: &mut In| {

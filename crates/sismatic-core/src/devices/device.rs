@@ -256,6 +256,17 @@ impl Device {
 
             match controller.run(instruction).await {
                 Ok(value) => return Ok(value),
+                // A refusal is an answer. The device read the verb, decided
+                // against it, and said so in a complete reply — so the channel
+                // is in sync, the connection is as good as it was a moment ago,
+                // and the retry below would only ask the same question and be
+                // told the same no. Discarding the connection here is what made
+                // one unanswerable field cost every *other* field on the device
+                // a redial: a wildcard poll of a field the model does not
+                // support tore down the shared session on every tick.
+                Err(err @ ControllerError::Rejected { .. }) => {
+                    return Err(DeviceError::Command(err));
+                }
                 Err(err) => {
                     link.conn = None; // the channel may be desynced; discard it
                     if was_cached && !reconnected {
@@ -334,6 +345,7 @@ mod tests {
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::Transport;
     use crate::devices::transport::fake::FakeTransport;
+    use crate::protocol::SisError;
     use crate::protocol::instructions::query::Query;
 
     const PORT_REPLY: &str = "22023\r\n";
@@ -377,6 +389,83 @@ mod tests {
         assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
         assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
         assert_eq!(opens.load(Ordering::SeqCst), 1, "second call must reuse");
+    }
+
+    /// The blast-radius fix. A device holds one connection behind one lock, so
+    /// discarding it is never a private cost to the field that provoked it —
+    /// every other field on that device pays a redial. A refusal is a complete
+    /// exchange on a healthy channel, so it must not be that kind of event.
+    ///
+    /// Concretely: a wildcard poll of an SMP 351 asks for seven fields the unit
+    /// refuses. Treating each refusal as a broken connection turned those into
+    /// seven teardowns per cycle, and the other forty-one fields into a
+    /// handshake apiece.
+    #[tokio::test]
+    async fn a_refused_command_keeps_the_connection() {
+        // One connection, two exchanges: a refusal, then a real answer.
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads(["E13\r\n", PORT_REPLY])
+        }));
+        let opens = connector.opens_handle();
+        let device = Device::new(config(500), connector);
+
+        let err = device
+            .run(&Query::RtmpStream2LiveState.instruction())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DeviceError::Command(ControllerError::Rejected {
+                    error: SisError { code: 13 },
+                    ..
+                })
+            ),
+            "expected a refusal, got {err:?}"
+        );
+
+        // The same connection answers the next command, which is the assertion
+        // that matters: no teardown, and no redial to pay for one.
+        assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "a refusal must not cost a reconnect"
+        );
+    }
+
+    /// The retry exists to heal a socket that died while idle. A refusal is not
+    /// that, and re-asking a question the device has already declined would only
+    /// double its cost — on a stalling channel, double the `command_timeout`.
+    #[tokio::test]
+    async fn a_refused_command_is_not_retried() {
+        // Only one scripted reply. A retry would find the channel closed and
+        // report `ConnectionClosed`, losing the refusal that explains why.
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY, "E13\r\n"])
+        }));
+        let opens = connector.opens_handle();
+        let device = Device::new(config(500), connector);
+
+        // Warm the connection first, so `was_cached` is true and the heal path
+        // is the one under test.
+        assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
+
+        let err = device
+            .run(&Query::RtmpStream2LiveState.instruction())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DeviceError::Command(ControllerError::Rejected {
+                    error: SisError { code: 13 },
+                    ..
+                })
+            ),
+            "a cached connection must surface the refusal, not retry past it: {err:?}"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1, "no healing redial");
     }
 
     #[tokio::test]

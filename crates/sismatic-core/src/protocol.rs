@@ -12,10 +12,15 @@
 //! build an [`Instruction`](instructions::Instruction) with
 //! [`Instruction::custom`](instructions::Instruction::custom) (supplying your own
 //! parser) to add instructions the catalog does not cover.
+//!
+//! One reply shape is handled outside that scheme: a device may refuse a verb
+//! with an error token instead of answering it, and no instruction's parser
+//! recognises one. See [`SisError`].
 
 mod control_chars;
 pub mod instructions;
 mod payload_helpers;
+mod sis_error;
 mod states;
 
 use std::fmt;
@@ -27,6 +32,10 @@ use winnow::{ModalResult, Partial};
 // the type for an *exhaustive* match — the private `states` module keeps its
 // other items internal.
 pub use crate::protocol::states::RecordingState;
+
+// Re-exported because it travels out of the crate inside a `ControllerError`,
+// so a caller matching on why a command failed has to be able to name it.
+pub use crate::protocol::sis_error::SisError;
 
 /// A decoded response value. The variant reflects what the field means, so a
 /// caller can pattern-match instead of re-parsing a string.
@@ -247,38 +256,46 @@ mod tests {
         );
     }
 
-    /// `ESC S<i>*<n>RTMP CR` -> `RtmpS<i>*<n>*(0|1) CR LF`. Unlike the `STRC`
-    /// reads above, the reply repeats its own address, so the flag is anchored
-    /// rather than bare.
+    /// `ESC S<i>*<n>RTMP CR` -> `(0|1) CR LF`. A bare flag, exactly as the
+    /// `STRC` reads above — the address is *not* echoed back, which is the
+    /// whole correction this test exists to pin.
+    ///
+    /// The payload assertions matter as much as the parse ones: `i` and `n` are
+    /// two indices in one address, and transposing them is a mistake that reads
+    /// a real value off the wrong target rather than failing.
     #[test]
-    fn parses_rtmp_live_state_as_an_addressed_flag() {
-        let instr = Query::RtmpStream2State.instruction();
+    fn parses_rtmp_live_state_as_a_bare_flag() {
+        let instr = Query::RtmpStream2LiveState.instruction();
         assert_eq!(instr.payload, "\u{1b}S1*2RTMP\r");
-        assert_eq!(
-            drive(&instr, "RtmpS1*2*1\r\n"),
-            Step::Done(Value::Flag(true))
-        );
+        assert_eq!(drive(&instr, "1\r\n"), Step::Done(Value::Flag(true)));
 
-        let backup = Query::RtmpBackupStream2State.instruction();
+        let backup = Query::RtmpBackupStream2LiveState.instruction();
         assert_eq!(backup.payload, "\u{1b}S2*2RTMP\r");
-        assert_eq!(
-            drive(&backup, "RtmpS2*2*0\r\n"),
-            Step::Done(Value::Flag(false))
-        );
+        assert_eq!(drive(&backup, "0\r\n"), Step::Done(Value::Flag(false)));
     }
 
-    /// The six live states differ only by address, and `search` tries a parser
-    /// at every offset in a shared buffer. Without the anchor, whichever reply
-    /// arrived first would answer all six reads — reporting stream 2's primary
-    /// push as live because stream 1's is.
+    /// Every one of the six, so a wrong index in the table cannot hide behind a
+    /// sibling that happens to be spelled right.
     #[test]
-    fn an_rtmp_live_state_does_not_accept_another_targets_reply() {
-        let instr = Query::RtmpStream1State.instruction();
-        assert_eq!(drive(&instr, "RtmpS1*2*1\r\n"), Step::NeedMore);
-        assert_eq!(drive(&instr, "RtmpS2*1*1\r\n"), Step::NeedMore);
-        // The echoed request must not satisfy it either: it contains `S1*1`,
-        // but the anchor demands the title-cased verb in front.
-        assert_eq!(drive(&instr, "\u{1b}S1*1RTMP\r\n"), Step::NeedMore);
+    fn every_rtmp_live_state_addresses_its_own_target() {
+        let addressed = [
+            (Query::RtmpStream1LiveState, "\u{1b}S1*1RTMP\r"),
+            (Query::RtmpStream2LiveState, "\u{1b}S1*2RTMP\r"),
+            (Query::RtmpStream3LiveState, "\u{1b}S1*3RTMP\r"),
+            (Query::RtmpBackupStream1LiveState, "\u{1b}S2*1RTMP\r"),
+            (Query::RtmpBackupStream2LiveState, "\u{1b}S2*2RTMP\r"),
+            (Query::RtmpBackupStream3LiveState, "\u{1b}S2*3RTMP\r"),
+        ];
+        for (query, payload) in addressed {
+            let instr = query.instruction();
+            assert_eq!(instr.payload, payload, "payload for {}", instr.name);
+            assert_eq!(
+                drive(&instr, "1\r\n"),
+                Step::Done(Value::Flag(true)),
+                "reply shape for {}",
+                instr.name
+            );
+        }
     }
 
     #[test]
