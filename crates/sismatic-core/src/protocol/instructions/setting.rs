@@ -312,8 +312,8 @@ impl Setting {
             Setting::RTMPStream1State => Form::Addressed("E1"),
             Setting::RTMPStream2State => Form::Addressed("E2"),
             Setting::RTMPStream3State => Form::Addressed("E3"),
-            Setting::RTMPStream1PublishURL => Form::Addressed("U1*1"),
             Setting::RTMPStream2PublishURL => Form::Addressed("U1*2"),
+            Setting::RTMPStream1PublishURL => Form::Addressed("U1*1"),
             Setting::RTMPStream3PublishURL => Form::Addressed("U1*3"),
             Setting::RTMPStream1BackupPublishURL => Form::Addressed("U2*1"),
             Setting::RTMPStream2BackupPublishURL => Form::Addressed("U2*2"),
@@ -642,7 +642,7 @@ mod tests {
 
     /// Arming a push stream is a write; putting it on air is not reachable over
     /// SIS at all — that is a scheduled session's doing. So `RTMP_1_STATE` is a
-    /// setting and `RTMP_1_LIVE_STATE` is only ever a reading, and asking to
+    /// setting and `RTMP_1_STREAM_STATE` is only ever a reading, and asking to
     /// write the latter has to fail as an unknown *setting* rather than
     /// half-succeed as a write of the former.
     #[test]
@@ -650,12 +650,12 @@ mod tests {
         use std::str::FromStr;
 
         for name in [
-            "RTMP_1_LIVE_STATE",
-            "RTMP_2_LIVE_STATE",
-            "RTMP_3_LIVE_STATE",
-            "RTMP_1_BACKUP_LIVE_STATE",
-            "RTMP_2_BACKUP_LIVE_STATE",
-            "RTMP_3_BACKUP_LIVE_STATE",
+            "RTMP_1_STREAM_STATE",
+            "RTMP_2_STREAM_STATE",
+            "RTMP_3_STREAM_STATE",
+            "RTMP_1_BACKUP_STREAM_STATE",
+            "RTMP_2_BACKUP_STREAM_STATE",
+            "RTMP_3_BACKUP_STREAM_STATE",
         ] {
             assert!(
                 Setting::from_str(name).is_err(),
@@ -728,8 +728,8 @@ mod tests {
     }
 
     /// Aliases have to pair up too, not just canonical names: a caller who
-    /// reads `GET .../fields/RTMP_LIVE_STATE_1` and then writes
-    /// `PUT .../settings/RTMP_LIVE_STATE_1` must reach the same field, and a
+    /// reads `GET .../fields/RTMP_STREAM_STATE_1` and then writes
+    /// `PUT .../settings/RTMP_STREAM_STATE_1` must reach the same field, and a
     /// spelling accepted on one side only is a 404 that looks like a typo.
     #[test]
     fn a_paired_field_accepts_the_same_spellings_on_both_sides() {

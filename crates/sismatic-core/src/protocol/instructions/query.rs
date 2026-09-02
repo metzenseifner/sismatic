@@ -75,12 +75,12 @@ instruction_catalog! {
         // Per target rather than per stream, because the wire addresses them
         // that way: a stream's primary push can be live while its backup is not,
         // so three streams give six live states.
-        Rtmp1LiveState { name: "RTMP_1_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_1"], doc: "Whether the primary RTMP push for stream 1 is live." },
-        Rtmp2LiveState { name: "RTMP_2_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_2"], doc: "Whether the primary RTMP push for stream 2 is live." },
-        Rtmp3LiveState { name: "RTMP_3_LIVE_STATE", aliases: ["RTMP_LIVE_STATE_3"], doc: "Whether the primary RTMP push for stream 3 is live." },
-        Rtmp1BackupLiveState { name: "RTMP_1_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_1"], doc: "Whether the backup RTMP push for stream 1 is live." },
-        Rtmp2BackupLiveState { name: "RTMP_2_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_2"], doc: "Whether the backup RTMP push for stream 2 is live." },
-        Rtmp3BackupLiveState { name: "RTMP_3_BACKUP_LIVE_STATE", aliases: ["RTMP_BACKUP_LIVE_STATE_3"], doc: "Whether the backup RTMP push for stream 3 is live." },
+        RtmpStream1State { name: "RTMP_STREAM_1_STATE", aliases: ["RTMP_STREAM_STATE_1"], doc: "Whether the primary RTMP push for stream 1 is live." },
+        RtmpStream2State { name: "RTMP_STREAM_2_STATE", aliases: ["RTMP_STREAM_STATE_2"], doc: "Whether the primary RTMP push for stream 2 is live." },
+        RtmpStream3tate { name: "RTMP_STREAM_3_STATE", aliases: ["RTMP_STREAM_STATE_3"], doc: "Whether the primary RTMP push for stream 3 is live." },
+        RtmpBackupStream1State { name: "RTMP_BACKUP_STREAM_1_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_1"], doc: "Whether the backup RTMP push for stream 1 is live." },
+        RtmpBackupStream2State { name: "RTMP_BACKUP_STREAM_2_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_2"], doc: "Whether the backup RTMP push for stream 2 is live." },
+        RtmpBackupStream3State { name: "RTMP_BACKUP_STREAM_3_STATE", aliases: ["RTMP_BACKUP_STREAM_STATE_3"], doc: "Whether the backup RTMP push for stream 3 is live." },
     }
 }
 
@@ -114,12 +114,12 @@ impl Query {
             // Unlike the `STRC` reads above, the reply repeats its own address
             // instead of answering with a bare flag, so it needs an anchored
             // parser rather than `boolean_flag`.
-            Rtmp1LiveState => (esc_cr("S1*1RTMP"), addressed_flag("RTMP", "S1*1")),
-            Rtmp2LiveState => (esc_cr("S1*2RTMP"), addressed_flag("RTMP", "S1*2")),
-            Rtmp3LiveState => (esc_cr("S1*3RTMP"), addressed_flag("RTMP", "S1*3")),
-            Rtmp1BackupLiveState => (esc_cr("S2*1RTMP"), addressed_flag("RTMP", "S2*1")),
-            Rtmp2BackupLiveState => (esc_cr("S2*2RTMP"), addressed_flag("RTMP", "S2*2")),
-            Rtmp3BackupLiveState => (esc_cr("S2*3RTMP"), addressed_flag("RTMP", "S2*3")),
+            RtmpStream1State => (esc_cr("S1*1RTMP"), boolean_flag()),
+            RtmpStream2State => (esc_cr("S1*2RTMP"), boolean_flag()),
+            RtmpStream3tate => (esc_cr("S1*3RTMP"), boolean_flag()),
+            RtmpBackupStream1State => (esc_cr("S2*1RTMP"), addressed_flag("RTMP", "S2*1")),
+            RtmpBackupStream2State => (esc_cr("S2*2RTMP"), addressed_flag("RTMP", "S2*2")),
+            RtmpBackupStream3State => (esc_cr("S2*3RTMP"), addressed_flag("RTMP", "S2*3")),
             Firmware => ("Q".into(), plain_text()),
             RunningState => (esc_rcdr("Y"), parse_state()),
             UnitName => (esc_cr("CN"), plain_text()),

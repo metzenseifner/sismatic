@@ -252,14 +252,14 @@ mod tests {
     /// rather than bare.
     #[test]
     fn parses_rtmp_live_state_as_an_addressed_flag() {
-        let instr = Query::Rtmp2LiveState.instruction();
+        let instr = Query::RtmpStream2State.instruction();
         assert_eq!(instr.payload, "\u{1b}S1*2RTMP\r");
         assert_eq!(
             drive(&instr, "RtmpS1*2*1\r\n"),
             Step::Done(Value::Flag(true))
         );
 
-        let backup = Query::Rtmp2BackupLiveState.instruction();
+        let backup = Query::RtmpBackupStream2State.instruction();
         assert_eq!(backup.payload, "\u{1b}S2*2RTMP\r");
         assert_eq!(
             drive(&backup, "RtmpS2*2*0\r\n"),
@@ -273,7 +273,7 @@ mod tests {
     /// push as live because stream 1's is.
     #[test]
     fn an_rtmp_live_state_does_not_accept_another_targets_reply() {
-        let instr = Query::Rtmp1LiveState.instruction();
+        let instr = Query::RtmpStream1State.instruction();
         assert_eq!(drive(&instr, "RtmpS1*2*1\r\n"), Step::NeedMore);
         assert_eq!(drive(&instr, "RtmpS2*1*1\r\n"), Step::NeedMore);
         // The echoed request must not satisfy it either: it contains `S1*1`,
