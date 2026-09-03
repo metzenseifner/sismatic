@@ -33,6 +33,14 @@
 //! a real limitation and it is stated in [`ApiFailure::NotFound`]'s docs rather
 //! than papered over.
 //!
+//! It is not, however, a limitation a caller has to live with. `GET /v1/readings`
+//! publishes the catalog these three routes accept — see
+//! [`crate::handlers::instructions`] — so the answer arrives *before* the
+//! request that would have been a 404, which is the same information at the only
+//! moment it is actionable. The 404 stays ambiguous because it must: making it
+//! unambiguous per request would mean consulting the catalog on every read, to
+//! reword a failure the caller can already avoid.
+//!
 //! # Field names in a URL
 //!
 //! Canonical field names are `UPPER_SNAKE` (`RUNNING_STATE`), which is not how

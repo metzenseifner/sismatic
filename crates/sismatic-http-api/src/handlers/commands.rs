@@ -86,6 +86,12 @@
 //! field from a real one, so an unknown name is refused by
 //! `sismatic-intent-relay` at dispatch and surfaces as a `failed` command
 //! rather than as a `400`.
+//!
+//! And it is paid off the same way: `GET /v1/commands` publishes both catalogs,
+//! in two lists, so a caller can tell not only whether a name exists but which
+//! of the two routes writes it — see [`crate::handlers::instructions`]. That
+//! second question has no other answer here, because the split between them is
+//! `sismatic-core`'s and the refusal it produces arrives asynchronously.
 
 use std::time::Duration;
 

@@ -37,6 +37,17 @@
 //! was last told to be, so a member that quietly did not start is visible
 //! without comparing five responses by hand.
 //!
+//! On the root of each of those two scopes sits the route that says which names
+//! the rest of the scope accepts: `/v1/readings` lists every queryable field and
+//! `/v1/commands` every command, metadata register and setting. They are the
+//! other side of the `{field}`-as-a-parameter design above — that choice is what
+//! lets a field reach this API with no code change, and what leaves a misspelled
+//! name indistinguishable from an unpolled one. Publishing the catalog answers
+//! that before the mistake rather than after it, and it is the only way for a
+//! caller to learn a synonym like `STREAM_NAME_1`, which no normalization rule
+//! derives. See [`handlers::instructions`], and [`startup::Ports`] for why the
+//! two lists arrive as values rather than as a seventh port.
+//!
 //! Devices and groups share one id namespace, but the two halves of a scope are
 //! not interchangeable: a group id under `/devices` is refused with the
 //! `/groups` URL that answers instead, and a device id under `/groups` likewise.
@@ -79,6 +90,13 @@
 //! projection. This crate learns *what* is configured and nothing about how to
 //! reach it: `DeviceSummary` has no credential field at all, so there is no
 //! secret here to leak rather than a secret that is carefully not printed.
+//!
+//! The two instruction catalogs on [`Ports`] are the same move once more, minus
+//! the trait. `Query::ALL` is as unnameable here as a `Registry` is, so the root
+//! projects it into DTOs and hands them over — but there is nothing to *ask* a
+//! table the compiler wrote, so it crosses the seam as a value rather than as a
+//! port. What is shared is the property that matters: the list arrives as data,
+//! not as a dependency edge.
 //!
 //! [`DeviceCatalog`]: sismatic_store::DeviceCatalog
 //!

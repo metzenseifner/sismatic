@@ -21,6 +21,7 @@ use std::net::TcpListener;
 
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
+use sismatic_api_types::{CommandCatalog, FieldCatalog};
 use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
 use sismatic_store::group::{DynGroupState, GroupState};
 use sismatic_store::outbox::{CommandLog, CommandSubmit, DynCommandLog, DynCommandSubmit};
@@ -29,11 +30,12 @@ use sismatic_store::{DynReadStore, ReadStore};
 
 use crate::handlers::target::{COMMANDS, INVENTORY, READINGS};
 use crate::handlers::{
-    field_history, group_field_history, list_commands, list_devices, list_fields,
-    list_group_commands, list_group_fields, list_groups, pause_group_recording, pause_recording,
-    read_command, read_device, read_field, read_group, read_group_field, read_group_phase,
-    read_phase, set_group_metadata, set_group_setting, set_metadata, set_setting,
-    start_group_recording, start_recording, stop_group_recording, stop_recording,
+    command_catalog, field_catalog, field_history, group_field_history, list_commands,
+    list_devices, list_fields, list_group_commands, list_group_fields, list_groups,
+    pause_group_recording, pause_recording, read_command, read_device, read_field, read_group,
+    read_group_field, read_group_phase, read_phase, set_group_metadata, set_group_setting,
+    set_metadata, set_setting, start_group_recording, start_recording, stop_group_recording,
+    stop_recording,
 };
 use crate::health_check;
 use crate::openapi::{
@@ -43,16 +45,26 @@ use crate::stamp::Stamp;
 
 /// The collaborators the application is assembled over.
 ///
-/// A struct rather than six positional arguments, and the reason is not only
-/// that six of them is where a caller starts passing the catalog where the
+/// A struct rather than eight positional arguments, and the reason is not only
+/// that eight of them is where a caller starts passing the catalog where the
 /// status port goes. Four of these are trait objects the composition root
 /// builds from *one* value — the outbox is `submit`, `log` and `group_state` at
 /// once — so at the call site they are six `Arc::new(x.clone())`s of two
 /// distinguishable things. Named fields make a mis-wiring a field name that
 /// does not exist; positions make it a server that answers plausible nonsense.
 ///
-/// Every field is a `dyn` handle rather than a concrete adapter, which is what
-/// keeps this crate unable to name a `MemoryStore` — or a `Registry` behind it.
+/// Every *port* here is a `dyn` handle rather than a concrete adapter, which is
+/// what keeps this crate unable to name a `MemoryStore` — or a `Registry` behind
+/// it.
+///
+/// The last two fields are not ports and are deliberately not dressed as ones.
+/// They carry `sismatic-core`'s instruction catalog, which is a table the
+/// compiler wrote: there is no lookup to perform, no I/O to fail, and no second
+/// implementation an installation could ever want. A trait over it would be
+/// ceremony around a constant. What they share with the ports is the property
+/// that matters — the value crosses the seam as a DTO, so this crate learns
+/// *which names exist* without acquiring a compile path to the enum they came
+/// from.
 pub struct Ports {
     /// Reading what the sync side persisted. Never a
     /// [`WriteStore`](sismatic_store::WriteStore).
@@ -69,6 +81,12 @@ pub struct Ports {
     /// Reading what each device group was last told to be. Read-only by
     /// construction — see [`run`].
     pub group_state: DynGroupState,
+    /// Every field a reading can be asked for, projected from core's query
+    /// catalog. Served by `GET /v1/readings`.
+    pub fields: FieldCatalog,
+    /// Every name a write can address, projected from core's command, register
+    /// and setting catalogs. Served by `GET /v1/commands`.
+    pub commands: CommandCatalog,
 }
 
 /// Build the application over its [`Ports`], serve it on `listener`, and hand
@@ -98,6 +116,10 @@ pub struct Ports {
 /// than relaxed: the write side still has exactly one verb, and it is one that
 /// records a request rather than performs it.
 ///
+/// The two catalogs beside them narrow nothing, because there is nothing there
+/// to narrow: they are constants, and a handler holding one can do exactly what
+/// a reader of this file can — say which names exist.
+///
 /// [`WriteStore`]: sismatic_store::WriteStore
 pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, std::io::Error> {
     let Ports {
@@ -107,6 +129,8 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
         submit,
         log,
         group_state,
+        fields,
+        commands,
     } = ports;
 
     // Adopt the caller's `Arc` instead of wrapping it: `Data::new` would give
@@ -119,8 +143,12 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     let log: web::Data<dyn CommandLog> = web::Data::from(log);
     let group_state: web::Data<dyn GroupState> = web::Data::from(group_state);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
-    // the composition root has no reason to keep a handle to it.
+    // the composition root has no reason to keep a handle to it. The two
+    // instruction catalogs arrive owned for the same reason — they are values
+    // the root built and handed over, not objects it shares.
     let stamp = web::Data::new(stamp);
+    let fields = web::Data::new(fields);
+    let commands = web::Data::new(commands);
 
     // Built once and cloned per worker, for the same reason the store handle is:
     // the docs are identical on every worker, and assembling them inside the
@@ -140,6 +168,8 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             .app_data(log.clone())
             .app_data(group_state.clone())
             .app_data(stamp.clone())
+            .app_data(fields.clone())
+            .app_data(commands.clone())
             .app_data(docs.clone())
             .service(
                 // A `resource` rather than `App::route`, which is otherwise the
@@ -174,6 +204,15 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                     .service(
                         web::scope(READINGS)
                             // TODO .wrap(YourAuthMiddleware::default())
+                            //
+                            // The scope root: which fields the routes below
+                            // accept. An empty resource path matches the scope
+                            // itself and nothing under it, so unlike every
+                            // other registration here its position is free —
+                            // it can neither swallow a longer path nor be
+                            // swallowed by one. First, because it is where a
+                            // reader with no field name yet has to start.
+                            .service(web::resource("").route(web::get().to(field_catalog)))
                             .service(
                                 web::resource("/devices/{id}/fields/{field}/history")
                                     .route(web::get().to(field_history)),
@@ -205,6 +244,15 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                     )
                     .service(
                         web::scope(COMMANDS)
+                            // The scope root, as under `readings` above: which
+                            // names a write may address. Worth contrasting with
+                            // the `/{id}` resource at the bottom of this scope,
+                            // which is the registration whose order *is* load-
+                            // bearing: `/{id}` matches one segment and this
+                            // matches none, so a command id can never be read as
+                            // this route and this route can never shadow a
+                            // command id.
+                            .service(web::resource("").route(web::get().to(command_catalog)))
                             // The write routes. Same longest-path-first discipline, and
                             // here it earns its keep: `/recording/start` must be
                             // registered before `/recording`, or the shorter resource

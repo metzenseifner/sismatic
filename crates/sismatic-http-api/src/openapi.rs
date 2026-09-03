@@ -138,6 +138,8 @@ const SCALAR_HTML: &str = r#"<!doctype html>
 #[openapi(
     paths(
         crate::handlers::health_check::health_check,
+        crate::handlers::instructions::field_catalog,
+        crate::handlers::instructions::command_catalog,
         crate::handlers::readings::list_fields,
         crate::handlers::readings::read_field,
         crate::handlers::readings::field_history,
@@ -192,6 +194,10 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         // arrive by being reachable from these.
         sismatic_api_types::GroupPhase,
         sismatic_api_types::GroupCommandList,
+        // The two scope-root catalogs. `InstructionSummary` arrives by being
+        // reachable from both.
+        sismatic_api_types::FieldCatalog,
+        sismatic_api_types::CommandCatalog,
     )),
     tags(
         (name = "readings", description =
@@ -199,7 +205,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              queryable field of every device is reachable through these six \
              routes, because the field is a path parameter passed through to the \
              store rather than a symbol the server was compiled against — a field \
-             added to the device catalog is served here with no code change.\n\n\
+             added to the device catalog is served here with no code change. \
+             `/v1/readings` lists every name those six accept, which is the one \
+             thing a path parameter cannot tell you.\n\n\
              The `/v1/readings/devices` half answers from the store alone, so an \
              unknown id there is `nothing stored` rather than a `404`. The \
              `/v1/readings/groups` half \
@@ -219,7 +227,8 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              `202 Accepted` before any device is contacted, so no response here is \
              ever waiting on one — follow the `Location` header to learn what \
              happened. Metadata is writable only while nothing is recording; \
-             settings are writable always."),
+             settings are writable always, and `/v1/commands` lists which names \
+             are which."),
         (name = "health", description =
             "Liveness. Consults nothing, so it reports on this process and never on \
              its dependencies."),

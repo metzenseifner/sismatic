@@ -27,6 +27,13 @@ pub enum ApiFailure {
     /// that has simply not answered yet are indistinguishable from here — all
     /// three are "no reading", and saying so is the honest answer (see
     /// [`ReadStore::latest`](sismatic_store::ReadStore::latest)).
+    ///
+    /// A caller that has to tell them apart asks a different question rather
+    /// than reading more into this one: `GET /v1/inventory/devices/{id}` says
+    /// whether the device is configured, and `GET /v1/readings` says whether the
+    /// field is a name this server knows — see
+    /// [`crate::handlers::instructions`]. Neither is consulted here, because
+    /// answering "no reading" is not a claim that needs them.
     NotFound(String),
     /// The request contradicted itself and no reading was attempted.
     BadRequest(String),

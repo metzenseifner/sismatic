@@ -26,6 +26,8 @@
 //! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
 //!   member-wise response shapes
 //! - [`command`] — write-side request bodies and instruction results
+//! - [`instruction`] — which names the routes above accept: [`FieldCatalog`],
+//!   [`CommandCatalog`]
 //! - [`error`] — the [`ApiError`] envelope and [`Health`]
 //!
 //! Enable the `ts` feature to derive `ts_rs::TS` on every DTO and emit
@@ -51,6 +53,7 @@ pub mod command;
 pub mod device;
 pub mod error;
 pub mod group;
+pub mod instruction;
 pub mod reading;
 pub mod value;
 
@@ -78,5 +81,6 @@ pub use group::{
     GroupCommandList, GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory,
     GroupPhase, MemberCommands, MemberHistory, MemberPhase, MemberState, SyncState,
 };
+pub use instruction::{CommandCatalog, FieldCatalog, InstructionSummary};
 pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
 pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};

@@ -14,10 +14,13 @@ pub mod devices;
 pub mod error;
 pub mod group_readings;
 pub mod health_check;
+pub mod instructions;
 pub mod readings;
 pub mod target;
 
 pub use devices::{list_devices, list_groups, read_device, read_group};
+
+pub use instructions::{command_catalog, field_catalog};
 
 pub use group_readings::{group_field_history, list_group_fields, read_group_field};
 
