@@ -27,7 +27,7 @@
 //! handler's own 404.
 //!
 //! `context_path` carries the two [`web::scope`]s a route is nested in —
-//! `/v1/readings`, `/v1/commands` or `/v1/inventory` — which is a third literal
+//! `/v1/readings`, `/v1/writings` or `/v1/inventory` — which is a third literal
 //! written twice, and the one a reader of the document depends on to build a
 //! URL that works at all. The same test is what keeps it honest.
 //!
@@ -139,18 +139,18 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     paths(
         crate::handlers::health_check::health_check,
         crate::handlers::instructions::field_catalog,
-        crate::handlers::instructions::command_catalog,
+        crate::handlers::instructions::writings_catalog,
         crate::handlers::readings::list_fields,
         crate::handlers::readings::read_field,
         crate::handlers::readings::field_history,
-        crate::handlers::commands::start_recording,
-        crate::handlers::commands::stop_recording,
-        crate::handlers::commands::pause_recording,
-        crate::handlers::commands::set_metadata,
-        crate::handlers::commands::set_setting,
-        crate::handlers::commands::read_phase,
-        crate::handlers::commands::list_commands,
-        crate::handlers::commands::read_command,
+        crate::handlers::writings::start_recording,
+        crate::handlers::writings::stop_recording,
+        crate::handlers::writings::pause_recording,
+        crate::handlers::writings::set_metadata,
+        crate::handlers::writings::set_setting,
+        crate::handlers::writings::read_phase,
+        crate::handlers::writings::list_writings,
+        crate::handlers::writings::read_writing,
         crate::handlers::devices::list_devices,
         crate::handlers::devices::read_device,
         crate::handlers::devices::list_groups,
@@ -158,26 +158,26 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::group_readings::list_group_fields,
         crate::handlers::group_readings::read_group_field,
         crate::handlers::group_readings::group_field_history,
-        crate::handlers::commands::start_group_recording,
-        crate::handlers::commands::stop_group_recording,
-        crate::handlers::commands::pause_group_recording,
-        crate::handlers::commands::set_group_metadata,
-        crate::handlers::commands::set_group_setting,
-        crate::handlers::commands::read_group_phase,
-        crate::handlers::commands::list_group_commands,
+        crate::handlers::writings::start_group_recording,
+        crate::handlers::writings::stop_group_recording,
+        crate::handlers::writings::pause_group_recording,
+        crate::handlers::writings::set_group_metadata,
+        crate::handlers::writings::set_group_setting,
+        crate::handlers::writings::read_group_phase,
+        crate::handlers::writings::list_group_writings,
     ),
     components(schemas(
         sismatic_api_types::Reading,
         sismatic_api_types::ReadingList,
         sismatic_api_types::ApiError,
-        // The write side's top-level bodies. `Intent`, `CommandStatus`,
+        // The write side's top-level bodies. `Intent`, `WritingStatus`,
         // `Phase`, `Rejection` and `Accepted` are reachable from these and so
         // arrive by being walked into, for the same reason `ReadingValue` does.
         sismatic_api_types::Acceptance,
-        sismatic_api_types::CommandRecord,
-        sismatic_api_types::CommandList,
+        sismatic_api_types::WritingRecord,
+        sismatic_api_types::WritingList,
         sismatic_api_types::RecordingPhase,
-        crate::handlers::commands::ValueWrite,
+        crate::handlers::writings::ValueWrite,
         // The inventory bodies. `DeviceSummary` and `ConnectionStatus` arrive
         // by being reachable from these.
         sismatic_api_types::DeviceList,
@@ -190,14 +190,14 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::GroupFieldState,
         sismatic_api_types::GroupFieldStateList,
         sismatic_api_types::GroupHistory,
-        // The group write-side bodies. `MemberPhase` and `MemberCommands`
+        // The group write-side bodies. `MemberPhase` and `MemberWritings`
         // arrive by being reachable from these.
         sismatic_api_types::GroupPhase,
-        sismatic_api_types::GroupCommandList,
+        sismatic_api_types::GroupWritingList,
         // The two scope-root catalogs. `InstructionSummary` arrives by being
         // reachable from both.
         sismatic_api_types::FieldCatalog,
-        sismatic_api_types::CommandCatalog,
+        sismatic_api_types::WritingsCatalog,
     )),
     tags(
         (name = "readings", description =
@@ -222,12 +222,13 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              rather than the store, so an unknown id here is a `404` — a real claim \
              about the devices file — where the readings routes can only answer \
              `nothing stored`."),
-        (name = "commands", description =
-            "Asking a device to do something. Every write is recorded and answered \
+        (name = "writings", description =
+            "Any operation on the write path — asking a device to do something, or \
+             setting something on it. Every write is recorded and answered \
              `202 Accepted` before any device is contacted, so no response here is \
              ever waiting on one — follow the `Location` header to learn what \
              happened. Metadata is writable only while nothing is recording; \
-             settings are writable always, and `/v1/commands` lists which names \
+             settings are writable always, and `/v1/writings` lists which names \
              are which."),
         (name = "health", description =
             "Liveness. Consults nothing, so it reports on this process and never on \
@@ -254,7 +255,7 @@ impl ApiDoc {
                  driver polled and stored; writes are recorded as intents and \
                  performed later by the intent relay. Nothing here reaches a device \
                  during a request, so no response is ever waiting on one — a \
-                 reading's `at` says how fresh it is, and a command's `202` says it \
+                 reading's `at` says how fresh it is, and a writing's `202` says it \
                  was accepted rather than done.",
             ))
             .license(Some(License::new(env!("CARGO_PKG_LICENSE"))))

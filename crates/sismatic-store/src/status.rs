@@ -19,7 +19,7 @@
 //! # What it does not promise
 //!
 //! Nothing is reserved and nothing is dialed. Two calls a millisecond apart may
-//! disagree, and a device reported [`Warm`] can fail the very next command
+//! disagree, and a device reported [`Warm`] can fail the very next exchange
 //! because the far end closed the connection while it was idle — which is
 //! precisely the case `Device::run` heals transparently. Treating a status as a
 //! precondition would be a race with no upside; the only correct use is

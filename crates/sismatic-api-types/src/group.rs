@@ -21,14 +21,14 @@
 //!
 //! [`SyncState`] is that comparison, per member and rolled up for the group. It
 //! is [`Unknown`](SyncState::Unknown), not `InSync`, when there is nothing to
-//! compare: a group that was never commanded has no expectation, and reporting
-//! it as in sync would be a claim nothing supports.
+//! compare: a group nothing was ever written to has no expectation, and
+//! reporting it as in sync would be a claim nothing supports.
 //!
 //! # Against each other
 //!
 //! [`GroupFieldState::uniform`] is the other comparison: whether every member
 //! that has reported holds the same value. It needs no expectation, so it
-//! catches drift on fields nobody commands — a device group where one member is
+//! catches drift on fields nobody writes — a device group where one member is
 //! on last year's firmware, or in a different timezone — which is exactly the
 //! class of problem an expectation can never see.
 //!
@@ -39,15 +39,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::{CommandRecord, Phase};
 use crate::reading::{Reading, Timestamp};
 use crate::value::ReadingValue;
+use crate::writing::{Phase, WritingRecord};
 use crate::{DeviceId, FieldName, GroupId};
 
 /// What a group was last told one of its fields should hold.
 ///
 /// Recorded at *submission*, not at success: this is the value the device group
-/// was asked for, and a command that never reached a device is precisely the
+/// was asked for, and a writing that never reached a device is precisely the
 /// case drift detection exists to surface. An expectation that rolled back on
 /// failure would make the one situation worth an alarm — five members told to
 /// start, none of which did — indistinguishable from a device group that is
@@ -77,8 +77,8 @@ pub struct GroupExpectation {
 /// Whether an observation agrees with what the group was told.
 ///
 /// Three states rather than a `bool`, because "we cannot tell" is a real and
-/// common answer — a group that has never been commanded, or a member that has
-/// never reported the field — and folding it into either `true` or `false`
+/// common answer — a group nothing has ever been written to, or a member that
+/// has never reported the field — and folding it into either `true` or `false`
 /// would put a wrong claim on a dashboard. `Unknown` is the resting state of a
 /// system nobody has asked for anything yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ pub struct GroupFieldState {
     /// Vacuously `true` when fewer than two members have reported. Independent
     /// of `sync`: members can agree with each other and all disagree with what
     /// was asked (nothing happened), or each agree with the expectation and
-    /// differ from each other only in a field nobody commanded.
+    /// differ from each other only in a field nobody has written.
     pub uniform: bool,
     /// One entry per member, in the order the group configures them.
     pub members: Vec<MemberState>,
@@ -205,7 +205,7 @@ pub struct MemberPhase {
     pub epoch: u64,
 }
 
-/// A device group's write-side state, as `GET /v1/commands/groups/{id}/recording`
+/// A device group's write-side state, as `GET /v1/writings/groups/{id}/recording`
 /// reports it.
 ///
 /// The write-side counterpart of [`GroupFieldState`] over `RUNNING_STATE`, and
@@ -213,7 +213,7 @@ pub struct MemberPhase {
 /// moves the moment a start is admitted and before any device has been
 /// contacted, while the reading is what a member last reported. A group whose
 /// members are all `recording` here and all `stopped` there is a group whose
-/// commands have not landed yet — or have failed.
+/// writings have not landed yet — or have failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -240,14 +240,14 @@ pub struct GroupPhase {
     pub members: Vec<MemberPhase>,
 }
 
-/// One member's command history, newest first.
+/// One member's writing history, newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MemberCommands {
+pub struct MemberWritings {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    pub commands: Vec<CommandRecord>,
+    pub writings: Vec<WritingRecord>,
 }
 
 /// Everything a device group's members have been asked to do.
@@ -262,8 +262,8 @@ pub struct MemberCommands {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GroupCommandList {
+pub struct GroupWritingList {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub group: GroupId,
-    pub members: Vec<MemberCommands>,
+    pub members: Vec<MemberWritings>,
 }

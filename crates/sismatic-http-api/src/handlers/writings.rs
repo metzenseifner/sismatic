@@ -1,7 +1,7 @@
 //! The write routes: five ways to spell an [`Intent`], one way to submit it —
 //! addressed to a device or to a device group.
 //!
-//! Every path below is relative to the `/v1/commands` scope [`crate::startup`]
+//! Every path below is relative to the `/v1/writings` scope [`crate::startup`]
 //! mounts them under.
 //!
 //! ```text
@@ -18,19 +18,35 @@
 //! PUT  /groups/{id}/settings/{field}
 //!
 //! GET  /devices/{id}/recording            the write side's phase and epoch
-//! GET  /devices/{id}/commands             what this device has been asked
+//! GET  /devices/{id}/history              every writing this device was sent
 //! GET  /groups/{id}/recording             every member's phase, and the one
 //!                                         they agree on
-//! GET  /groups/{id}/commands              what each member has been asked
+//! GET  /groups/{id}/history               the same, per member
 //! GET  /{id}                              what became of one request
 //! ```
+//!
+//! # Why "writing" rather than "command"
+//!
+//! Three of the five verbs above are not commands. `SetMetadata` and
+//! `SetSetting` write a register; only the recording trio is a
+//! `sismatic_core::protocol::instructions::commands::Command`, and that type
+//! keeps the word because down there it means one thing. Up here the word had
+//! been stretched to cover every accepted write, which left a caller reading
+//! `GET .../commands` no way to tell whether the list it got back was the three
+//! lifecycle verbs or everything the device had been told. A *writing* is any
+//! row the outbox admitted; a *command* is one of three. [`WritingsCatalog`]
+//! is where both words appear side by side and the distinction is finally
+//! visible: its `commands` list is the lifecycle verbs, and `metadata` and
+//! `settings` are the other two thirds of what a writing can be.
+//!
+//! [`WritingsCatalog`]: sismatic_api_types::WritingsCatalog
 //!
 //! # One namespace, two spaces
 //!
 //! Devices and groups share one id namespace, and each URL space accepts only
 //! its own kind. Every route here resolves its id through
-//! [`target`](crate::handlers::target) first, so a group id under `/v1/commands/devices`
-//! and a device id under `/v1/commands/groups` are both a `404` naming the URL that
+//! [`target`](crate::handlers::target) first, so a group id under `/v1/writings/devices`
+//! and a device id under `/v1/writings/groups` are both a `404` naming the URL that
 //! would have worked.
 //!
 //! The `/groups` write routes are not a second code path for that: all ten
@@ -40,12 +56,12 @@
 //!
 //! The two status reads are why the split is a refusal rather than a fan-out.
 //! The outbox keys its logs by *device*, so a group id on
-//! `GET /v1/commands/devices/{id}/recording` took a default and reported `idle` at epoch
-//! `0`, and on `GET /v1/commands/devices/{id}/commands` an empty list — for a device
+//! `GET /v1/writings/devices/{id}/recording` took a default and reported `idle` at epoch
+//! `0`, and on `GET /v1/writings/devices/{id}/history` an empty list — for a device
 //! group whose members were mid-recording with a queue each. Those were not
 //! answers about the group; they were answers about a device that does not
 //! exist, and no wording of the documentation made them safe.
-//! [`read_group_phase`] and [`list_group_commands`] ask the port the question
+//! [`read_group_phase`] and [`list_group_writings`] ask the port the question
 //! it can actually answer, once per member.
 //!
 //! # Nothing here reaches a device
@@ -59,14 +75,14 @@
 //! may have a compile path to. The intent is a value built from `String`s, so
 //! the seam holds.
 //!
-//! Every `202` carries a `Location: /v1/commands/{id}`, which is the route that
+//! Every `202` carries a `Location: /v1/writings/{id}`, which is the route that
 //! answers what happened.
 //!
-//! # Why five routes rather than one `POST /commands`
+//! # Why five routes rather than one `POST /writings`
 //!
 //! One endpoint taking a polymorphic body would be fewer lines here and worse
 //! everywhere else. The classification of metadata-versus-setting would move
-//! from the URL into the body, so an access log would read `POST .../commands`
+//! from the URL into the body, so an access log would read `POST .../writings`
 //! for a title edit and for a recording start alike; the generated OpenAPI
 //! would have one operation with a `oneOf` body instead of five named ones; and
 //! coarse authorization by path prefix — the cheapest way to let one credential
@@ -84,10 +100,10 @@
 //! consequence as on the read routes — see [`crate::handlers::readings`] for the
 //! full argument. The cost is the same too: this crate cannot tell a misspelled
 //! field from a real one, so an unknown name is refused by
-//! `sismatic-intent-relay` at dispatch and surfaces as a `failed` command
+//! `sismatic-intent-relay` at dispatch and surfaces as a `failed` writing
 //! rather than as a `400`.
 //!
-//! And it is paid off the same way: `GET /v1/commands` publishes both catalogs,
+//! And it is paid off the same way: `GET /v1/writings` publishes both catalogs,
 //! in two lists, so a caller can tell not only whether a name exists but which
 //! of the two routes writes it — see [`crate::handlers::instructions`]. That
 //! second question has no other answer here, because the split between them is
@@ -100,15 +116,15 @@ use serde::Deserialize;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes — the
 // handlers return `ApiFailure` and let it render.
 use sismatic_api_types::{
-    Acceptance, ApiError, CommandList, CommandRecord, DeviceId, GroupCommandList, GroupPhase,
-    GroupSummary, Intent, MemberCommands, MemberPhase, RecordingPhase,
+    Acceptance, ApiError, DeviceId, GroupPhase, GroupSummary, GroupWritingList, Intent,
+    MemberPhase, MemberWritings, RecordingPhase, WritingList, WritingRecord,
 };
 use sismatic_store::catalog::DeviceCatalog;
-use sismatic_store::outbox::{BarrierPolicy, CommandLog, CommandSubmit, Submission};
+use sismatic_store::outbox::{BarrierPolicy, Submission, WritingLog, WritingSubmit};
 
 use crate::handlers::error::ApiFailure;
 use crate::handlers::readings::normalize_field;
-use crate::handlers::target::{COMMANDS, group_members, reject_group};
+use crate::handlers::target::{WRITINGS, group_members, reject_group};
 use crate::stamp::Stamp;
 
 /// The body of a metadata or setting write.
@@ -137,7 +153,7 @@ pub struct ValueWrite {
 ///
 /// What it buys: a client whose `POST /recording/start` times out and is
 /// retried gets the original `202` back instead of a `409 already_recording`
-/// for a command it believes never landed. Scope is per device, so two
+/// for a writing it believes never landed. Scope is per device, so two
 /// recorders may be started under one key.
 pub struct IdempotencyKey(pub Option<String>);
 
@@ -184,7 +200,7 @@ const fn needs_rendezvous(intent: &Intent) -> bool {
 /// `target` is a device id or a group id — the two share one namespace, and
 /// which it is decides only how many rows the submission expands into.
 async fn submit(
-    port: &dyn CommandSubmit,
+    port: &dyn WritingSubmit,
     stamp: &Stamp,
     targets: Vec<DeviceId>,
     group: Option<GroupSummary>,
@@ -235,39 +251,39 @@ async fn submit(
         .await?;
 
     let mut response = HttpResponse::Accepted();
-    // Only when there is one command to point at. A group produced several, and
+    // Only when there is one writing to point at. A group produced several, and
     // a header naming an arbitrary one of them would be worse than none — the
     // body carries every id.
-    if let [only] = accepted.commands.as_slice() {
-        response.insert_header(("Location", format!("/v1/commands/{}", only.id)));
+    if let [only] = accepted.writings.as_slice() {
+        response.insert_header(("Location", format!("/v1/writings/{}", only.id)));
     }
     Ok(response.json(accepted))
 }
 
-/// [`submit`] from a `/v1/commands/devices` route: the id must name a device, and one
-/// command is recorded.
+/// [`submit`] from a `/v1/writings/devices` route: the id must name a device, and one
+/// writing is recorded.
 ///
 /// A group id is refused here rather than fanned out. It once *was* fanned out,
-/// because `/v1/commands/devices/{id}` was the only way to address a device group, and
+/// because `/v1/writings/devices/{id}` was the only way to address a device group, and
 /// the two status routes below are why that stopped being tenable: they read an
 /// outbox keyed by device, so a group id there reports an idle device that does
 /// not exist. See [`crate::handlers::target`].
 ///
 /// An id that names nothing is a `404` and not a `202`. The outbox holds what
 /// was submitted and no list of what exists, so without this check it would
-/// admit a command for a mistyped id against a fresh idle phase — a promise
-/// that cannot be kept, which the caller discovers only by polling a command
+/// admit a writing for a mistyped id against a fresh idle phase — a promise
+/// that cannot be kept, which the caller discovers only by polling a writing
 /// that fails at dispatch, minutes later.
 async fn submit_device(
     catalog: &dyn DeviceCatalog,
-    port: &dyn CommandSubmit,
+    port: &dyn WritingSubmit,
     stamp: &Stamp,
     device: DeviceId,
     group_route: &str,
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
-    reject_group(catalog, &device, COMMANDS, group_route).await?;
+    reject_group(catalog, &device, WRITINGS, group_route).await?;
     if catalog.device(&device).await.is_none() {
         return Err(ApiFailure::NotFound(format!(
             "no device '{device}' is configured"
@@ -279,45 +295,45 @@ async fn submit_device(
     submit(port, stamp, vec![device], None, intent, idempotency_key).await
 }
 
-/// [`submit`] from a `/v1/commands/groups` route: the id must name a device group, and
-/// one command per member is recorded.
+/// [`submit`] from a `/v1/writings/groups` route: the id must name a device group, and
+/// one writing per member is recorded.
 ///
 /// The check is the whole difference between the two URL spaces. Without it
-/// `/v1/commands/groups/atrium-101/recording/start` would start a single recorder and
+/// `/v1/writings/groups/atrium-101/recording/start` would start a single recorder and
 /// answer `202`, which is a `/groups` route quietly doing a `/devices` route's
 /// job — and the caller would have no way to notice, because the `202` body
 /// looks the same either way.
 ///
-/// `device_route` is the tail of the `/v1/commands/devices` route that does the same
+/// `device_route` is the tail of the `/v1/writings/devices` route that does the same
 /// thing, so a caller who reached for the wrong space is told which URL it
 /// wanted rather than only that this one was wrong.
 async fn submit_group(
     catalog: &dyn DeviceCatalog,
-    port: &dyn CommandSubmit,
+    port: &dyn WritingSubmit,
     stamp: &Stamp,
     group: DeviceId,
     device_route: &str,
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
-    let targets = group_members(catalog, &group, COMMANDS, device_route).await?;
+    let targets = group_members(catalog, &group, WRITINGS, device_route).await?;
     // Resolved rather than re-derived: `group_members` already established that
     // this id names one, so the summary is present.
     let summary = catalog.group(&group).await;
     submit(port, stamp, targets, summary, intent, idempotency_key).await
 }
 
-/// `POST /v1/commands/devices/{id}/recording/start` — begin a recording on one
+/// `POST /v1/writings/devices/{id}/recording/start` — begin a recording on one
 /// device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/start",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device id, as configured on the write side."),
         ("Idempotency-Key" = Option<String>, Header,
-         description = "Repeat this on a retry and the original command is returned \
+         description = "Repeat this on a retry and the original writing is returned \
              rather than a second recording started."),
     ),
     responses(
@@ -325,7 +341,7 @@ async fn submit_group(
              follow the `Location` header for the outcome.", body = Acceptance),
         (status = 409, description = "This device is already recording.", body = ApiError),
         (status = 404, description = "No device has this id, or the id names a \
-             device group — which is refused here and carries the `/v1/commands/groups` URL \
+             device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
              are claims about the devices file.",
          body = ApiError),
@@ -334,7 +350,7 @@ async fn submit_group(
 )]
 pub async fn start_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -351,13 +367,13 @@ pub async fn start_recording(
     .await
 }
 
-/// `POST /v1/commands/devices/{id}/recording/stop` — end the recording in
+/// `POST /v1/writings/devices/{id}/recording/stop` — end the recording in
 /// progress on one device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/stop",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device id."),
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
@@ -366,7 +382,7 @@ pub async fn start_recording(
         (status = 202, body = Acceptance),
         (status = 409, description = "No recording is in progress.", body = ApiError),
         (status = 404, description = "No device has this id, or the id names a \
-             device group — which is refused here and carries the `/v1/commands/groups` URL \
+             device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
              are claims about the devices file.",
          body = ApiError),
@@ -375,7 +391,7 @@ pub async fn start_recording(
 )]
 pub async fn stop_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -392,13 +408,13 @@ pub async fn stop_recording(
     .await
 }
 
-/// `POST /v1/commands/devices/{id}/recording/pause` — suspend the recording in
+/// `POST /v1/writings/devices/{id}/recording/pause` — suspend the recording in
 /// progress on one device.
 #[utoipa::path(
     post,
     path = "/devices/{id}/recording/pause",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device id."),
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
@@ -408,7 +424,7 @@ pub async fn stop_recording(
         (status = 409, description = "Nothing is recording, or it is already paused.",
          body = ApiError),
         (status = 404, description = "No device has this id, or the id names a \
-             device group — which is refused here and carries the `/v1/commands/groups` URL \
+             device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
              are claims about the devices file.",
          body = ApiError),
@@ -417,7 +433,7 @@ pub async fn stop_recording(
 )]
 pub async fn pause_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -434,13 +450,13 @@ pub async fn pause_recording(
     .await
 }
 
-/// `PUT /v1/commands/devices/{id}/metadata/{field}` — write one metadata
+/// `PUT /v1/writings/devices/{id}/metadata/{field}` — write one metadata
 /// register, which is refused while a recording is in progress.
 #[utoipa::path(
     put,
     path = "/devices/{id}/metadata/{field}",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device id."),
         ("field" = String, Path, example = "TITLE",
@@ -455,7 +471,7 @@ pub async fn pause_recording(
              metadata is sealed for the current epoch. Stop the recording, or write \
              the field before the next one starts.", body = ApiError),
         (status = 404, description = "No device has this id, or the id names a \
-             device group — which is refused here and carries the `/v1/commands/groups` URL \
+             device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
              are claims about the devices file.",
          body = ApiError),
@@ -464,7 +480,7 @@ pub async fn pause_recording(
 )]
 pub async fn set_metadata(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
     body: web::Json<ValueWrite>,
@@ -491,13 +507,13 @@ pub async fn set_metadata(
     .await
 }
 
-/// `PUT /v1/commands/devices/{id}/settings/{field}` — write one device setting,
+/// `PUT /v1/writings/devices/{id}/settings/{field}` — write one device setting,
 /// which is accepted in every phase.
 #[utoipa::path(
     put,
     path = "/devices/{id}/settings/{field}",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device id."),
         ("field" = String, Path, example = "TIMEZONE",
@@ -509,7 +525,7 @@ pub async fn set_metadata(
         (status = 202, description = "Recorded. Settings carry no recording freeze, so \
              this is accepted in every phase.", body = Acceptance),
         (status = 404, description = "No device has this id, or the id names a \
-             device group — which is refused here and carries the `/v1/commands/groups` URL \
+             device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
              are claims about the devices file.",
          body = ApiError),
@@ -518,7 +534,7 @@ pub async fn set_metadata(
 )]
 pub async fn set_setting(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
     body: web::Json<ValueWrite>,
@@ -542,41 +558,41 @@ pub async fn set_setting(
     .await
 }
 
-/// `GET /v1/commands/{id}` — what became of one submitted command.
+/// `GET /v1/writings/{id}` — what became of one submitted writing.
 ///
 /// The one route in this scope addressed by neither a device nor a group, and
-/// so the one mounted directly on the scope root: a command id is globally
+/// so the one mounted directly on the scope root: a writing id is globally
 /// unique, so it needs no device to address it. That is also why it is
-/// registered *last* — within the scope, `/v1/commands/{id}` is one segment
-/// where `/v1/commands/devices/…` and `/v1/commands/groups/…` are two or more,
+/// registered *last* — within the scope, `/v1/writings/{id}` is one segment
+/// where `/v1/writings/devices/…` and `/v1/writings/groups/…` are two or more,
 /// so it can only ever catch what the others did not.
 #[utoipa::path(
     get,
     path = "/{id}",
-    context_path = "/v1/commands",
-    tag = "commands",
-    params(("id" = String, Path, description = "Command id, as returned by a 202.")),
+    context_path = "/v1/writings",
+    tag = "writings",
+    params(("id" = String, Path, description = "Writing id, as returned by a 202.")),
     responses(
-        (status = 200, description = "The command and its current status.",
-         body = CommandRecord),
-        (status = 404, description = "No command has this id. Unlike the readings \
+        (status = 200, description = "The writing and its current status.",
+         body = WritingRecord),
+        (status = 404, description = "No writing has this id. Unlike the readings \
              routes' 404, this one *is* a claim about existence: an id is only ever \
              minted by an accepted submission.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
-pub async fn read_command(
-    log: web::Data<dyn CommandLog>,
+pub async fn read_writing(
+    log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
-) -> Result<web::Json<CommandRecord>, ApiFailure> {
+) -> Result<web::Json<WritingRecord>, ApiFailure> {
     let id = path.into_inner();
-    log.command(id.clone())
+    log.writing(id.clone())
         .await?
         .map(web::Json)
-        .ok_or_else(|| ApiFailure::NotFound(format!("no command '{id}'")))
+        .ok_or_else(|| ApiFailure::NotFound(format!("no writing '{id}'")))
 }
 
-/// `GET /v1/commands/devices/{id}/recording` — the write side's phase and
+/// `GET /v1/writings/devices/{id}/recording` — the write side's phase and
 /// epoch.
 ///
 /// What the *outbox* believes, which is not the same as what the device last
@@ -586,8 +602,8 @@ pub async fn read_command(
 #[utoipa::path(
     get,
     path = "/devices/{id}/recording",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(("id" = String, Path, description = "Device id.")),
     responses(
         (status = 200, description = "The phase the write side has accepted, and the \
@@ -596,86 +612,87 @@ pub async fn read_command(
              exists.", body = RecordingPhase),
         (status = 404, description = "This id names a device group. The outbox keys \
              its logs by device, so this route would report `idle` at epoch 0 for a \
-             group whose members are recording; `/v1/commands/groups/{id}/recording` is the \
+             group whose members are recording; `/v1/writings/groups/{id}/recording` is the \
              answer.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn read_phase(
     catalog: web::Data<dyn DeviceCatalog>,
-    log: web::Data<dyn CommandLog>,
+    log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
 ) -> Result<web::Json<RecordingPhase>, ApiFailure> {
     let device = path.into_inner();
     // The route that made the refusal necessary. The outbox has no log under a
     // group id, so without this it answers `idle` at epoch 0 for a device group
     // whose members are recording — see `crate::handlers::target`.
-    reject_group(&**catalog, &device, COMMANDS, "recording").await?;
+    reject_group(&**catalog, &device, WRITINGS, "recording").await?;
     Ok(web::Json(log.phase(device).await?))
 }
 
-/// `GET /v1/commands/devices/{id}/commands` — everything this device has been
+/// `GET /v1/writings/devices/{id}/history` — everything this device has been
 /// asked to do, newest first.
 #[utoipa::path(
     get,
-    path = "/devices/{id}/commands",
-    context_path = "/v1/commands",
-    tag = "commands",
+    path = "/devices/{id}/history",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(("id" = String, Path, description = "Device id.")),
     responses(
-        (status = 200, description = "Every command recorded for this device, newest \
-             first. An unknown device yields an empty list.", body = CommandList),
+        (status = 200, description = "Every writing recorded for this device — lifecycle, \
+             metadata and settings alike — newest first. An unknown device yields an \
+             empty list.", body = WritingList),
         (status = 404, description = "This id names a device group, whose members each \
-             hold their own queue; `/v1/commands/groups/{id}/commands` is the answer.",
+             hold their own queue; `/v1/writings/groups/{id}/history` is the answer.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
-pub async fn list_commands(
+pub async fn list_writings(
     catalog: web::Data<dyn DeviceCatalog>,
-    log: web::Data<dyn CommandLog>,
+    log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
-) -> Result<web::Json<CommandList>, ApiFailure> {
+) -> Result<web::Json<WritingList>, ApiFailure> {
     let device = path.into_inner();
     // As on the phase route: a group id has no log, so the honest answer is a
     // redirection rather than an empty list.
-    reject_group(&**catalog, &device, COMMANDS, "commands").await?;
-    let commands = log.commands_for(device).await?;
-    Ok(web::Json(CommandList { commands }))
+    reject_group(&**catalog, &device, WRITINGS, "history").await?;
+    let writings = log.writings_for(device).await?;
+    Ok(web::Json(WritingList { writings }))
 }
 
 // ---- the same five verbs, addressed to a device group ---------------------
 
-/// `POST /v1/commands/groups/{id}/recording/start` — begin a recording on every
+/// `POST /v1/writings/groups/{id}/recording/start` — begin a recording on every
 /// member, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/start",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device group id, as written in the devices file."),
         ("Idempotency-Key" = Option<String>, Header,
-         description = "Repeat this on a retry and the original commands are returned \
+         description = "Repeat this on a retry and the original writings are returned \
              rather than a second recording started. Scoped to the group's first \
              member, so one key answers for the whole submission."),
     ),
     responses(
-        (status = 202, description = "Recorded, one command per member. The three \
+        (status = 202, description = "Recorded, one writing per member. The three \
              lifecycle verbs are expanded under a rendezvous, so `batch` is set and no \
              member is dispatched until every one is ready.", body = Acceptance),
         (status = 409, description = "One member refused, so the whole submission was \
              refused and nothing was recorded — admission is across every member at \
              once. The body names the member and its phase.", body = ApiError),
         (status = 404, description = "No device group has this id. A device id here is \
-             this same 404, with the `/v1/commands/devices` URL that would have worked.",
+             this same 404, with the `/v1/writings/devices` URL that would have worked.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
 pub async fn start_group_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -692,13 +709,13 @@ pub async fn start_group_recording(
     .await
 }
 
-/// `POST /v1/commands/groups/{id}/recording/stop` — end every member's
+/// `POST /v1/writings/groups/{id}/recording/stop` — end every member's
 /// recording, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/stop",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device group id."),
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
@@ -713,7 +730,7 @@ pub async fn start_group_recording(
 )]
 pub async fn stop_group_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -730,13 +747,13 @@ pub async fn stop_group_recording(
     .await
 }
 
-/// `POST /v1/commands/groups/{id}/recording/pause` — suspend every member's
+/// `POST /v1/writings/groups/{id}/recording/pause` — suspend every member's
 /// recording, under a rendezvous.
 #[utoipa::path(
     post,
     path = "/groups/{id}/recording/pause",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device group id."),
         ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
@@ -751,7 +768,7 @@ pub async fn stop_group_recording(
 )]
 pub async fn pause_group_recording(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<String>,
     key: IdempotencyKey,
@@ -768,13 +785,13 @@ pub async fn pause_group_recording(
     .await
 }
 
-/// `PUT /v1/commands/groups/{id}/metadata/{field}` — write one metadata
+/// `PUT /v1/writings/groups/{id}/metadata/{field}` — write one metadata
 /// register on every member, with no rendezvous.
 #[utoipa::path(
     put,
     path = "/groups/{id}/metadata/{field}",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device group id."),
         ("field" = String, Path, example = "TITLE",
@@ -783,7 +800,7 @@ pub async fn pause_group_recording(
     ),
     request_body = ValueWrite,
     responses(
-        (status = 202, description = "Recorded, one command per member. Expanded \
+        (status = 202, description = "Recorded, one writing per member. Expanded \
              *without* a rendezvous: writing the same title to two recorders is the \
              same result whenever each one happens, so `batch` is null and no member \
              waits on a barrier it has no use for.", body = Acceptance),
@@ -796,7 +813,7 @@ pub async fn pause_group_recording(
 )]
 pub async fn set_group_metadata(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
     body: web::Json<ValueWrite>,
@@ -820,13 +837,13 @@ pub async fn set_group_metadata(
     .await
 }
 
-/// `PUT /v1/commands/groups/{id}/settings/{field}` — write one setting on every
+/// `PUT /v1/writings/groups/{id}/settings/{field}` — write one setting on every
 /// member, with no rendezvous.
 #[utoipa::path(
     put,
     path = "/groups/{id}/settings/{field}",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(
         ("id" = String, Path, description = "Device group id."),
         ("field" = String, Path, example = "TIMEZONE",
@@ -835,7 +852,7 @@ pub async fn set_group_metadata(
     ),
     request_body = ValueWrite,
     responses(
-        (status = 202, description = "Recorded, one command per member. Settings carry \
+        (status = 202, description = "Recorded, one writing per member. Settings carry \
              no recording freeze and no rendezvous, so this is accepted in every \
              phase.", body = Acceptance),
         (status = 404, description = "No device group has this id.", body = ApiError),
@@ -844,7 +861,7 @@ pub async fn set_group_metadata(
 )]
 pub async fn set_group_setting(
     catalog: web::Data<dyn DeviceCatalog>,
-    port: web::Data<dyn CommandSubmit>,
+    port: web::Data<dyn WritingSubmit>,
     stamp: web::Data<Stamp>,
     path: web::Path<(String, String)>,
     body: web::Json<ValueWrite>,
@@ -868,7 +885,7 @@ pub async fn set_group_setting(
     .await
 }
 
-/// `GET /v1/commands/groups/{id}/recording` — every member's phase, and the one
+/// `GET /v1/writings/groups/{id}/recording` — every member's phase, and the one
 /// they agree on.
 ///
 /// Not an alias of the device route with a group id, and cannot be: the outbox
@@ -883,8 +900,8 @@ pub async fn set_group_setting(
 #[utoipa::path(
     get,
     path = "/groups/{id}/recording",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(("id" = String, Path, description = "Device group id.")),
     responses(
         (status = 200, description = "Every member's accepted phase and epoch, plus \
@@ -898,11 +915,11 @@ pub async fn set_group_setting(
 )]
 pub async fn read_group_phase(
     catalog: web::Data<dyn DeviceCatalog>,
-    log: web::Data<dyn CommandLog>,
+    log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
 ) -> Result<web::Json<GroupPhase>, ApiFailure> {
     let group = path.into_inner();
-    let member_ids = group_members(&**catalog, &group, COMMANDS, "recording").await?;
+    let member_ids = group_members(&**catalog, &group, WRITINGS, "recording").await?;
 
     let mut members = Vec::with_capacity(member_ids.len());
     for device in member_ids {
@@ -928,7 +945,7 @@ pub async fn read_group_phase(
     }))
 }
 
-/// `GET /v1/commands/groups/{id}/commands` — what each member has been asked to
+/// `GET /v1/writings/groups/{id}/history` — what each member has been asked to
 /// do, newest first within each member.
 ///
 /// Partitioned rather than merged, for the reason the device route is a flat
@@ -937,31 +954,31 @@ pub async fn read_group_phase(
 /// ties one group-addressed request back together across members.
 #[utoipa::path(
     get,
-    path = "/groups/{id}/commands",
-    context_path = "/v1/commands",
-    tag = "commands",
+    path = "/groups/{id}/history",
+    context_path = "/v1/writings",
+    tag = "writings",
     params(("id" = String, Path, description = "Device group id.")),
     responses(
-        (status = 200, description = "One command list per member, newest first, in \
+        (status = 200, description = "One writing list per member, newest first, in \
              configured order. A member that has been asked nothing carries an empty \
-             list rather than being omitted.", body = GroupCommandList),
+             list rather than being omitted.", body = GroupWritingList),
         (status = 404, description = "No device group has this id.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
-pub async fn list_group_commands(
+pub async fn list_group_writings(
     catalog: web::Data<dyn DeviceCatalog>,
-    log: web::Data<dyn CommandLog>,
+    log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
-) -> Result<web::Json<GroupCommandList>, ApiFailure> {
+) -> Result<web::Json<GroupWritingList>, ApiFailure> {
     let group = path.into_inner();
-    let member_ids = group_members(&**catalog, &group, COMMANDS, "commands").await?;
+    let member_ids = group_members(&**catalog, &group, WRITINGS, "history").await?;
 
     let mut members = Vec::with_capacity(member_ids.len());
     for device in member_ids {
-        let commands = log.commands_for(device.clone()).await?;
-        members.push(MemberCommands { device, commands });
+        let writings = log.writings_for(device.clone()).await?;
+        members.push(MemberWritings { device, writings });
     }
 
-    Ok(web::Json(GroupCommandList { group, members }))
+    Ok(web::Json(GroupWritingList { group, members }))
 }

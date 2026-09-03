@@ -2,15 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sismatic_api_types::{
-    Acceptance, Barrier, BatchId, CommandId, CommandRecord, DeviceId, GroupId, Intent, Phase,
-    ReadingValue, RecordingPhase, RecordingState, Rejection, Timestamp,
+    Acceptance, Barrier, BatchId, DeviceId, GroupId, Intent, Phase, ReadingValue, RecordingPhase,
+    RecordingState, Rejection, Timestamp, WritingId, WritingRecord,
 };
 
 use crate::{ReadError, WriteError};
 
-pub type DynCommandSubmit = Arc<dyn CommandSubmit>;
-pub type DynCommandLog = Arc<dyn CommandLog>;
-pub type DynCommandDrain = Arc<dyn CommandDrain>;
+pub type DynWritingSubmit = Arc<dyn WritingSubmit>;
+pub type DynWritingLog = Arc<dyn WritingLog>;
+pub type DynWritingDrain = Arc<dyn WritingDrain>;
 
 /// Everything one submission carries, grouped because the values are only
 /// meaningful together and an adapter needs all of them inside one critical
@@ -27,7 +27,7 @@ pub struct Submission {
     /// One id per target, in the same order, minted by the caller so a retry
     /// can carry the same ids. An adapter must reject a length mismatch rather
     /// than zipping the shorter of the two.
-    pub ids: Vec<CommandId>,
+    pub ids: Vec<WritingId>,
     pub targets: Vec<DeviceId>,
     /// The group this request was addressed to, when it was addressed to one.
     ///
@@ -52,7 +52,7 @@ pub struct Submission {
     pub intent: Intent,
     pub at: Timestamp,
     /// When present, a repeat submission with the same `(device, key)` returns
-    /// the original command instead of appending a second one.
+    /// the original writing instead of appending a second one.
     pub idempotency_key: Option<String>,
 }
 
@@ -63,7 +63,7 @@ pub struct BarrierPolicy {
     pub on_timeout: Barrier,
 }
 
-/// Why a submission did not become a queued command.
+/// Why a submission did not become a queued writing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
     /// The admission table refused it.
@@ -87,7 +87,7 @@ pub enum SubmitError {
 
 /// Appending intent. The only write capability the HTTP layer is given.
 #[async_trait::async_trait]
-pub trait CommandSubmit: Send + Sync {
+pub trait WritingSubmit: Send + Sync {
     /// Admit `submission` against the device's current phase and, if admitted,
     /// append it to that device's queue.
     ///
@@ -108,11 +108,11 @@ pub trait CommandSubmit: Send + Sync {
 /// Reading what was submitted. Absence is never an error, matching
 /// [`ReadStore`](crate::ReadStore).
 #[async_trait::async_trait]
-pub trait CommandLog: Send + Sync {
-    async fn command(&self, id: CommandId) -> Result<Option<CommandRecord>, ReadError>;
+pub trait WritingLog: Send + Sync {
+    async fn writing(&self, id: WritingId) -> Result<Option<WritingRecord>, ReadError>;
 
-    /// Every command recorded for `device`, newest first.
-    async fn commands_for(&self, device: DeviceId) -> Result<Vec<CommandRecord>, ReadError>;
+    /// Every writing recorded for `device`, newest first.
+    async fn writings_for(&self, device: DeviceId) -> Result<Vec<WritingRecord>, ReadError>;
 
     /// The device's phase and epoch. An unknown device reports
     /// `Phase::Idle` at epoch 0, for the same reason `latest` reports `None`:
@@ -144,15 +144,15 @@ pub enum Outcome {
 /// What a claim yielded.
 ///
 /// Two cases rather than always a `Vec`, because the caller does genuinely
-/// different things with them: a lone command goes to `Device::run`, a batch
+/// different things with them: a lone writing goes to `Device::run`, a batch
 /// goes to `DeviceGroup::run` so the members act in unison. Collapsing them
 /// into a one-element list would put the "is this really a group" branch back
 /// in the relay, decided by a length rather than by the outbox that armed the
 /// rendezvous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Claim {
-    /// One command for the device that asked. The ordinary path.
-    One(CommandRecord),
+    /// One writing for the device that asked. The ordinary path.
+    One(WritingRecord),
     /// A whole batch, handed to the member whose arrival completed the barrier
     /// (or whose tick found it timed out under [`Barrier::DispatchReady`]).
     ///
@@ -171,14 +171,14 @@ pub enum Claim {
         ///
         /// Under `DispatchReady` after a timeout this is a *subset* of the
         /// batch: the members that never arrived are not included.
-        records: Vec<CommandRecord>,
+        records: Vec<WritingRecord>,
     },
 }
 
 /// Draining the queue. Held only by `sismatic-intent-relay`.
 #[async_trait::async_trait]
-pub trait CommandDrain: Send + Sync {
-    /// Take the oldest claimable command for `device`, mark it `InFlight`, and
+pub trait WritingDrain: Send + Sync {
+    /// Take the oldest claimable writing for `device`, mark it `InFlight`, and
     /// return it.
     ///
     /// FIFO order per device is part of this contract: a metadata write
@@ -187,7 +187,7 @@ pub trait CommandDrain: Send + Sync {
     /// A batched row at the head of a device's queue is *not* claimable until
     /// every sibling has reached the head of its own queue. Until then this
     /// answers `None` — and it must leave that row where it is rather than
-    /// setting it aside, because the command behind it would otherwise
+    /// setting it aside, because the writing behind it would otherwise
     /// overtake, which is the exact reordering per-device FIFO exists to
     /// prevent. When the last member arrives, that member's call returns
     /// [`Claim::Batch`] carrying every row.
@@ -197,12 +197,12 @@ pub trait CommandDrain: Send + Sync {
         at: Timestamp,
     ) -> Result<Option<Claim>, WriteError>;
 
-    /// Record what happened. A `Failed` outcome on a command whose recorded
+    /// Record what happened. A `Failed` outcome on a writing whose recorded
     /// transition moved the phase rolls that phase back, so a start that never
     /// reached the device does not freeze metadata forever.
     async fn settle(
         &self,
-        id: CommandId,
+        id: WritingId,
         outcome: Outcome,
         at: Timestamp,
     ) -> Result<(), WriteError>;
@@ -212,9 +212,9 @@ pub trait CommandDrain: Send + Sync {
     /// admission table.
     async fn observe(&self, device: DeviceId, observed: RecordingState) -> Result<(), WriteError>;
 
-    /// Commands left `InFlight` by a previous process. Returned so the relay
-    /// can decide per command whether to replay; see the recovery section.
-    async fn in_flight(&self, device: DeviceId) -> Result<Vec<CommandRecord>, WriteError>;
+    /// Writings left `InFlight` by a previous process. Returned so the relay
+    /// can decide per writing whether to replay; see the recovery section.
+    async fn in_flight(&self, device: DeviceId) -> Result<Vec<WritingRecord>, WriteError>;
 }
 
 /// An [`Intent`] with its payload stripped. The admission table depends on the
@@ -284,7 +284,7 @@ pub const fn opens_recording(before: Phase, after: Phase) -> bool {
     matches!((before, after), (Phase::Idle, Phase::Recording))
 }
 
-/// Undo the phase change a verb caused, for a command that failed terminally.
+/// Undo the phase change a verb caused, for a writing that failed terminally.
 ///
 /// Conservative by construction: it only moves back along the three transitions
 /// a failure can invalidate, and leaves every other phase alone. The point is
@@ -297,7 +297,7 @@ pub const fn opens_recording(before: Phase, after: Phase) -> bool {
 /// `Recording` (a start from idle and a resume from paused), so the phase alone
 /// does not say which one to undo. Rolling `Recording` back to `Idle` for a
 /// `Start` is right for the first and wrong for the second, and it is the safe
-/// direction of wrong — it unfreezes metadata that a failed command should not
+/// direction of wrong — it unfreezes metadata that a failed writing should not
 /// have frozen, rather than freezing metadata nothing is recording.
 pub const fn rollback(phase: Phase, verb: Verb) -> Phase {
     match (phase, verb) {
@@ -308,7 +308,7 @@ pub const fn rollback(phase: Phase, verb: Verb) -> Phase {
     }
 }
 
-/// The epoch a command admitted from `before` into `after` belongs to.
+/// The epoch a writing admitted from `before` into `after` belongs to.
 ///
 /// A metadata write admitted while idle is preparing the *next* recording, so
 /// it is stamped `epoch + 1` — the same number the `Start` that follows it

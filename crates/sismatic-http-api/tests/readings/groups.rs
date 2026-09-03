@@ -10,7 +10,7 @@
 //! failure mode a double is worst at.
 //!
 //! So every expectation below is created the way a client creates one: by
-//! POSTing to a group write route, over in the `/v1/commands` scope.
+//! POSTing to a group write route, over in the `/v1/writings` scope.
 //!
 //! [`MemoryOutbox`]: sismatic_store_memory::MemoryOutbox
 
@@ -51,7 +51,7 @@ async fn get(url: &str) -> reqwest::Response {
 async fn start_the_device_group(address: &str) {
     let status = reqwest::Client::new()
         .post(format!(
-            "{address}/v1/commands/groups/{GROUP}/recording/start"
+            "{address}/v1/writings/groups/{GROUP}/recording/start"
         ))
         .send()
         .await
@@ -218,10 +218,10 @@ async fn a_device_group_that_uniformly_ignored_the_request_is_still_drift() {
 }
 
 /// The case the expectation cannot see, and the reason `uniform` is reported
-/// beside it: nobody ever commanded firmware, and the device group is still
-/// wrong.
+/// beside it: nothing was ever written to firmware, and the device group is
+/// still wrong.
 #[tokio::test]
-async fn members_that_disagree_about_an_uncommanded_field_are_not_uniform() {
+async fn members_that_disagree_about_an_unwritten_field_are_not_uniform() {
     let address = spawn([
         reading(ATRIUM, "FIRMWARE", ReadingValue::Version("2.11".into())),
         reading(ANNEX, "FIRMWARE", ReadingValue::Version("2.09".into())),
@@ -238,10 +238,10 @@ async fn members_that_disagree_about_an_uncommanded_field_are_not_uniform() {
     assert!(body["expected"].is_null());
 }
 
-/// A group that has never been commanded reports `unknown`, not `in_sync`:
+/// A group nothing was ever written to reports `unknown`, not `in_sync`:
 /// agreement with nothing is not agreement.
 #[tokio::test]
-async fn an_uncommanded_group_is_unknown_rather_than_in_sync() {
+async fn a_group_nothing_was_written_to_is_unknown_rather_than_in_sync() {
     let address = spawn([
         state(ATRIUM, RecordingState::Started),
         state(ANNEX, RecordingState::Started),
@@ -267,7 +267,7 @@ async fn a_group_metadata_write_is_checked_against_what_the_members_echoed() {
     .await;
     let status = reqwest::Client::new()
         .put(format!(
-            "{address}/v1/commands/groups/{GROUP}/metadata/title"
+            "{address}/v1/writings/groups/{GROUP}/metadata/title"
         ))
         .json(&serde_json::json!({"value": "Week 4"}))
         .send()
@@ -299,7 +299,7 @@ async fn a_device_addressed_write_does_not_speak_for_the_room() {
     .await;
     let status = reqwest::Client::new()
         .post(format!(
-            "{address}/v1/commands/devices/{ATRIUM}/recording/start"
+            "{address}/v1/writings/devices/{ATRIUM}/recording/start"
         ))
         .send()
         .await
@@ -351,7 +351,7 @@ async fn the_index_covers_every_field_any_member_reported_ordered_by_name() {
 /// is what a write that reached nobody looks like — so it has to appear in the
 /// index even though the store holds nothing for it.
 #[tokio::test]
-async fn the_index_covers_a_commanded_field_no_member_has_reported() {
+async fn the_index_covers_a_written_field_no_member_has_reported() {
     let address = spawn([]).await;
     start_the_device_group(&address).await;
 

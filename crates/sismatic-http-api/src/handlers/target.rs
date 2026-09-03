@@ -17,8 +17,8 @@
 //! because that was the only way to address a device group before the group
 //! space existed. Keeping it would leave two URLs doing one write and — worse —
 //! two routes that *cannot* answer correctly for a group at all:
-//! `GET /v1/commands/devices/{id}/recording` and
-//! `GET /v1/commands/devices/{id}/commands` read an outbox keyed by device, so a
+//! `GET /v1/writings/devices/{id}/recording` and
+//! `GET /v1/writings/devices/{id}/history` read an outbox keyed by device, so a
 //! group id there takes a default and reports `idle` at epoch `0` with an empty
 //! queue. That is a confident answer about a device which does not exist, and no
 //! amount of documentation makes it safe.
@@ -33,7 +33,7 @@
 //! The counterpart URL is not a fixed prefix, because the two spaces are nested
 //! inside a scope: the group route that answers for
 //! `/v1/readings/devices/{id}/fields` is under `/v1/readings`, and the one that
-//! answers for `/v1/commands/devices/{id}/recording` is under `/v1/commands`. A
+//! answers for `/v1/writings/devices/{id}/recording` is under `/v1/writings`. A
 //! refusal built from the wrong prefix would send a caller to a second 404,
 //! which is worse than no hint at all — so the caller passes the scope it is
 //! mounted in, spelled with one of the constants below rather than a literal.
@@ -60,7 +60,7 @@ use crate::handlers::error::ApiFailure;
 pub const READINGS: &str = "readings";
 /// Asking a device or a device group to do something, and reading what was
 /// asked.
-pub const COMMANDS: &str = "commands";
+pub const WRITINGS: &str = "writings";
 /// What the server was configured with.
 pub const INVENTORY: &str = "inventory";
 
@@ -73,7 +73,7 @@ pub const INVENTORY: &str = "inventory";
 /// lookup is [`DeviceCatalog::group`].
 ///
 /// `scope` is the segment this route is mounted under — [`READINGS`] or
-/// [`COMMANDS`] — and `device_route` the tail of the `/devices` route inside it
+/// [`WRITINGS`] — and `device_route` the tail of the `/devices` route inside it
 /// that answers the same question.
 pub(crate) async fn group_members(
     catalog: &dyn DeviceCatalog,

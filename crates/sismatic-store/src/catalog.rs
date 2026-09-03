@@ -14,10 +14,10 @@
 //!
 //! # Why the write side needs it
 //!
-//! Without a catalog, `POST /v1/commands/devices/typo/recording/start` is accepted: the
+//! Without a catalog, `POST /v1/writings/devices/typo/recording/start` is accepted: the
 //! outbox holds what was submitted and no list of what exists, so it admits the
-//! command against a fresh idle phase and answers `202`. The caller then learns
-//! its recording never started by polling a command that fails at dispatch,
+//! writing against a fresh idle phase and answers `202`. The caller then learns
+//! its recording never started by polling a writing that fails at dispatch,
 //! minutes later, with a message about an unknown device. A `404` at submission
 //! is the same information, delivered when it is still actionable.
 //!
@@ -70,7 +70,7 @@ pub trait DeviceCatalog: Send + Sync {
     /// One group by id, or `None` if no group has it.
     async fn group(&self, id: &str) -> Option<GroupSummary>;
 
-    /// Whether `id` names something a command can be addressed to.
+    /// Whether `id` names something a writing can be addressed to.
     ///
     /// A provided method rather than a fourth thing an adapter implements, so
     /// "this id is addressable" cannot come to mean something different from
@@ -85,7 +85,7 @@ pub trait DeviceCatalog: Send + Sync {
     /// the order they were configured. `None` if `id` names neither.
     ///
     /// A device answers with a one-element list rather than `None` so a caller
-    /// fanning a command out does not have to ask which kind of id it holds —
+    /// fanning a writing out does not have to ask which kind of id it holds —
     /// which is the shape the group write path needs.
     async fn members(&self, id: &str) -> Option<Vec<DeviceId>> {
         if self.device(id).await.is_some() {

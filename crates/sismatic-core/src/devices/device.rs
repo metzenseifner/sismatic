@@ -111,9 +111,9 @@ struct Link {
 /// different next move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connectivity {
-    /// A connection is open and idle. The next command reuses it.
+    /// A connection is open and idle. The next exchange reuses it.
     Warm,
-    /// A command is in flight on this device.
+    /// An exchange is in flight on this device.
     ///
     /// A distinct state rather than folded into [`Warm`](Connectivity::Warm),
     /// because it is what the observation can actually support: the connection
@@ -124,8 +124,8 @@ pub enum Connectivity {
     /// No connection is open and nothing says one would fail. The ordinary
     /// resting state of a device that is not marked `eager`.
     Cold,
-    /// No connection, and a recent dial failed: the cold gate is shut, so a
-    /// command issued now fails without even dialing.
+    /// No connection, and a recent dial failed: the cold gate is shut, so an
+    /// exchange issued now fails without even dialing.
     ///
     /// The one state that says *the device is down* rather than merely idle,
     /// which is the distinction [`Cold`](Connectivity::Cold) cannot draw.
@@ -152,7 +152,7 @@ pub struct Device {
 }
 
 impl Device {
-    /// Create a device that will connect lazily on its first command.
+    /// Create a device that will connect lazily on its first exchange.
     pub fn new(config: DeviceConfig, connector: Arc<dyn Connector>) -> Self {
         Self {
             config,
@@ -185,10 +185,10 @@ impl Device {
     ///
     /// `try_lock` and not `lock().await`, because a status read must never
     /// queue behind an SSH exchange. A `GET` over a fleet mid-poll would
-    /// otherwise take `command_timeout` per busy device, and an endpoint that
+    /// otherwise take `exchange_timeout` per busy device, and an endpoint that
     /// reports on a slow device by *being* slow is the failure it exists to
-    /// describe. A held lock is not a missing answer, either — it means a
-    /// command is running, which is [`Busy`](Connectivity::Busy).
+    /// describe. A held lock is not a missing answer, either — it means
+    /// an exchange is running, which is [`Busy`](Connectivity::Busy).
     ///
     /// Synchronous, so it composes into an `async` caller without an await
     /// point and cannot accidentally become a blocking one.
@@ -330,7 +330,7 @@ impl Device {
                 )));
             }
         };
-        Ok(Controller::new(transport, self.config.command_timeout))
+        Ok(Controller::new(transport, self.config.exchange_timeout))
     }
 }
 
@@ -365,7 +365,7 @@ mod tests {
             username: "admin".into(),
             password: "extron".into(),
             connect_timeout: Duration::from_millis(connect_ms),
-            command_timeout: Duration::from_millis(500),
+            exchange_timeout: Duration::from_millis(500),
             eager: false,
             sis_keepalive: None,
             eager_retry: None,
@@ -436,7 +436,7 @@ mod tests {
 
     /// The retry exists to heal a socket that died while idle. A refusal is not
     /// that, and re-asking a question the device has already declined would only
-    /// double its cost — on a stalling channel, double the `command_timeout`.
+    /// double its cost — on a stalling channel, double the `exchange_timeout`.
     #[tokio::test]
     async fn a_refused_command_is_not_retried() {
         // Only one scripted reply. A retry would find the channel closed and
@@ -823,7 +823,7 @@ mod tests {
 
     /// The property the whole design turns on: a status read never waits for a
     /// command. Were this `lock().await`, a `GET` over a fleet mid-poll would
-    /// take `command_timeout` per busy device — an endpoint reporting on a slow
+    /// take `exchange_timeout` per busy device — an endpoint reporting on a slow
     /// device by *being* slow.
     #[tokio::test]
     async fn a_status_read_does_not_wait_for_an_in_flight_command() {

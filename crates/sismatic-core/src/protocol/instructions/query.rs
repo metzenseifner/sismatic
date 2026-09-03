@@ -70,7 +70,7 @@ instruction_catalog! {
         // catalog with no counterpart in `Setting`. A device with scheduling off
         // or unsupported answers the read with an error code rather than a
         // flag — see `SisError`, which is what keeps that from costing a
-        // `command_timeout` per poll.
+        // `exchange_timeout` per poll.
         //
         // Per target rather than per stream, because the wire addresses them
         // that way: a stream's primary push can be live while its backup is not,
@@ -357,7 +357,7 @@ fn plain_number() -> ParseFn {
 /// anchored on that head so the six could not be confused for one another. The
 /// device does not do this: it answers all six with a bare flag, the same as
 /// `STRC`. The anchor therefore never matched, and since a parser that cannot
-/// match simply asks for more bytes, each read spent the full `command_timeout`
+/// match simply asks for more bytes, each read spent the full `exchange_timeout`
 /// waiting for a reply that had already arrived.
 ///
 /// Nothing takes over the "keeps the six apart" job the anchor was doing,

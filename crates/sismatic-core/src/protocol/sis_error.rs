@@ -4,7 +4,7 @@
 //! replaces — the device sends `E` and two digits on a line of its own, with no
 //! echo of what was asked. That makes it invisible to an instruction's parser:
 //! a parser is written to recognise *its own* reply, so an error token is just
-//! bytes that never complete, and the exchange reads until `command_timeout`.
+//! bytes that never complete, and the exchange reads until `exchange_timeout`.
 //!
 //! # Why this lives outside the instruction catalog
 //!
@@ -78,7 +78,7 @@ impl SisError {
     /// A free-text field whose value is *exactly* `E13` is indistinguishable
     /// from a refusal, because SIS sends both as a bare line. That is the
     /// protocol's ambiguity, not this function's, and it is resolved the way
-    /// that loses least: a stream nobody named `E13` beats a `command_timeout`
+    /// that loses least: a stream nobody named `E13` beats a `exchange_timeout`
     /// on every poll of a field the device refuses.
     pub fn in_reply(buffer: &str) -> Option<Self> {
         // Everything up to and including the last terminator; a trailing

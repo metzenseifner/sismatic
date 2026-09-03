@@ -5,7 +5,7 @@
 //! reply to that instruction's streaming parser until a complete [`Value`] is
 //! parsed. It owns the connection but no policy — reconnecting, caching, and
 //! locking are the device layer's job. The only time limit it enforces is
-//! `command_timeout`, the deadline for a single exchange.
+//! `exchange_timeout`, the deadline for a single exchange.
 //!
 //! The reply is accumulated as raw bytes and only the valid-UTF-8 prefix is
 //! handed to the parser each round, so a reply arriving in fragments — even one
@@ -26,7 +26,7 @@ use super::transport::{Transport, TransportError};
 /// an early close — but it is, after a [`Rejected`](ControllerError::Rejected)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerError {
-    /// No complete reply arrived within `command_timeout`.
+    /// No complete reply arrived within `exchange_timeout`.
     Timeout {
         instruction: String,
         after: Duration,
@@ -77,32 +77,32 @@ impl std::error::Error for ControllerError {}
 /// Owns one open connection and runs instructions over it.
 pub struct Controller {
     transport: Box<dyn Transport>,
-    command_timeout: Duration,
+    exchange_timeout: Duration,
 }
 
 impl Controller {
-    /// Wrap an open transport. `command_timeout` bounds each [`run`](Self::run).
-    pub fn new(transport: Box<dyn Transport>, command_timeout: Duration) -> Self {
+    /// Wrap an open transport. `exchange_timeout` bounds each [`run`](Self::run).
+    pub fn new(transport: Box<dyn Transport>, exchange_timeout: Duration) -> Self {
         Self {
             transport,
-            command_timeout,
+            exchange_timeout,
         }
     }
 
     /// Send `instruction` and return the parsed reply, or fail if the exchange
     /// times out, the channel closes, or the transport errors.
     pub async fn run(&mut self, instruction: &Instruction) -> Result<Value, ControllerError> {
-        match tokio::time::timeout(self.command_timeout, self.exchange(instruction)).await {
+        match tokio::time::timeout(self.exchange_timeout, self.exchange(instruction)).await {
             Ok(result) => result,
             Err(_elapsed) => Err(ControllerError::Timeout {
                 instruction: instruction.name.clone(),
-                after: self.command_timeout,
+                after: self.exchange_timeout,
             }),
         }
     }
 
     /// The untimed write-then-read-until-complete loop. [`run`](Self::run) wraps
-    /// this in the command timeout.
+    /// this in the exchange timeout.
     async fn exchange(&mut self, instruction: &Instruction) -> Result<Value, ControllerError> {
         self.transport
             .write_all(instruction.payload.as_bytes())
@@ -132,7 +132,7 @@ impl Controller {
             // Before the instruction's own parser, not after it, and the order
             // is the whole point. A refusal is a bare `E13\r\n`, which a parser
             // expecting a value either cannot match — and then reads until
-            // `command_timeout` on a reply that already arrived — or, for the
+            // `exchange_timeout` on a reply that already arrived — or, for the
             // free-text fields, matches all too well and stores `"E13"` as the
             // unit's name. Asking this first is what makes both impossible.
             if let Some(error) = SisError::in_reply(reply) {

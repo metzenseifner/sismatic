@@ -79,34 +79,40 @@ pub struct FieldCatalog {
     pub fields: Vec<InstructionSummary>,
 }
 
-/// Everything a write can name — the body of `GET /v1/commands`.
+/// Everything a write can name — the body of `GET /v1/writings`.
 ///
 /// Three lists rather than one, because the three reach devices through three
 /// different routes and are governed by different rules. Flattening them would
 /// hand a caller a hundred names and no way to tell which of them
-/// `PUT /v1/commands/devices/{id}/settings/{field}` will accept — which is the
+/// `PUT /v1/writings/devices/{id}/settings/{field}` will accept — which is the
 /// question the list exists to answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CommandCatalog {
-    /// The recording lifecycle instructions.
+pub struct WritingsCatalog {
+    /// The recording lifecycle instructions — and the one place in this API
+    /// where the word *command* still means what `sismatic-core` means by it.
+    ///
+    /// Every route under `/v1/writings` submits a writing; only these three are
+    /// commands. Beside `metadata` and `settings` the word is unambiguous
+    /// again, which is the whole reason the scope is not called `/v1/commands`
+    /// any more: out there it named the union and told a caller nothing.
     ///
     /// The one list whose names are *not* spelled in a URL: each is invoked by
-    /// its own route — `POST /v1/commands/devices/{id}/recording/start` and the
+    /// its own route — `POST /v1/writings/devices/{id}/recording/start` and the
     /// two beside it — rather than by being passed as a parameter. They are
     /// reported because they are what those routes send, so a reader can tie a
-    /// `succeeded` command's echo back to an instruction, and because "what can
+    /// `succeeded` writing's echo back to an instruction, and because "what can
     /// this server ask a recorder to do" is answerable in no other way.
     pub commands: Vec<InstructionSummary>,
     /// The metadata registers, whose names go in the `{field}` of
-    /// `PUT /v1/commands/devices/{id}/metadata/{field}`.
+    /// `PUT /v1/writings/devices/{id}/metadata/{field}`.
     ///
     /// Writable only while nothing is recording — a write to one of these during
     /// a recording is refused with `metadata_frozen`.
     pub metadata: Vec<InstructionSummary>,
     /// The device settings, whose names go in the `{field}` of
-    /// `PUT /v1/commands/devices/{id}/settings/{field}`.
+    /// `PUT /v1/writings/devices/{id}/settings/{field}`.
     ///
     /// Writable in every phase. A name in this list is refused by the metadata
     /// route and vice versa: the split is what keeps the recording freeze from

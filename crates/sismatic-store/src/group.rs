@@ -18,7 +18,7 @@
 //!
 //! An expectation records it. It is written when the submission is *admitted*,
 //! in the same critical section, so it exists exactly when the request was
-//! accepted — and it is deliberately **not** rolled back when a command fails,
+//! accepted — and it is deliberately **not** rolled back when a writing fails,
 //! unlike [`rollback`](crate::outbox::rollback). The phase rolls back because
 //! it gates admission and a stuck phase would freeze metadata forever; the
 //! expectation gates nothing and is read by nobody but a dashboard, so leaving
@@ -67,7 +67,7 @@ pub const RECORDING_STATE_FIELD: &str = "RUNNING_STATE";
 /// and the only half the HTTP surface is given.
 ///
 /// Absence is never an error, matching [`ReadStore`](crate::ReadStore): a group
-/// nobody has commanded has no expectation, and that is an answer.
+/// nothing was ever written to has no expectation, and that is an answer.
 #[async_trait::async_trait]
 pub trait GroupState: Send + Sync {
     /// What `group` was last told `field` should be, or `None` if it has never

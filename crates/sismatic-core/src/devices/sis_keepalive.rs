@@ -171,7 +171,7 @@ mod tests {
             username: "admin".into(),
             password: "extron".into(),
             connect_timeout: Duration::from_millis(500),
-            command_timeout: Duration::from_millis(500),
+            exchange_timeout: Duration::from_millis(500),
             eager: true,
             sis_keepalive,
             eager_retry,

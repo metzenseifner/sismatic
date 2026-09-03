@@ -55,7 +55,7 @@ use sismatic_core::devices::registry::Registry;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_store::DynWriteStore;
-use sismatic_store::outbox::DynCommandDrain;
+use sismatic_store::outbox::DynWritingDrain;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +82,7 @@ pub struct SyncConfig {
     /// read side alone. The port is optional rather than a second `spawn`
     /// because one poll of `RUNNING_STATE` serves both readers, and polling it
     /// twice would double the exchanges on the field polled most often.
-    pub reconciler: Option<DynCommandDrain>,
+    pub reconciler: Option<DynWritingDrain>,
 }
 
 /// Hand-written rather than derived because `reconciler` is a trait object, and
@@ -128,7 +128,7 @@ impl SyncHandle {
     /// Signal every loop to stop and wait for the in-flight polls to drain.
     ///
     /// Cancellation is cooperative: a loop finishes its current SSH exchange
-    /// before exiting, rather than being aborted mid-command.
+    /// before exiting, rather than being aborted mid-exchange.
     ///
     /// Instrumented here rather than at the call site because this is where the
     /// two facts about a drain are known: how many loops are being waited on
@@ -168,7 +168,7 @@ pub fn spawn(registry: Arc<Registry>, write: DynWriteStore, cfg: SyncConfig) -> 
     // Announced once rather than per loop: whether a field reconciler exists is a
     // property of the deployment, not of a device.
     if cfg.reconciler.is_some() {
-        info!("observed recording states will be reported to the command outbox");
+        info!("observed recording states will be reported to the writing outbox");
     }
 
     for device in registry.devices() {
@@ -201,7 +201,7 @@ async fn poll_loop(
     device: Arc<Device>,
     field: String,
     write: DynWriteStore,
-    reconciler: Option<DynCommandDrain>,
+    reconciler: Option<DynWritingDrain>,
     interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -407,13 +407,13 @@ mod tests {
 
     // The wire `RecordingState`, not core's: `observe` takes what
     // `dto::state_to_dto` produces.
-    use sismatic_api_types::{CommandId, CommandRecord, DeviceId, Reading, RecordingState};
+    use sismatic_api_types::{DeviceId, Reading, RecordingState, WritingId, WritingRecord};
     use sismatic_core::devices::config::DeviceConfig;
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::connector::{ConnectError, Connector};
     use sismatic_core::devices::transport::Transport;
     use sismatic_core::devices::transport::fake::FakeTransport;
-    use sismatic_store::outbox::{Claim, CommandDrain, Outcome};
+    use sismatic_store::outbox::{Claim, Outcome, WritingDrain};
     use sismatic_store::{WriteError, WriteStore};
 
     use super::*;
@@ -442,7 +442,7 @@ mod tests {
         }
     }
 
-    /// A [`CommandDrain`] that records what was observed and does nothing else.
+    /// A [`WritingDrain`] that records what was observed and does nothing else.
     /// A poll loop only ever calls `observe`; the other three methods belong to
     /// the relay, and stubbing them `Ok`-and-empty rather than `unimplemented!`
     /// means a loop that wrongly reached for one fails an assertion here rather
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl CommandDrain for RecordingReconciler {
+    impl WritingDrain for RecordingReconciler {
         async fn claim_next(
             &self,
             _device: DeviceId,
@@ -470,7 +470,7 @@ mod tests {
 
         async fn settle(
             &self,
-            _id: CommandId,
+            _id: WritingId,
             _outcome: Outcome,
             _at: Timestamp,
         ) -> Result<(), WriteError> {
@@ -486,7 +486,7 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight(&self, _device: DeviceId) -> Result<Vec<CommandRecord>, WriteError> {
+        async fn in_flight(&self, _device: DeviceId) -> Result<Vec<WritingRecord>, WriteError> {
             Ok(Vec::new())
         }
     }
@@ -499,7 +499,7 @@ mod tests {
             username: "admin".into(),
             password: "extron".into(),
             connect_timeout: Duration::from_millis(500),
-            command_timeout: Duration::from_millis(500),
+            exchange_timeout: Duration::from_millis(500),
             eager: false,
             sis_keepalive: None,
             eager_retry: None,

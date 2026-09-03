@@ -4,7 +4,7 @@
 //! the injection seam for the network: production uses an SSH connector, tests
 //! use [`fake::CountingConnector`], and the [`Device`](super::device::Device)
 //! layer above is identical either way. Connecting is separated from running
-//! commands so that the connect timeout and the command timeout stay distinct
+//! instructions so that the connect timeout and the exchange timeout stay distinct
 //! concerns.
 
 use std::fmt;

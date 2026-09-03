@@ -20,17 +20,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{
-    Barrier, CommandCatalog, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary,
-    InstructionSummary, Timestamp,
+    Barrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary, InstructionSummary,
+    Timestamp, WritingsCatalog,
 };
 use sismatic_http_api::Stamp;
 use sismatic_store::group::DynGroupState;
-use sismatic_store::outbox::{DynCommandLog, DynCommandSubmit};
+use sismatic_store::outbox::{DynWritingLog, DynWritingSubmit};
 use sismatic_store::status::DeviceStatus;
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox};
 
-/// The instant every submitted command is stamped with. Fixed, because no
+/// The instant every submitted writing is stamped with. Fixed, because no
 /// assertion here is about time passing, and a real clock would put an
 /// unpredictable value in a body a test wants to compare whole.
 pub const AT: &str = "2026-08-17T00:00:00.000Z";
@@ -39,7 +39,7 @@ pub const AT: &str = "2026-08-17T00:00:00.000Z";
 ///
 /// The whole reason [`Stamp`] is injected. With a UUID a test can assert that
 /// *an* id came back and that the `Location` header contains *something*; with
-/// a counter it can assert the header names the command the body does, and that
+/// a counter it can assert the header names the writing the body does, and that
 /// a second submission got a second id rather than reusing the first.
 pub fn counting_stamp() -> Stamp {
     let issued = AtomicUsize::new(0);
@@ -122,8 +122,8 @@ pub fn field_catalog() -> FieldCatalog {
 }
 
 /// The write-side catalog the suites run against unless they state their own.
-pub fn command_catalog() -> CommandCatalog {
-    CommandCatalog {
+pub fn writings_catalog() -> WritingsCatalog {
+    WritingsCatalog {
         commands: vec![instruction(
             "STARTRECORDING",
             &["START"],
@@ -168,7 +168,7 @@ pub fn serve_with_status(
         catalog,
         status,
         field_catalog(),
-        command_catalog(),
+        writings_catalog(),
     )
 }
 
@@ -186,13 +186,13 @@ pub fn serve_all(
     catalog: MemoryCatalog,
     status: StatedStatus,
     fields: FieldCatalog,
-    commands: CommandCatalog,
+    writings: WritingsCatalog,
 ) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
     let status: DynDeviceStatus = Arc::new(status);
-    let submit: DynCommandSubmit = Arc::new(outbox.clone());
-    let log: DynCommandLog = Arc::new(outbox.clone());
+    let submit: DynWritingSubmit = Arc::new(outbox.clone());
+    let log: DynWritingLog = Arc::new(outbox.clone());
     // The same object again, as the read-only view of what each device group
     // was told — the real adapter rather than a double, for the reason at the
     // top of this file: a double would have to restate when an expectation is
@@ -210,7 +210,7 @@ pub fn serve_all(
             log,
             group_state,
             fields,
-            commands,
+            writings,
         },
         counting_stamp(),
     )
@@ -255,7 +255,7 @@ pub fn spawn_with_status(
 pub fn spawn_with_instructions(
     store: DynReadStore,
     fields: FieldCatalog,
-    commands: CommandCatalog,
+    writings: WritingsCatalog,
 ) -> (String, MemoryOutbox) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
     let port = listener
@@ -268,7 +268,7 @@ pub fn spawn_with_instructions(
         catalog(),
         StatedStatus::default(),
         fields,
-        commands,
+        writings,
     );
     (format!("http://127.0.0.1:{port}"), outbox)
 }

@@ -73,7 +73,7 @@ impl From<ReadError> for ApiFailure {
     }
 }
 
-/// The write-side counterpart, so a `commands` handler bubbles a refused
+/// The write-side counterpart, so a `writings` handler bubbles a refused
 /// submission with `?` exactly as a readings handler bubbles a store failure.
 impl From<SubmitError> for ApiFailure {
     fn from(e: SubmitError) -> Self {

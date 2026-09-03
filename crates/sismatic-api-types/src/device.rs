@@ -8,15 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::Barrier;
 use crate::reading::Reading;
+use crate::writing::Barrier;
 use crate::{DeviceId, GroupId};
 
 /// What the server's connection to a device looks like right now.
 ///
 /// Purely informational — a status dot on a dashboard — and stale the instant
 /// it is read: nothing here reserves a connection, so a caller that wants to
-/// *use* the device still issues a command and handles the failure.
+/// *use* the device still issues an exchange and handles the failure.
 ///
 /// The wire mirror of `sismatic_core::devices::device::Connectivity`, plus
 /// [`Unknown`](ConnectionStatus::Unknown), which core has no equivalent of
@@ -27,17 +27,17 @@ use crate::{DeviceId, GroupId};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionStatus {
-    /// A connection is open and idle. The next command reuses it.
+    /// A connection is open and idle. The next exchange reuses it.
     Warm,
-    /// A command is in flight. The device either holds a connection or is
-    /// opening one, and telling those apart would mean waiting for the command
+    /// An exchange is in flight. The device either holds a connection or is
+    /// opening one, and telling those apart would mean waiting for the exchange
     /// to finish — which a status read must not do.
     Busy,
     /// No connection is open, and nothing says one would fail. The resting
     /// state of a device that is not marked `eager`.
     Cold,
     /// A recent dial failed and the cold-backoff window is still open, so a
-    /// command issued now fails without even dialing.
+    /// an exchange issued now fails without even dialing.
     ///
     /// The one value that says the device is *down* rather than merely idle,
     /// which is the distinction [`Cold`](ConnectionStatus::Cold) cannot draw.
@@ -94,12 +94,12 @@ pub struct GroupSummary {
     pub id: GroupId,
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub members: Vec<DeviceId>,
-    /// How long a command addressed to this group waits for every member to be
+    /// How long a writing addressed to this group waits for every member to be
     /// ready before [`barrier`] decides, in seconds.
     ///
     /// Reported because it is the one configured number that changes what a
     /// caller should expect from a `202`: a group with a fifteen-second barrier
-    /// can leave a command pending that long before anything reaches a device,
+    /// can leave a writing pending that long before anything reaches a device,
     /// and a client showing a spinner needs to know which.
     ///
     /// [`barrier`]: GroupSummary::barrier

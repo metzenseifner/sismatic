@@ -83,7 +83,7 @@ mod tests {
             username: "admin".into(),
             password: "extron".into(),
             connect_timeout: Duration::from_millis(500),
-            command_timeout: Duration::from_millis(500),
+            exchange_timeout: Duration::from_millis(500),
             eager: false,
             sis_keepalive: None,
             eager_retry: None,
@@ -121,7 +121,7 @@ mod tests {
         device
             .run(&sismatic_core::protocol::instructions::query::Query::SshPort.instruction())
             .await
-            .expect("the command");
+            .expect("the writing");
 
         assert_eq!(status.status("atrium").await, ConnectionStatus::Warm);
     }

@@ -39,7 +39,7 @@
 //!
 //! On the root of each of those two scopes sits the route that says which names
 //! the rest of the scope accepts: `/v1/readings` lists every queryable field and
-//! `/v1/commands` every command, metadata register and setting. They are the
+//! `/v1/writings` every command, metadata register and setting. They are the
 //! other side of the `{field}`-as-a-parameter design above — that choice is what
 //! lets a field reach this API with no code change, and what leaves a misspelled
 //! name indistinguishable from an unpolled one. Publishing the catalog answers
@@ -55,7 +55,7 @@
 //! made correct for the two status routes, which read an outbox keyed by device
 //! and would report an idle device that does not exist. See
 //! [`handlers::target`] for the whole argument, [`handlers::group_readings`]
-//! for the group-shaped reads, and [`handlers::commands`] for the status routes
+//! for the group-shaped reads, and [`handlers::writings`] for the status routes
 //! themselves.
 //!
 //! The last two are the same routes described to a reader: an OpenAPI document
@@ -75,8 +75,8 @@
 //! convention.
 //!
 //! The write routes extend that arrangement rather than relaxing it. They are
-//! handed `CommandSubmit` and `CommandLog` — append an intent, read what was
-//! appended — and never `CommandDrain`, which is what claims a command and
+//! handed `WritingSubmit` and `WritingLog` — append an intent, read what was
+//! appended — and never `WritingDrain`, which is what claims a writing and
 //! settles it. Draining belongs to `sismatic-intent-relay`, and a handler able
 //! to claim could reorder a device's queue. So the capability this crate gained
 //! is exactly one verb, and it is one that *records a request* rather than

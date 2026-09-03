@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::Rejection;
+use crate::writing::Rejection;
 
 /// A machine-readable classification of a failed request, letting a client
 /// branch on the *kind* of error without string-matching the message. Mirrors

@@ -10,7 +10,7 @@
 //!
 //! The catalog also guards the write path: a submission to an id it does not
 //! hold is refused before anything is recorded. That guard is exercised through
-//! `/v1/commands/…` URLs, so it is tested in `tests/commands/` beside the other
+//! `/v1/writings/…` URLs, so it is tested in `tests/writings/` beside the other
 //! things those routes do — a suite is organized by the scope it addresses, not
 //! by which port happens to be load-bearing. What stays here is the `/groups`
 //! route's `barrier_timeout_secs` and `barrier`, because those are configuration

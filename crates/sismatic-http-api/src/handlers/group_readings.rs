@@ -14,8 +14,8 @@
 //! is not a new way to read a device, it is the same read fanned out and
 //! answered as one object.
 //!
-//! The write side has its own `/v1/commands/groups` space, in
-//! [`commands`](crate::handlers::commands). Both spaces resolve an id through
+//! The write side has its own `/v1/writings/groups` space, in
+//! [`writings`](crate::handlers::writings). Both spaces resolve an id through
 //! [`target`](crate::handlers::target), so a device id is refused identically
 //! wherever it appears under either.
 //!
@@ -39,7 +39,7 @@
 //! therefore looks perfectly consistent.
 //!
 //! [`GroupFieldState::uniform`] compares the members against each other. It
-//! needs no expectation, so it catches drift on fields nobody commands — one
+//! needs no expectation, so it catches drift on fields nobody writes — one
 //! recorder on last year's firmware, one in the wrong timezone — which no
 //! expectation will ever see because none was ever recorded.
 //!
@@ -450,9 +450,9 @@ mod tests {
     }
 
     /// The case the expectation cannot see, and the whole reason `uniform` is
-    /// reported beside it: nobody ever commanded this field.
+    /// reported beside it: nothing was ever written to this field.
     #[test]
-    fn members_that_disagree_about_an_uncommanded_field_are_not_uniform() {
+    fn members_that_disagree_about_an_unwritten_field_are_not_uniform() {
         let answer = state(
             None,
             vec![
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn a_group_nobody_has_commanded_reports_unknown_rather_than_in_sync() {
+    fn a_group_nothing_was_written_to_reports_unknown_rather_than_in_sync() {
         let answer = state(
             None,
             vec![reading("atrium", state_value(RecordingState::Started))],

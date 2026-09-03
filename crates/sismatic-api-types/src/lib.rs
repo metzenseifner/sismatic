@@ -25,9 +25,9 @@
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
 //! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
 //!   member-wise response shapes
-//! - [`command`] — write-side request bodies and instruction results
+//! - [`writing`] — write-side request bodies and instruction results
 //! - [`instruction`] — which names the routes above accept: [`FieldCatalog`],
-//!   [`CommandCatalog`]
+//!   [`WritingsCatalog`]
 //! - [`error`] — the [`ApiError`] envelope and [`Health`]
 //!
 //! Enable the `ts` feature to derive `ts_rs::TS` on every DTO and emit
@@ -49,13 +49,13 @@
 //! );
 //! ```
 
-pub mod command;
 pub mod device;
 pub mod error;
 pub mod group;
 pub mod instruction;
 pub mod reading;
 pub mod value;
+pub mod writing;
 
 /// A device's id. An alias, not a newtype, to match `core`'s `String` ids and
 /// stay ergonomic in JSON, while still documenting intent at every use site.
@@ -69,18 +69,18 @@ pub type GroupId = String;
 /// instruction catalog.
 pub type FieldName = String;
 
-pub use command::{
-    Acceptance, Accepted, Barrier, BatchId, CommandId, CommandList, CommandRecord, CommandStatus,
-    Intent, Phase, RecordingPhase, Rejection,
-};
 pub use device::{
     ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,
 };
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
 pub use group::{
-    GroupCommandList, GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory,
-    GroupPhase, MemberCommands, MemberHistory, MemberPhase, MemberState, SyncState,
+    GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory, GroupPhase,
+    GroupWritingList, MemberHistory, MemberPhase, MemberState, MemberWritings, SyncState,
 };
-pub use instruction::{CommandCatalog, FieldCatalog, InstructionSummary};
+pub use instruction::{FieldCatalog, InstructionSummary, WritingsCatalog};
 pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
 pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};
+pub use writing::{
+    Acceptance, Accepted, Barrier, BatchId, Intent, Phase, RecordingPhase, Rejection, WritingId,
+    WritingList, WritingRecord, WritingStatus,
+};

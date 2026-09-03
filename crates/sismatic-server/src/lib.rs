@@ -6,7 +6,7 @@
 //!   `sismatic-core` and persists what it reads through a [`DynWriteStore`];
 //! - the **HTTP side**, [`sismatic_http_api::run`], which answers questions
 //!   about what was persisted through a [`DynReadStore`], and records requests
-//!   to change a device through a `CommandSubmit`;
+//!   to change a device through a `WritingSubmit`;
 //! - the **relay side**, [`sismatic_intent_relay::spawn`], which drains those
 //!   recorded requests and applies them to devices.
 //!
@@ -15,7 +15,7 @@
 //! intent, and the relay — the only one of the three that may name one —
 //! performs it. This function is the only place that knows the store behind
 //! `DynReadStore` and `DynWriteStore` is one object, and the outbox behind the
-//! three command ports is another.
+//! three writing ports is another.
 //!
 //! Alongside the write side it runs [`SisKeepalive`], core's keep-warm
 //! supervisor, which opens and holds a connection to every device the devices
@@ -31,8 +31,8 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use sismatic_api_types::{
-    Barrier as ApiBarrier, CommandCatalog, ConnectionStatus, DeviceSummary, FieldCatalog,
-    GroupSummary, InstructionSummary, Timestamp,
+    Barrier as ApiBarrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary,
+    InstructionSummary, Timestamp, WritingsCatalog,
 };
 use sismatic_core::devices::config::{Barrier, DeviceConfig, GroupConfig, Resolved};
 use sismatic_core::devices::registry::Registry;
@@ -44,7 +44,7 @@ use sismatic_core::protocol::instructions::register::Register;
 use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_http_api::{Ports, ServerHandle, Stamp};
 use sismatic_store::group::DynGroupState;
-use sismatic_store::outbox::{DynCommandDrain, DynCommandLog, DynCommandSubmit};
+use sismatic_store::outbox::{DynWritingDrain, DynWritingLog, DynWritingSubmit};
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox, MemoryStore};
@@ -79,10 +79,10 @@ pub async fn run(
     // the submission — so there is no write half to hand anyone, and nothing
     // outside `submit` can claim a device group was asked for something.
     let outbox = MemoryOutbox::with_max_attempts(cfg.intent_relay.max_attempts);
-    let submit: DynCommandSubmit = Arc::new(outbox.clone());
-    let log: DynCommandLog = Arc::new(outbox.clone());
+    let submit: DynWritingSubmit = Arc::new(outbox.clone());
+    let log: DynWritingLog = Arc::new(outbox.clone());
     let group_state: DynGroupState = Arc::new(outbox.clone());
-    let drain: DynCommandDrain = Arc::new(outbox);
+    let drain: DynWritingDrain = Arc::new(outbox);
 
     // Built from the resolved config *before* the registry consumes it: the
     // catalog is the public, secret-free projection of the same device set, and
@@ -124,7 +124,7 @@ pub async fn run(
             // name a `Query` any more than it may name a `DeviceConfig`, so what
             // crosses the seam is a list of DTOs rather than a dependency edge.
             fields: field_catalog(),
-            commands: command_catalog(),
+            writings: writings_catalog(),
         },
         stamp(),
     )?;
@@ -192,7 +192,7 @@ pub async fn run(
 
     // Order matters, and it is the reverse of startup. The HTTP server is
     // already down, so no new intent can arrive; draining the relay next lets
-    // every accepted command reach its device before the process exits.
+    // every accepted writing reach its device before the process exits.
     // Draining sync first would only add poll traffic the relay then queues
     // behind.
     intent_relay.shutdown().await;
@@ -291,15 +291,15 @@ fn field_catalog() -> FieldCatalog {
     }
 }
 
-/// Everything a write can name, as `GET /v1/commands` serves it.
+/// Everything a write can name, as `GET /v1/writings` serves it.
 ///
 /// Three catalogs, kept apart because the API keeps them apart: a metadata
 /// register is refused by the settings route and vice versa, which is what stops
 /// the recording freeze from being sidestepped (see
 /// `sismatic_intent_relay::translate`). Merging them here would advertise a
 /// single list of names, half of which each write route refuses.
-fn command_catalog() -> CommandCatalog {
-    CommandCatalog {
+fn writings_catalog() -> WritingsCatalog {
+    WritingsCatalog {
         commands: summarize_catalog!(Command),
         metadata: summarize_catalog!(Register),
         settings: summarize_catalog!(Setting),
@@ -308,7 +308,7 @@ fn command_catalog() -> CommandCatalog {
 
 /// The real id-and-instant source the write handlers are given.
 ///
-/// The one place in the process that decides what a fresh command id looks
+/// The one place in the process that decides what a fresh writing id looks
 /// like. A v4 UUID because an id travels in a `Location` header and in a
 /// client's retry logic, so it has to be unguessable enough not to be typed by
 /// hand and unique without a coordinator.
@@ -419,10 +419,10 @@ mod tests {
     fn the_published_catalogs_cover_every_instruction_core_has() {
         assert_covers!(Query, field_catalog().fields);
 
-        let commands = command_catalog();
-        assert_covers!(Command, commands.commands);
-        assert_covers!(Register, commands.metadata);
-        assert_covers!(Setting, commands.settings);
+        let writings = writings_catalog();
+        assert_covers!(Command, writings.commands);
+        assert_covers!(Register, writings.metadata);
+        assert_covers!(Setting, writings.settings);
     }
 
     /// The catalogs are worth publishing at all, which a vacuous
@@ -430,21 +430,21 @@ mod tests {
     #[test]
     fn the_published_catalogs_are_not_empty() {
         assert!(field_catalog().fields.len() > 20);
-        let commands = command_catalog();
-        assert_eq!(commands.commands.len(), 3, "start, stop and pause");
-        assert!(!commands.metadata.is_empty());
-        assert!(!commands.settings.is_empty());
+        let writings = writings_catalog();
+        assert_eq!(writings.commands.len(), 3, "start, stop and pause");
+        assert!(!writings.metadata.is_empty());
+        assert!(!writings.settings.is_empty());
     }
 
-    /// A caller reading `GET /v1/commands` has to be able to tell which list to
+    /// A caller reading `GET /v1/writings` has to be able to tell which list to
     /// write a name through, and the two write routes refuse each other's names
     /// — `sismatic_intent_relay::translate` turns a register submitted as a
     /// setting into a failure rather than a write with no recording freeze. Two
     /// lists that shared a name would advertise a choice that does not exist.
     #[test]
     fn no_name_is_published_as_both_a_register_and_a_setting() {
-        let commands = command_catalog();
-        for register in &commands.metadata {
+        let writings = writings_catalog();
+        for register in &writings.metadata {
             assert!(
                 Setting::from_str(&register.name).is_err(),
                 "'{}' is published under both metadata and settings",

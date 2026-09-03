@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! GET /v1/readings      every field a reading can be asked for
-//! GET /v1/commands      every command, metadata register and setting a write
+//! GET /v1/writings      every command, metadata register and setting a write
 //!                       can name
 //! ```
 //!
@@ -44,7 +44,7 @@
 //! [`DeviceCatalog`]: sismatic_store::catalog::DeviceCatalog
 
 use actix_web::{HttpResponse, web};
-use sismatic_api_types::{CommandCatalog, FieldCatalog};
+use sismatic_api_types::{FieldCatalog, WritingsCatalog};
 
 /// `GET /v1/readings` — every field a reading can be asked for.
 ///
@@ -72,30 +72,30 @@ pub async fn field_catalog(fields: web::Data<FieldCatalog>) -> HttpResponse {
     HttpResponse::Ok().json(&**fields)
 }
 
-/// `GET /v1/commands` — every command, metadata register and setting a write can
+/// `GET /v1/writings` — every command, metadata register, and setting a write can
 /// name.
 ///
 /// Three lists, because the three are written through three different routes:
 /// `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
 /// `commands` are what the `recording/{verb}` routes send and are never spelled
-/// in a URL. See [`CommandCatalog`] for the rules that separate them.
+/// in a URL. See [`WritingCatalog`] for the rules that separate them.
 #[utoipa::path(
     get,
     path = "",
-    context_path = "/v1/commands",
-    tag = "commands",
+    context_path = "/v1/writings",
+    tag = "writings",
     responses(
         (status = 200, description = "What a write can name, in three lists. \
              `metadata` names go in the `{field}` of \
-             `PUT /v1/commands/devices/{id}/metadata/{field}` and are writable only \
+             `PUT /v1/writings/devices/{id}/metadata/{field}` and are writable only \
              while nothing is recording; `settings` names go in the `{field}` of \
-             `PUT /v1/commands/devices/{id}/settings/{field}` and are writable \
+             `PUT /v1/writings/devices/{id}/settings/{field}` and are writable \
              always. `commands` are the recording instructions behind \
-             `POST /v1/commands/devices/{id}/recording/start` and the two beside \
+             `POST /v1/writings/devices/{id}/recording/start` and the two beside \
              it — reported for completeness, not to be put in a URL.",
-         body = CommandCatalog),
+         body = WritingsCatalog),
     ),
 )]
-pub async fn command_catalog(commands: web::Data<CommandCatalog>) -> HttpResponse {
-    HttpResponse::Ok().json(&**commands)
+pub async fn writings_catalog(writings: web::Data<WritingsCatalog>) -> HttpResponse {
+    HttpResponse::Ok().json(&**writings)
 }
