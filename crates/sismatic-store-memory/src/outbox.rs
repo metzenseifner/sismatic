@@ -5,7 +5,7 @@
 //! # Shape
 //!
 //! ```text
-//! logs:    device -> DeviceLog { phase, epoch, queue, history, keys }
+//! logs:    device -> DeviceLog { desired_recording_state, epoch, queue, history, keys }
 //! batches: batch_id -> Batch { members, ready, armed_at, barrier }
 //! groups:  group -> field -> GroupExpectation
 //! records: writing_id -> WritingRecord
@@ -13,8 +13,8 @@
 //!
 //! `groups` is here rather than beside the readings because it holds what a
 //! device group was *told*, which is the same kind of belief a `DeviceLog`'s
-//! phase is, and is written by the same call under the same lock — see
-//! [`sismatic_store::group`].
+//! desired recording state is, and is written by the same call under the same
+//! lock — see [`sismatic_store::group`].
 //!
 //! `records` is separate from `logs` because the two lookups are different
 //! questions. `GET /v1/writings/{id}` names a writing and nothing else, so it
@@ -70,8 +70,9 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
 use sismatic_api_types::{
-    Acceptance, Accepted, Barrier, BatchId, DeviceId, FieldName, GroupExpectation, GroupId, Phase,
-    RecordingPhase, RecordingState, Timestamp, WritingId, WritingRecord, WritingStatus,
+    Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
+    DeviceId, FieldName, GroupExpectation, GroupId, RecordingState, Timestamp, WritingId,
+    WritingRecord, WritingStatus,
 };
 use sismatic_store::group::{GroupState, expects};
 use sismatic_store::outbox::{
@@ -88,7 +89,7 @@ use sismatic_store::{ReadError, WriteError};
 /// mid-append would otherwise meet an id with nothing behind it.
 #[derive(Debug)]
 struct DeviceLog {
-    phase: Phase,
+    desired_recording_state: DesiredRecordingState,
     epoch: u64,
     /// Ids awaiting dispatch, oldest first.
     queue: VecDeque<WritingId>,
@@ -107,13 +108,13 @@ struct DeviceLog {
 /// catalog of what exists, so it cannot tell an unknown device from one that
 /// has been asked to do nothing yet.
 ///
-/// Hand-written rather than derived because [`Phase`] has no `Default` and
-/// should not gain one: it is a wire type, and a default phase is a claim about
-/// a device that only this adapter is in a position to make.
+/// Hand-written rather than derived because [`DesiredRecordingState`] has no
+/// `Default` and should not gain one: it is a wire type, and a default state is
+/// a claim about a device that only this adapter is in a position to make.
 impl Default for DeviceLog {
     fn default() -> Self {
         Self {
-            phase: Phase::Idle,
+            desired_recording_state: DesiredRecordingState::Idle,
             epoch: 0,
             queue: VecDeque::new(),
             history: Vec::new(),
@@ -338,12 +339,12 @@ impl WritingSubmit for MemoryOutbox {
         let mut admitted = Vec::with_capacity(s.targets.len());
         for device in &s.targets {
             let log = state.logs.entry(device.clone()).or_default();
-            let before = log.phase;
+            let before = log.desired_recording_state;
             let after =
                 admit(before, Verb::of(&s.intent)).map_err(|rejection| SubmitError::Rejected {
                     device: device.clone(),
                     rejection,
-                    phase: before,
+                    desired_recording_state: before,
                 })?;
             admitted.push((before, after, epoch_of(before, after, log.epoch)));
         }
@@ -376,7 +377,7 @@ impl WritingSubmit for MemoryOutbox {
             let log = state.logs.entry(device.clone()).or_default();
             log.queue.push_back(id.clone());
             log.history.push(id.clone());
-            log.phase = after;
+            log.desired_recording_state = after;
             if opens_recording(before, after) {
                 log.epoch = epoch;
             }
@@ -495,13 +496,21 @@ impl WritingLog for MemoryOutbox {
             .collect())
     }
 
-    async fn phase(&self, device: DeviceId) -> Result<RecordingPhase, ReadError> {
+    async fn desired_recording_state(
+        &self,
+        device: DeviceId,
+    ) -> Result<DeviceDesiredRecordingState, ReadError> {
         let state = self.state();
-        let (phase, epoch) = state
+        let (desired_recording_state, epoch) = state
             .logs
             .get(&device)
-            .map_or((Phase::Idle, 0), |log| (log.phase, log.epoch));
-        Ok(RecordingPhase { phase, epoch })
+            .map_or((DesiredRecordingState::Idle, 0), |log| {
+                (log.desired_recording_state, log.epoch)
+            });
+        Ok(DeviceDesiredRecordingState {
+            desired_recording_state,
+            epoch,
+        })
     }
 }
 
@@ -509,11 +518,11 @@ impl WritingLog for MemoryOutbox {
 /// groups.
 ///
 /// On the outbox rather than on `MemoryStore`, because an expectation is
-/// write-side belief — the same kind of thing a [`Phase`] is, written by the
-/// same call, under the same lock. Putting it beside the readings would have
-/// made "what the device group was told" and "what a device reported" two rows
-/// in one table, which is exactly the conflation the group routes exist to
-/// undo.
+/// write-side belief — the same kind of thing a [`DesiredRecordingState`] is,
+/// written by the same call, under the same lock. Putting it beside the
+/// readings would have made "what the device group was told" and "what a
+/// device reported" two rows in one table, which is exactly the conflation the
+/// group routes exist to undo.
 #[async_trait::async_trait]
 impl GroupState for MemoryOutbox {
     async fn expected(
@@ -665,10 +674,11 @@ impl WritingDrain for MemoryOutbox {
             }
             Outcome::Failed(reason) => {
                 record.status = WritingStatus::Failed { reason };
-                // Dead Letter Channel. The phase this writing optimistically
-                // moved is rolled back, so a start that never reached the
-                // device stops freezing this device's metadata.
-                log.phase = rollback(log.phase, Verb::of(&record.intent));
+                // Dead Letter Channel. The desired state this writing
+                // optimistically moved is rolled back, so a start that never
+                // reached the device stops freezing this device's metadata.
+                log.desired_recording_state =
+                    rollback(log.desired_recording_state, Verb::of(&record.intent));
                 if let Some(batch) = record.batch.as_ref().and_then(|b| state.batches.get_mut(b)) {
                     // Terminally gone: drop it from the set the barrier waits
                     // on, or a `DispatchReady` batch would keep waiting for a
@@ -685,7 +695,7 @@ impl WritingDrain for MemoryOutbox {
     async fn observe(&self, device: DeviceId, observed: RecordingState) -> Result<(), WriteError> {
         let mut state = self.state();
         let log = state.logs.entry(device).or_default();
-        let before = log.phase;
+        let before = log.desired_recording_state;
         let after = reconcile(before, observed);
         // A recording started from the front panel opens a take this process
         // never admitted, and the metadata of the previous one is sealed by it
@@ -693,7 +703,7 @@ impl WritingDrain for MemoryOutbox {
         if opens_recording(before, after) {
             log.epoch += 1;
         }
-        log.phase = after;
+        log.desired_recording_state = after;
         Ok(())
     }
 
@@ -741,9 +751,10 @@ impl MemoryOutbox {
     ///
     /// Deliberately not routed through `settle`'s retry arm: a barrier expiry
     /// is not a transient device failure, and re-queueing the row would only
-    /// have it arrive at a rendezvous that has already resolved. The phase is
-    /// rolled back for the same reason `settle` rolls it back — a start that
-    /// never reached a device must stop freezing that device's metadata.
+    /// have it arrive at a rendezvous that has already resolved. The desired
+    /// recording state is rolled back for the same reason `settle` rolls it
+    /// back — a start that never reached a device must stop freezing that
+    /// device's metadata.
     fn fail_head(&self, state: &mut State, device: &DeviceId, at: &Timestamp) {
         let Some(log) = state.logs.get_mut(device) else {
             return;
@@ -758,7 +769,8 @@ impl MemoryOutbox {
             reason: "the group barrier expired before every member was ready".to_owned(),
         };
         record.updated_at = at.clone();
-        log.phase = rollback(log.phase, Verb::of(&record.intent));
+        log.desired_recording_state =
+            rollback(log.desired_recording_state, Verb::of(&record.intent));
     }
 
     /// Re-evaluate the barrier and decide what this tick does.
@@ -923,8 +935,14 @@ mod tests {
         Some(record.id)
     }
 
-    pub(super) async fn phase_of(outbox: &MemoryOutbox, device: &str) -> RecordingPhase {
-        outbox.phase(device.to_owned()).await.expect("phase")
+    pub(super) async fn desired_recording_state_of(
+        outbox: &MemoryOutbox,
+        device: &str,
+    ) -> DeviceDesiredRecordingState {
+        outbox
+            .desired_recording_state(device.to_owned())
+            .await
+            .expect("desired_recording_state")
     }
 
     pub(super) async fn status_of(outbox: &MemoryOutbox, id: &str) -> WritingStatus {
@@ -977,7 +995,7 @@ mod tests {
             SubmitError::Rejected {
                 device: DEV.to_owned(),
                 rejection: Rejection::MetadataFrozen,
-                phase: Phase::Recording,
+                desired_recording_state: DesiredRecordingState::Recording,
             }
         );
         assert!(submit(&outbox, "d", Intent::StopRecording).await.is_ok());
@@ -1005,9 +1023,9 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_device_is_idle_at_epoch_zero() {
         assert_eq!(
-            phase_of(&outbox(), "never-heard-of").await,
-            RecordingPhase {
-                phase: Phase::Idle,
+            desired_recording_state_of(&outbox(), "never-heard-of").await,
+            DeviceDesiredRecordingState {
+                desired_recording_state: DesiredRecordingState::Idle,
                 epoch: 0
             }
         );
@@ -1051,7 +1069,7 @@ mod tests {
         submit(&outbox, "b", Intent::PauseRecording).await.unwrap();
         let resumed = submit(&outbox, "c", Intent::StartRecording).await.unwrap();
         assert_eq!(resumed.writings[0].epoch, 1);
-        assert_eq!(phase_of(&outbox, DEV).await.epoch, 1);
+        assert_eq!(desired_recording_state_of(&outbox, DEV).await.epoch, 1);
     }
 
     // ---- atomicity --------------------------------------------------------
@@ -1077,7 +1095,7 @@ mod tests {
         }
         assert_eq!(
             admitted, 1,
-            "the phase guard must serialise competing starts"
+            "the desired_recording_state guard must serialise competing starts"
         );
     }
 
@@ -1192,11 +1210,21 @@ mod tests {
         submit(&outbox, "start", Intent::StartRecording)
             .await
             .unwrap();
-        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Recording);
+        assert_eq!(
+            desired_recording_state_of(&outbox, DEV)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Recording
+        );
 
         dispatch(&outbox, Outcome::Failed("device unreachable".into())).await;
 
-        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Idle);
+        assert_eq!(
+            desired_recording_state_of(&outbox, DEV)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Idle
+        );
         assert!(submit(&outbox, "title", title("a")).await.is_ok());
     }
 
@@ -1211,7 +1239,7 @@ mod tests {
             .await
             .unwrap();
         assert!(submit(&outbox, "after", title("b")).await.is_err());
-        assert_eq!(phase_of(&outbox, DEV).await.epoch, 1);
+        assert_eq!(desired_recording_state_of(&outbox, DEV).await.epoch, 1);
     }
 
     #[tokio::test]
@@ -1224,7 +1252,12 @@ mod tests {
             .observe(DEV.to_owned(), RecordingState::Unknown)
             .await
             .unwrap();
-        assert_eq!(phase_of(&outbox, DEV).await.phase, Phase::Recording);
+        assert_eq!(
+            desired_recording_state_of(&outbox, DEV)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Recording
+        );
     }
 
     // ---- idempotency ------------------------------------------------------
@@ -1406,7 +1439,12 @@ mod batch_tests {
 
         // A never learned about it.
         assert!(outbox.writings_for(A.to_owned()).await.unwrap().is_empty());
-        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+        assert_eq!(
+            desired_recording_state_of(&outbox, A)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Idle
+        );
     }
 
     // ---- the barrier ------------------------------------------------------
@@ -1487,9 +1525,10 @@ mod batch_tests {
             .await
             .unwrap();
         // Queued behind A's batched row. A *setting* rather than a metadata
-        // write, because the group start already moved A's phase to Recording
-        // and metadata is frozen there — settings are admissible in every
-        // phase, which is what makes this the writing that could overtake.
+        // write, because the group start already moved A's desired state to
+        // Recording and metadata is frozen there — settings are admissible in
+        // every state, which is what makes this the writing that could
+        // overtake.
         outbox
             .submit(Submission {
                 ids: vec!["after-a".to_owned()],
@@ -1597,10 +1636,15 @@ mod batch_tests {
             ),
             "the ready member's row is failed, not left pending"
         );
-        // ...and the phase it optimistically moved is rolled back, so A's
+        // ...and the desired state it optimistically moved is rolled back, so A's
         // metadata is writable again rather than frozen by a take that never
         // started.
-        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+        assert_eq!(
+            desired_recording_state_of(&outbox, A)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Idle
+        );
     }
 
     #[tokio::test]
@@ -1633,7 +1677,12 @@ mod batch_tests {
             status_of(&outbox, "cmd-b").await,
             WritingStatus::Failed { .. }
         ));
-        assert_eq!(phase_of(&outbox, B).await.phase, Phase::Idle);
+        assert_eq!(
+            desired_recording_state_of(&outbox, B)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Idle
+        );
     }
 
     /// A batch that fills inside the bound is unaffected by the timeout —
@@ -1766,7 +1815,7 @@ mod batch_tests {
     }
 
     /// The property the whole port exists for: the take was abandoned, every
-    /// row failed, every phase rolled back — and the device group still
+    /// row failed, every desired state rolled back — and the device group still
     /// records that it was asked to be recording. Without this the fleet reads
     /// as perfectly consistent and nothing anywhere says a lecture was missed.
     #[tokio::test]
@@ -1780,7 +1829,12 @@ mod batch_tests {
         // Past the ten-second bound: the barrier never fills, so `FailBatch`
         // fails the rows and `rollback` returns A to idle.
         claim(&outbox, A, at_plus(11)).await;
-        assert_eq!(phase_of(&outbox, A).await.phase, Phase::Idle);
+        assert_eq!(
+            desired_recording_state_of(&outbox, A)
+                .await
+                .desired_recording_state,
+            DesiredRecordingState::Idle
+        );
 
         assert_eq!(
             expected(&outbox, RUNNING_STATE).await.map(|e| e.value),
@@ -1819,7 +1873,7 @@ mod batch_tests {
     }
 
     /// A device-addressed request carries no group, so it files no expectation:
-    /// one device's own phase already says what it was told, and a device
+    /// one device's own desired state already says what it was told, and a device
     /// group it happens to belong to was not the thing that was asked.
     #[tokio::test]
     async fn a_device_addressed_request_records_no_group_expectation() {

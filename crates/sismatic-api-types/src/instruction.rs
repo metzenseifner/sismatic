@@ -114,8 +114,9 @@ pub struct WritingsCatalog {
     /// The device settings, whose names go in the `{field}` of
     /// `PUT /v1/writings/devices/{id}/settings/{field}`.
     ///
-    /// Writable in every phase. A name in this list is refused by the metadata
-    /// route and vice versa: the split is what keeps the recording freeze from
-    /// being bypassed by writing a register through the settings route.
+    /// Writable in every desired recording state. A name in this list is
+    /// refused by the metadata route and vice versa: the split is what keeps
+    /// the recording freeze from being bypassed by writing a register through
+    /// the settings route.
     pub settings: Vec<InstructionSummary>,
 }

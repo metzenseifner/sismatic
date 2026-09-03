@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::reading::{Reading, Timestamp};
 use crate::value::ReadingValue;
-use crate::writing::{Phase, WritingRecord};
+use crate::writing::{DesiredRecordingState, WritingRecord};
 use crate::{DeviceId, FieldName, GroupId};
 
 /// What a group was last told one of its fields should hold.
@@ -192,16 +192,16 @@ pub struct GroupHistory {
     pub members: Vec<MemberHistory>,
 }
 
-/// One member's write-side state: the phase the outbox has accepted for it, and
-/// the epoch that phase belongs to.
+/// One member's write-side state: the desired recording state the outbox has
+/// accepted for it, and the epoch that state belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MemberPhase {
+pub struct MemberDesiredRecordingState {
     // See `Reading::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    pub phase: Phase,
+    pub desired_recording_state: DesiredRecordingState,
     pub epoch: u64,
 }
 
@@ -217,13 +217,13 @@ pub struct MemberPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GroupPhase {
+pub struct GroupDesiredRecordingState {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub group: GroupId,
-    /// The phase every member is in, or `null` when they are not all in the
-    /// same one.
+    /// The desired recording state every member is in, or `null` when they are
+    /// not all in the same one.
     ///
-    /// A device group has no phase of its own — the outbox admits per member,
+    /// A device group has no desired state of its own — the outbox admits per member,
     /// because a start has to be decided against each member's own state — so
     /// the only honest group-level answer is the one the members agree on.
     /// `null` is therefore a finding rather than a missing value: it says the
@@ -231,13 +231,13 @@ pub struct GroupPhase {
     ///
     /// `null` for a group with no members, which agree on nothing because there
     /// is nothing to agree.
-    pub phase: Option<Phase>,
+    pub desired_recording_state: Option<DesiredRecordingState>,
     /// One entry per member, in the order the group configures them.
     ///
     /// Epochs are reported per member and never rolled up: two members can
-    /// share a phase and be on different takes, and a single group epoch would
+    /// share a desired state and be on different takes, and a single group epoch would
     /// have to pick one of them.
-    pub members: Vec<MemberPhase>,
+    pub members: Vec<MemberDesiredRecordingState>,
 }
 
 /// One member's writing history, newest first.

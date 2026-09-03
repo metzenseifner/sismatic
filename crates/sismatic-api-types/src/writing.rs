@@ -69,13 +69,14 @@ pub enum Intent {
     StopRecording,
     PauseRecording,
     /// Write one metadata register. Admissible only while the device's
-    /// [`Phase`] is [`Phase::Idle`] — see `sismatic_store::outbox::admit`.
+    /// [`DesiredRecordingState`] is [`DesiredRecordingState::Idle`] — see
+    /// `sismatic_store::outbox::admit`.
     SetMetadata {
         #[cfg_attr(feature = "openapi", schema(value_type = String, example = "TITLE"))]
         field: FieldName,
         value: String,
     },
-    /// Write one device setting. Admissible in every phase.
+    /// Write one device setting. Admissible in every desired recording state.
     SetSetting {
         #[cfg_attr(feature = "openapi", schema(value_type = String, example = "TIMEZONE"))]
         field: FieldName,
@@ -86,14 +87,14 @@ pub enum Intent {
 /// The write side's belief about whether a recording is in progress.
 ///
 /// Distinct from [`RecordingState`](crate::value::RecordingState), which is what
-/// a device *reported* at some past instant. `Phase` is what the outbox has
-/// accepted and not yet seen fail, which is the thing an admission decision has
-/// to be taken against.
+/// a device *reported* at some past instant. `DesiredRecordingState` is what the
+/// outbox has accepted and not yet seen fail, which is the thing an admission
+/// decision has to be taken against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum Phase {
+pub enum DesiredRecordingState {
     Idle,
     Recording,
     Paused,
@@ -169,14 +170,15 @@ pub enum WritingStatus {
 
 /// A device's write-side state, as `GET /v1/writings/devices/{id}/recording` reports it.
 /// A product type because the two fields are only meaningful together: an epoch
-/// without a phase does not say whether metadata is writable.
+/// without a desired recording state does not say whether metadata is
+/// writable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RecordingPhase {
-    pub phase: Phase,
-    /// Increments on each transition into [`Phase::Recording`] from
-    /// [`Phase::Idle`].
+pub struct DeviceDesiredRecordingState {
+    pub desired_recording_state: DesiredRecordingState,
+    /// Increments on each transition into [`DesiredRecordingState::Recording`]
+    /// from [`DesiredRecordingState::Idle`].
     pub epoch: u64,
 }
 

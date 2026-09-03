@@ -130,7 +130,7 @@ impl ResponseError for ApiFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{Phase, Rejection};
+    use sismatic_api_types::{DesiredRecordingState, Rejection};
 
     /// The pairing the two `match`es above could get out of step. A rejection
     /// is the caller's fault and a backend failure is ours, and the status has
@@ -140,7 +140,7 @@ mod tests {
         let refused = ApiFailure::Submit(SubmitError::Rejected {
             device: "atrium-101".to_owned(),
             rejection: Rejection::MetadataFrozen,
-            phase: Phase::Recording,
+            desired_recording_state: DesiredRecordingState::Recording,
         });
         assert_eq!(refused.status_code(), StatusCode::CONFLICT);
         assert_eq!(refused.body().code, Some(ErrorCode::Conflict));
@@ -176,7 +176,7 @@ mod tests {
             let failure = ApiFailure::Submit(SubmitError::Rejected {
                 device: "atrium-101".to_owned(),
                 rejection,
-                phase: Phase::Idle,
+                desired_recording_state: DesiredRecordingState::Idle,
             });
             assert_eq!(
                 failure.status_code(),

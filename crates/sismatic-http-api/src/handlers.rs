@@ -29,7 +29,7 @@ pub use health_check::health_check;
 pub use readings::{field_history, list_fields, read_field};
 pub use writings::{
     IdempotencyKey, ValueWrite, list_group_writings, list_writings, pause_group_recording,
-    pause_recording, read_group_phase, read_phase, read_writing, set_group_metadata,
-    set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
-    stop_group_recording, stop_recording,
+    pause_recording, read_desired_recording_state, read_group_desired_recording_state,
+    read_writing, set_group_metadata, set_group_setting, set_metadata, set_setting,
+    start_group_recording, start_recording, stop_group_recording, stop_recording,
 };

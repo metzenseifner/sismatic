@@ -574,7 +574,8 @@ mod tests {
 
     /// The hook is keyed off the field name, not off whatever the value happens
     /// to be. A firmware string is not a recording state, and folding one into
-    /// the write side's phase would be how a poll loop unfreezes metadata.
+    /// the write side's desired recording state would be how a poll loop
+    /// unfreezes metadata.
     #[tokio::test]
     async fn a_field_that_is_not_the_recording_state_is_never_reconciled() {
         let registry = registry_replying(FIRMWARE_REPLY);

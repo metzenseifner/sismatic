@@ -166,9 +166,10 @@ pub async fn run(
             // Both reconciliation paths are wired, and they close different
             // gaps. The relay re-reads the state immediately before a metadata
             // write, which is the one intent the freeze protects. This hook
-            // keeps the phase honest for a device nobody is writing to, at the
-            // cost of nothing: `RUNNING_STATE` is already being polled, and
-            // one poll now serves the read side and the write side both.
+            // keeps the desired recording state honest for a device nobody is
+            // writing to, at the cost of nothing: `RUNNING_STATE` is already
+            // being polled, and one poll now serves the read side and the
+            // write side both.
             reconciler: Some(drain),
         },
     );

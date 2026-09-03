@@ -127,10 +127,11 @@ async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn WritingD
 
 /// One writing against one device.
 async fn dispatch_alone(device: &Device, drain: &dyn WritingDrain, record: WritingRecord) {
-    // The one place a stale phase can still do damage: a recording started from
-    // the front panel between admission and now. Re-read the device before a
-    // metadata write, and only before a metadata write — every other intent is
-    // admissible in every phase or is itself a phase change.
+    // The one place a stale desired recording state can still do damage: a
+    // recording started from the front panel between admission and now. Re-read
+    // the device before a metadata write, and only before a metadata write —
+    // every other intent is admissible in every desired state or is itself a
+    // change to one.
     if matches!(record.intent, Intent::SetMetadata { .. })
         && let Some(state) = observe_state(device, drain).await
         && state.is_recording()
@@ -343,7 +344,8 @@ async fn recover(device: &Device, drain: &dyn WritingDrain) {
     }
 }
 
-/// Ask the device what it is doing and fold the answer into the phase.
+/// Ask the device what it is doing and fold the answer into the desired
+/// recording state.
 async fn observe_state(device: &Device, drain: &dyn WritingDrain) -> Option<RecordingState> {
     let value = device.run(&Query::RunningState.instruction()).await.ok()?;
     let state = value.as_state()?;

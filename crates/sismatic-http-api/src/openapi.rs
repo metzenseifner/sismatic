@@ -148,7 +148,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::writings::pause_recording,
         crate::handlers::writings::set_metadata,
         crate::handlers::writings::set_setting,
-        crate::handlers::writings::read_phase,
+        crate::handlers::writings::read_desired_recording_state,
         crate::handlers::writings::list_writings,
         crate::handlers::writings::read_writing,
         crate::handlers::devices::list_devices,
@@ -163,7 +163,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::writings::pause_group_recording,
         crate::handlers::writings::set_group_metadata,
         crate::handlers::writings::set_group_setting,
-        crate::handlers::writings::read_group_phase,
+        crate::handlers::writings::read_group_desired_recording_state,
         crate::handlers::writings::list_group_writings,
     ),
     components(schemas(
@@ -171,12 +171,13 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::ReadingList,
         sismatic_api_types::ApiError,
         // The write side's top-level bodies. `Intent`, `WritingStatus`,
-        // `Phase`, `Rejection` and `Accepted` are reachable from these and so
-        // arrive by being walked into, for the same reason `ReadingValue` does.
+        // `DesiredRecordingState`, `Rejection` and `Accepted` are reachable
+        // from these and so arrive by being walked into, for the same reason
+        // `ReadingValue` does.
         sismatic_api_types::Acceptance,
         sismatic_api_types::WritingRecord,
         sismatic_api_types::WritingList,
-        sismatic_api_types::RecordingPhase,
+        sismatic_api_types::DeviceDesiredRecordingState,
         crate::handlers::writings::ValueWrite,
         // The inventory bodies. `DeviceSummary` and `ConnectionStatus` arrive
         // by being reachable from these.
@@ -190,9 +191,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::GroupFieldState,
         sismatic_api_types::GroupFieldStateList,
         sismatic_api_types::GroupHistory,
-        // The group write-side bodies. `MemberPhase` and `MemberWritings`
+        // The group write-side bodies. `MemberDesiredRecordingState` and `MemberWritings`
         // arrive by being reachable from these.
-        sismatic_api_types::GroupPhase,
+        sismatic_api_types::GroupDesiredRecordingState,
         sismatic_api_types::GroupWritingList,
         // The two scope-root catalogs. `InstructionSummary` arrives by being
         // reachable from both.

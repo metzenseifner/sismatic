@@ -17,10 +17,10 @@
 //! PUT  /groups/{id}/metadata/{field}
 //! PUT  /groups/{id}/settings/{field}
 //!
-//! GET  /devices/{id}/recording            the write side's phase and epoch
+//! GET  /devices/{id}/recording            the desired recording state and epoch
 //! GET  /devices/{id}/history              every writing this device was sent
-//! GET  /groups/{id}/recording             every member's phase, and the one
-//!                                         they agree on
+//! GET  /groups/{id}/recording             every member's desired recording
+//!                                         state, and the one they agree on
 //! GET  /groups/{id}/history               the same, per member
 //! GET  /{id}                              what became of one request
 //! ```
@@ -55,14 +55,14 @@
 //! the only thing that differs between them.
 //!
 //! The two status reads are why the split is a refusal rather than a fan-out.
-//! The outbox keys its logs by *device*, so a group id on
-//! `GET /v1/writings/devices/{id}/recording` took a default and reported `idle` at epoch
-//! `0`, and on `GET /v1/writings/devices/{id}/history` an empty list — for a device
-//! group whose members were mid-recording with a queue each. Those were not
-//! answers about the group; they were answers about a device that does not
-//! exist, and no wording of the documentation made them safe.
-//! [`read_group_phase`] and [`list_group_writings`] ask the port the question
-//! it can actually answer, once per member.
+//! The outbox keys its logs by *device*, so a group id on `GET
+//! /v1/writings/devices/{id}/recording` took a default and reported `idle` at
+//! epoch `0`, and on `GET /v1/writings/devices/{id}/history` an empty list —
+//! for a device group whose members were mid-recording with a queue each.
+//! Those were not answers about the group; they were answers about a device
+//! that does not exist, and no wording of the documentation made them safe.
+//! [`read_group_desired_recording_state`] and [`list_group_writings`] ask the
+//! port the question it can actually answer, once per member.
 //!
 //! # Nothing here reaches a device
 //!
@@ -116,8 +116,9 @@ use serde::Deserialize;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes — the
 // handlers return `ApiFailure` and let it render.
 use sismatic_api_types::{
-    Acceptance, ApiError, DeviceId, GroupPhase, GroupSummary, GroupWritingList, Intent,
-    MemberPhase, MemberWritings, RecordingPhase, WritingList, WritingRecord,
+    Acceptance, ApiError, DeviceDesiredRecordingState, DeviceId, GroupDesiredRecordingState,
+    GroupSummary, GroupWritingList, Intent, MemberDesiredRecordingState, MemberWritings,
+    WritingList, WritingRecord,
 };
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::outbox::{BarrierPolicy, Submission, WritingLog, WritingSubmit};
@@ -211,7 +212,7 @@ async fn submit(
     // entry point enforced its own URL space. Expansion happens *there* rather
     // than at dispatch because admission is per device: a device group where one
     // member is already running and one is idle has to be decided against both
-    // phases, and only a submission naming both can be.
+    // desired states, and only a submission naming both can be.
     let batch = group
         .as_ref()
         .filter(|_| needs_rendezvous(&intent) && targets.len() > 1)
@@ -271,9 +272,9 @@ async fn submit(
 ///
 /// An id that names nothing is a `404` and not a `202`. The outbox holds what
 /// was submitted and no list of what exists, so without this check it would
-/// admit a writing for a mistyped id against a fresh idle phase — a promise
-/// that cannot be kept, which the caller discovers only by polling a writing
-/// that fails at dispatch, minutes later.
+/// admit a writing for a mistyped id against a desired state of `Idle` — a
+/// promise that cannot be kept, which the caller discovers only by polling a
+/// writing that fails at dispatch, minutes later.
 async fn submit_device(
     catalog: &dyn DeviceCatalog,
     port: &dyn WritingSubmit,
@@ -508,7 +509,7 @@ pub async fn set_metadata(
 }
 
 /// `PUT /v1/writings/devices/{id}/settings/{field}` — write one device setting,
-/// which is accepted in every phase.
+/// which is accepted in every desired recording state.
 #[utoipa::path(
     put,
     path = "/devices/{id}/settings/{field}",
@@ -523,7 +524,7 @@ pub async fn set_metadata(
     request_body = ValueWrite,
     responses(
         (status = 202, description = "Recorded. Settings carry no recording freeze, so \
-             this is accepted in every phase.", body = Acceptance),
+             this is accepted in every desired_recording_state.", body = Acceptance),
         (status = 404, description = "No device has this id, or the id names a \
              device group — which is refused here and carries the `/v1/writings/groups` URL \
              that does the same thing. The catalog is the configured set, so both \
@@ -592,11 +593,11 @@ pub async fn read_writing(
         .ok_or_else(|| ApiFailure::NotFound(format!("no writing '{id}'")))
 }
 
-/// `GET /v1/writings/devices/{id}/recording` — the write side's phase and
-/// epoch.
+/// `GET /v1/writings/devices/{id}/recording` — the write side's desired
+/// recording state and epoch.
 ///
 /// What the *outbox* believes, which is not the same as what the device last
-/// reported: the phase moves the moment a start is accepted, before any device
+/// reported: the desired state moves the moment a start is accepted, before any device
 /// has been contacted. `GET /v1/readings/devices/{id}/fields/RUNNING_STATE` is the other
 /// question — what the device said, and when.
 #[utoipa::path(
@@ -606,10 +607,10 @@ pub async fn read_writing(
     tag = "writings",
     params(("id" = String, Path, description = "Device id.")),
     responses(
-        (status = 200, description = "The phase the write side has accepted, and the \
-             epoch of the current or next recording. An unknown device reports `idle` \
+        (status = 200, description = "The recording state the write side has accepted, \
+             and the epoch of the current or next recording. An unknown device reports `idle` \
              at epoch 0 — the outbox holds what was submitted and no catalog of what \
-             exists.", body = RecordingPhase),
+             exists.", body = DeviceDesiredRecordingState),
         (status = 404, description = "This id names a device group. The outbox keys \
              its logs by device, so this route would report `idle` at epoch 0 for a \
              group whose members are recording; `/v1/writings/groups/{id}/recording` is the \
@@ -617,17 +618,17 @@ pub async fn read_writing(
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
-pub async fn read_phase(
+pub async fn read_desired_recording_state(
     catalog: web::Data<dyn DeviceCatalog>,
     log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
-) -> Result<web::Json<RecordingPhase>, ApiFailure> {
+) -> Result<web::Json<DeviceDesiredRecordingState>, ApiFailure> {
     let device = path.into_inner();
     // The route that made the refusal necessary. The outbox has no log under a
     // group id, so without this it answers `idle` at epoch 0 for a device group
     // whose members are recording — see `crate::handlers::target`.
     reject_group(&**catalog, &device, WRITINGS, "recording").await?;
-    Ok(web::Json(log.phase(device).await?))
+    Ok(web::Json(log.desired_recording_state(device).await?))
 }
 
 /// `GET /v1/writings/devices/{id}/history` — everything this device has been
@@ -654,7 +655,7 @@ pub async fn list_writings(
     path: web::Path<String>,
 ) -> Result<web::Json<WritingList>, ApiFailure> {
     let device = path.into_inner();
-    // As on the phase route: a group id has no log, so the honest answer is a
+    // As on the recording route: a group id has no log, so the honest answer is a
     // redirection rather than an empty list.
     reject_group(&**catalog, &device, WRITINGS, "history").await?;
     let writings = log.writings_for(device).await?;
@@ -683,7 +684,8 @@ pub async fn list_writings(
              member is dispatched until every one is ready.", body = Acceptance),
         (status = 409, description = "One member refused, so the whole submission was \
              refused and nothing was recorded — admission is across every member at \
-             once. The body names the member and its phase.", body = ApiError),
+             once. The body names the member and its desired recording state.",
+         body = ApiError),
         (status = 404, description = "No device group has this id. A device id here is \
              this same 404, with the `/v1/writings/devices` URL that would have worked.",
          body = ApiError),
@@ -854,7 +856,7 @@ pub async fn set_group_metadata(
     responses(
         (status = 202, description = "Recorded, one writing per member. Settings carry \
              no recording freeze and no rendezvous, so this is accepted in every \
-             phase.", body = Acceptance),
+             desired_recording_state.", body = Acceptance),
         (status = 404, description = "No device group has this id.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -885,18 +887,18 @@ pub async fn set_group_setting(
     .await
 }
 
-/// `GET /v1/writings/groups/{id}/recording` — every member's phase, and the one
-/// they agree on.
+/// `GET /v1/writings/groups/{id}/recording` — every member's desired recording
+/// state, and the one they agree on.
 ///
 /// Not an alias of the device route with a group id, and cannot be: the outbox
 /// keys its logs by device, so that route answers `idle` at epoch `0` for a
 /// group id — a claim about a device that does not exist. This one asks the
 /// port once per member and reports what it actually said.
 ///
-/// `phase` is `null` when the members are not all in the same one, which is a
-/// finding rather than a missing value: a group whose members have diverged is
-/// one where a start reached some of them. Epochs are never rolled up — see
-/// [`GroupPhase::members`].
+/// `desired_recording_state` is `null` when the members are not all in the same
+/// one, which is a finding rather than a missing value: a group whose members
+/// have diverged is one where a start reached some of them. Epochs are never
+/// rolled up — see [`GroupDesiredRecordingState::members`].
 #[utoipa::path(
     get,
     path = "/groups/{id}/recording",
@@ -904,43 +906,47 @@ pub async fn set_group_setting(
     tag = "writings",
     params(("id" = String, Path, description = "Device group id.")),
     responses(
-        (status = 200, description = "Every member's accepted phase and epoch, plus \
-             the phase they agree on — `null` when they do not. This is what the \
+        (status = 200, description = "Every member's accepted recording state and \
+             epoch, plus the state they agree on — `null` when they do not. This is what the \
              *outbox* accepted, which moves before any device is contacted; the \
              group's `RUNNING_STATE` field is what the members reported.",
-         body = GroupPhase),
+         body = GroupDesiredRecordingState),
         (status = 404, description = "No device group has this id.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
 )]
-pub async fn read_group_phase(
+pub async fn read_group_desired_recording_state(
     catalog: web::Data<dyn DeviceCatalog>,
     log: web::Data<dyn WritingLog>,
     path: web::Path<String>,
-) -> Result<web::Json<GroupPhase>, ApiFailure> {
+) -> Result<web::Json<GroupDesiredRecordingState>, ApiFailure> {
     let group = path.into_inner();
     let member_ids = group_members(&**catalog, &group, WRITINGS, "recording").await?;
 
     let mut members = Vec::with_capacity(member_ids.len());
     for device in member_ids {
-        let recording = log.phase(device.clone()).await?;
-        members.push(MemberPhase {
+        let recording = log.desired_recording_state(device.clone()).await?;
+        members.push(MemberDesiredRecordingState {
             device,
-            phase: recording.phase,
+            desired_recording_state: recording.desired_recording_state,
             epoch: recording.epoch,
         });
     }
 
-    // `None` for an empty group as well as for a divided one: there is no phase
+    // `None` for an empty group as well as for a divided one: there is no state
     // every member is in when there is no member.
-    let phase = members
+    let desired_recording_state = members
         .first()
-        .map(|first| first.phase)
-        .filter(|phase| members.iter().all(|m| m.phase == *phase));
+        .map(|first| first.desired_recording_state)
+        .filter(|desired| {
+            members
+                .iter()
+                .all(|m| m.desired_recording_state == *desired)
+        });
 
-    Ok(web::Json(GroupPhase {
+    Ok(web::Json(GroupDesiredRecordingState {
         group,
-        phase,
+        desired_recording_state,
         members,
     }))
 }

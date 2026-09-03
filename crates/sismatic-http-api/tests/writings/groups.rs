@@ -248,7 +248,7 @@ async fn an_unconfigured_group_is_a_404_on_every_group_route() {
 /// `GET /v1/writings/devices/{group-id}/recording` used to report an idle device
 /// that does not exist. It now refuses the id and names this route instead.
 #[tokio::test]
-async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_id() {
+async fn the_group_recording_route_reports_members_and_the_device_route_refuses_the_id() {
     let (address, _outbox) = spawn();
     start_the_device_group(&address).await;
 
@@ -268,13 +268,13 @@ async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_
     assert_eq!(status, 200, "got {body}");
     assert_eq!(body["group"], GROUP);
     assert_eq!(
-        body["phase"], "recording",
+        body["desired_recording_state"], "recording",
         "every member was admitted, so they agree"
     );
     let members = body["members"].as_array().expect("members");
     assert_eq!(members.len(), 2);
     assert_eq!(members[0]["device"], ATRIUM);
-    assert_eq!(members[0]["phase"], "recording");
+    assert_eq!(members[0]["desired_recording_state"], "recording");
     assert_eq!(
         members[0]["epoch"], 1,
         "each member opened its own first take"
@@ -282,10 +282,11 @@ async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_
     assert_eq!(members[1]["device"], ANNEX);
 }
 
-/// A device group has no phase of its own, so `null` when the members have
-/// diverged — which is what a start that reached only some of them looks like.
+/// A device group has no desired state of its own, so `null` when the members
+/// have diverged — which is what a start that reached only some of them looks
+/// like.
 #[tokio::test]
-async fn a_divided_group_reports_no_shared_phase() {
+async fn a_divided_group_reports_no_shared_desired_state() {
     let (address, _outbox) = spawn();
     // One member started on its own, through the device half.
     let (status, ..) = post(&address, &format!("/devices/{ATRIUM}/recording/start")).await;
@@ -294,11 +295,11 @@ async fn a_divided_group_reports_no_shared_phase() {
     let (_, body) = get(&address, &format!("/groups/{GROUP}/recording")).await;
 
     assert!(
-        body["phase"].is_null(),
-        "the members disagree, so there is no group phase: {body}"
+        body["desired_recording_state"].is_null(),
+        "the members disagree, so there is no group-wide desired state: {body}"
     );
-    assert_eq!(body["members"][0]["phase"], "recording");
-    assert_eq!(body["members"][1]["phase"], "idle");
+    assert_eq!(body["members"][0]["desired_recording_state"], "recording");
+    assert_eq!(body["members"][1]["desired_recording_state"], "idle");
 }
 
 #[tokio::test]
@@ -307,9 +308,9 @@ async fn a_group_nothing_was_written_to_is_idle_on_every_member() {
 
     let (_, body) = get(&address, &format!("/groups/{GROUP}/recording")).await;
 
-    assert_eq!(body["phase"], "idle");
+    assert_eq!(body["desired_recording_state"], "idle");
     for member in body["members"].as_array().expect("members") {
-        assert_eq!(member["phase"], "idle");
+        assert_eq!(member["desired_recording_state"], "idle");
         assert_eq!(member["epoch"], 0);
     }
 }

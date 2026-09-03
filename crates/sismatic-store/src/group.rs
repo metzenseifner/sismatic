@@ -1,36 +1,39 @@
 //! What a group was told to be — the write side's belief about a *device group*.
 //!
-//! [`outbox`](crate::outbox) holds one [`Phase`](sismatic_api_types::Phase) per
+//! [`outbox`](crate::outbox) holds one
+//! [`DesiredRecordingState`](sismatic_api_types::DesiredRecordingState) per
 //! device, which is the right grain for admission: a group start has to be
 //! decided against every member's own state. This port holds the other half —
 //! the value the group as a whole was last asked to hold, per field — and it
-//! exists because the per-device phases cannot answer the question a device
-//! group actually raises.
+//! exists because the per-device desired states cannot answer the question a
+//! device group actually raises.
 //!
 //! # The failure this closes
 //!
 //! Five recorders are told to start. The batch times out under
 //! [`Barrier::FailBatch`](sismatic_api_types::Barrier::FailBatch), every row
-//! fails, every phase rolls back, and every member reports `stopped`. Read
-//! member by member the fleet is perfectly consistent: five idle recorders that
-//! agree with their own phases and with each other. Nothing anywhere records
-//! that a lecture was supposed to be recording.
+//! fails, every desired state rolls back, and every member reports `stopped`.
+//! Read member by member the fleet is perfectly consistent: five idle
+//! recorders that agree with their own desired states and with each other.
+//! Nothing anywhere records that a lecture was supposed to be recording.
 //!
 //! An expectation records it. It is written when the submission is *admitted*,
 //! in the same critical section, so it exists exactly when the request was
 //! accepted — and it is deliberately **not** rolled back when a writing fails,
-//! unlike [`rollback`](crate::outbox::rollback). The phase rolls back because
-//! it gates admission and a stuck phase would freeze metadata forever; the
-//! expectation gates nothing and is read by nobody but a dashboard, so leaving
-//! it standing costs nothing and is the only way the drift stays visible.
+//! unlike [`rollback`](crate::outbox::rollback). The desired state rolls back
+//! because it gates admission and a stuck one would freeze metadata forever;
+//! the expectation gates nothing and is read by nobody but a dashboard, so
+//! leaving it standing costs nothing and is the only way the drift stays
+//! visible.
 //!
-//! # Why it is keyed by field and not by phase
+//! # Why it is keyed by field and not by desired recording state
 //!
-//! A phase-shaped expectation would cover the three lifecycle verbs and nothing
-//! else. Keyed by field it also covers the two writes, so a device group where
-//! four members took the new title and one did not is the same kind of finding
-//! as a device group where four started — reported through one shape, on the
-//! same routes, with no second concept for a client to learn.
+//! An expectation shaped like a `DesiredRecordingState` would cover the three
+//! lifecycle verbs and nothing else. Keyed by field it also covers the two
+//! writes, so a device group where four members took the new title and one did
+//! not is the same kind of finding as a device group where four started —
+//! reported through one shape, on the same routes, with no second concept for
+//! a client to learn.
 //!
 //! The cost is [`RECORDING_STATE_FIELD`]: this crate has to name the field the
 //! lifecycle verbs land on, and it cannot see the catalog that defines it. See

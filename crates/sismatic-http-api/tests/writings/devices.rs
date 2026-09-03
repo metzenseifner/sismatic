@@ -6,7 +6,7 @@
 //! device to address it. It is tested here because every id it is given is
 //! minted by a device-addressed submission above.
 
-use sismatic_api_types::{Intent, Phase};
+use sismatic_api_types::{DesiredRecordingState, Intent};
 
 use crate::{DEVICE, GROUP, SCOPE, get, post, put, recorded_intents, spawn_app};
 
@@ -186,8 +186,9 @@ async fn a_refused_write_records_nothing() {
 // ---- an id the catalog does not hold -----------------------------------
 
 /// The failure the catalog exists to prevent. Without it the outbox admits the
-/// writing against a fresh idle phase and answers `202`, and the caller learns
-/// its recording never started by polling a writing that fails at dispatch.
+/// writing against a desired state of `Idle` and answers `202`, and the caller
+/// learns its recording never started by polling a writing that fails at
+/// dispatch.
 #[tokio::test]
 async fn a_write_to_an_unconfigured_device_is_refused_at_submission() {
     let (address, outbox) = spawn_app();
@@ -315,21 +316,27 @@ async fn two_writes_without_a_key_are_two_writings() {
 // ---- reading the write side -------------------------------------------
 
 #[tokio::test]
-async fn the_phase_route_reports_what_the_write_side_accepted() {
+async fn the_recording_route_reports_what_the_write_side_accepted() {
     let (address, _outbox) = spawn_app();
 
     let (status, body) = get(&address, &url("/recording")).await;
     assert_eq!(status, 200);
     // An unknown device is idle at epoch 0: this port holds what was submitted
     // and no catalog of what exists.
-    assert_eq!(body, serde_json::json!({"phase": "idle", "epoch": 0}));
+    assert_eq!(
+        body,
+        serde_json::json!({"desired_recording_state": "idle", "epoch": 0})
+    );
 
     post(&address, &url("/recording/start")).await;
     let (_, body) = get(&address, &url("/recording")).await;
     // Moved by the *acceptance*, before any device was contacted. This is the
     // write side's belief, not the device's last word — that is
     // `/v1/readings/devices/{id}/fields/RUNNING_STATE`.
-    assert_eq!(body, serde_json::json!({"phase": "recording", "epoch": 1}));
+    assert_eq!(
+        body,
+        serde_json::json!({"desired_recording_state": "recording", "epoch": 1})
+    );
 }
 
 #[tokio::test]
@@ -428,14 +435,18 @@ async fn a_write_without_a_value_is_refused() {
     assert!(recorded_intents(&outbox, DEVICE).await.is_empty());
 }
 
-/// Guards the phase the assertions above are written against — a suite that
-/// silently started from `Recording` would invert half of them.
+/// Guards the desired state the assertions above are written against — a suite
+/// that silently started from `Recording` would invert half of them.
 #[tokio::test]
 async fn a_fresh_outbox_starts_idle() {
     let (_address, outbox) = spawn_app();
     use sismatic_store::outbox::WritingLog;
     assert_eq!(
-        outbox.phase(DEVICE.to_owned()).await.expect("phase").phase,
-        Phase::Idle
+        outbox
+            .desired_recording_state(DEVICE.to_owned())
+            .await
+            .expect("recording state")
+            .desired_recording_state,
+        DesiredRecordingState::Idle
     );
 }

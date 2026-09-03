@@ -14,12 +14,13 @@
 //!
 //! # Why the write side needs it
 //!
-//! Without a catalog, `POST /v1/writings/devices/typo/recording/start` is accepted: the
-//! outbox holds what was submitted and no list of what exists, so it admits the
-//! writing against a fresh idle phase and answers `202`. The caller then learns
-//! its recording never started by polling a writing that fails at dispatch,
-//! minutes later, with a message about an unknown device. A `404` at submission
-//! is the same information, delivered when it is still actionable.
+//! Without a catalog, `POST /v1/writings/devices/typo/recording/start` is
+//! accepted: the outbox holds what was submitted and no list of what exists,
+//! so it admits the writing against a desired recording state of `Idle` and
+//! answers `202`. The caller then learns its recording never started by
+//! polling a writing that fails at dispatch, minutes later, with a message
+//! about an unknown device. A `404` at submission is the same information,
+//! delivered when it is still actionable.
 //!
 //! That is a deliberate divergence from the read side, which answers an unknown
 //! device with an empty list rather than a `404`. The two differ because the

@@ -74,13 +74,14 @@ pub use device::{
 };
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
 pub use group::{
-    GroupExpectation, GroupFieldState, GroupFieldStateList, GroupHistory, GroupPhase,
-    GroupWritingList, MemberHistory, MemberPhase, MemberState, MemberWritings, SyncState,
+    GroupDesiredRecordingState, GroupExpectation, GroupFieldState, GroupFieldStateList,
+    GroupHistory, GroupWritingList, MemberDesiredRecordingState, MemberHistory, MemberState,
+    MemberWritings, SyncState,
 };
 pub use instruction::{FieldCatalog, InstructionSummary, WritingsCatalog};
 pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
 pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};
 pub use writing::{
-    Acceptance, Accepted, Barrier, BatchId, Intent, Phase, RecordingPhase, Rejection, WritingId,
-    WritingList, WritingRecord, WritingStatus,
+    Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
+    Intent, Rejection, WritingId, WritingList, WritingRecord, WritingStatus,
 };

@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sismatic_api_types::{
-    Acceptance, Barrier, BatchId, DeviceId, GroupId, Intent, Phase, ReadingValue, RecordingPhase,
-    RecordingState, Rejection, Timestamp, WritingId, WritingRecord,
+    Acceptance, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState, DeviceId,
+    GroupId, Intent, ReadingValue, RecordingState, Rejection, Timestamp, WritingId, WritingRecord,
 };
 
 use crate::{ReadError, WriteError};
@@ -40,7 +40,8 @@ pub struct Submission {
     /// trace, including no claim about what the device group was going to be.
     ///
     /// `None` for a device-addressed request. A device is not a device group,
-    /// and a single device's own phase already says what it was told.
+    /// and a single device's own desired recording state already says what it
+    /// was told.
     pub group: Option<GroupId>,
     /// `Some` when the members must act together — a rendezvous is armed and no
     /// row is dispatched until every one is ready. `None` for a single device,
@@ -68,13 +69,13 @@ pub struct BarrierPolicy {
 pub enum SubmitError {
     /// The admission table refused it.
     ///
-    /// Carries the phase that refused *and* the device whose phase it was: a
+    /// Carries the state that refused *and* the device whose state it was: a
     /// group submission is admitted across every member, so "already
     /// recording" is not actionable without knowing which member said it.
     Rejected {
         device: DeviceId,
         rejection: Rejection,
-        phase: Phase,
+        desired_recording_state: DesiredRecordingState,
     },
     /// The caller handed a `Submission` that does not describe anything: no
     /// targets, or a different number of ids than targets. A programming error
@@ -88,15 +89,15 @@ pub enum SubmitError {
 /// Appending intent. The only write capability the HTTP layer is given.
 #[async_trait::async_trait]
 pub trait WritingSubmit: Send + Sync {
-    /// Admit `submission` against the device's current phase and, if admitted,
-    /// append it to that device's queue.
+    /// Admit `submission` against the device's current desired recording state
+    /// and, if admitted, append it to that device's queue.
     ///
     /// **Atomicity is part of this contract**, and for a group it is atomicity
     /// across *every* target. The admission decision and the append are one
-    /// unit: an implementation that reads one member's phase, releases its
-    /// lock, and then appends does not satisfy this trait, and neither does one
-    /// that admits member A, finds member B refuses, and leaves A's row behind.
-    /// A refused submission records nothing at all.
+    /// unit: an implementation that reads one member's desired state, releases
+    /// its lock, and then appends does not satisfy this trait, and neither
+    /// does one that admits member A, finds member B refuses, and leaves A's
+    /// row behind. A refused submission records nothing at all.
     ///
     /// When [`Submission::group`] is set, "records nothing at all" includes the
     /// group expectation [`expects`](crate::group::expects) derives from the
@@ -114,22 +115,32 @@ pub trait WritingLog: Send + Sync {
     /// Every writing recorded for `device`, newest first.
     async fn writings_for(&self, device: DeviceId) -> Result<Vec<WritingRecord>, ReadError>;
 
-    /// The device's phase and epoch. An unknown device reports
-    /// `Phase::Idle` at epoch 0, for the same reason `latest` reports `None`:
-    /// this port holds what was submitted and no catalog of what exists.
-    async fn phase(&self, device: DeviceId) -> Result<RecordingPhase, ReadError>;
+    /// The device's desired recording state and epoch. An unknown device
+    /// reports `DesiredRecordingState::Idle` at epoch 0, for the same reason
+    /// `latest` reports `None`: this port holds what was submitted and no
+    /// catalog of what exists.
+    async fn desired_recording_state(
+        &self,
+        device: DeviceId,
+    ) -> Result<DeviceDesiredRecordingState, ReadError>;
 }
 
-/// Fold the device's observed state into the device's phase state
+/// Fold the device's observed state into the device's desired recording state
 /// to avoid the residual race (an operator started a recording from the front panel)
 ///
-/// without this, the device's phase would be "Idle" while the device is actually recording.
-pub const fn reconcile(phase: Phase, observed: RecordingState) -> Phase {
-    match (phase, observed) {
+/// without this, the device's desired state would be "Idle" while the device is
+/// actually recording.
+pub const fn reconcile(
+    desired_recording_state: DesiredRecordingState,
+    observed: RecordingState,
+) -> DesiredRecordingState {
+    use DesiredRecordingState::{Idle, Paused, Recording};
+
+    match (desired_recording_state, observed) {
         (p, RecordingState::Unknown) => p,
-        (_, RecordingState::Stopped) => Phase::Idle,
-        (_, RecordingState::Started) => Phase::Recording,
-        (_, RecordingState::Paused) => Phase::Paused,
+        (_, RecordingState::Stopped) => Idle,
+        (_, RecordingState::Started) => Recording,
+        (_, RecordingState::Paused) => Paused,
     }
 }
 
@@ -198,8 +209,8 @@ pub trait WritingDrain: Send + Sync {
     ) -> Result<Option<Claim>, WriteError>;
 
     /// Record what happened. A `Failed` outcome on a writing whose recorded
-    /// transition moved the phase rolls that phase back, so a start that never
-    /// reached the device does not freeze metadata forever.
+    /// transition moved the desired recording state rolls that state back, so
+    /// a start that never reached the device does not freeze metadata forever.
     async fn settle(
         &self,
         id: WritingId,
@@ -207,9 +218,9 @@ pub trait WritingDrain: Send + Sync {
         at: Timestamp,
     ) -> Result<(), WriteError>;
 
-    /// Fold a state the device actually reported into the phase. This is how a
-    /// recording started from the device's front panel becomes visible to the
-    /// admission table.
+    /// Fold a state the device actually reported into the desired recording
+    /// state. This is how a recording started from the device's front panel
+    /// becomes visible to the admission table.
     async fn observe(&self, device: DeviceId, observed: RecordingState) -> Result<(), WriteError>;
 
     /// Writings left `InFlight` by a previous process. Returned so the relay
@@ -242,36 +253,41 @@ impl Verb {
     }
 }
 
-/// The admission decision, as one total function over `Phase × Verb`.
+/// The admission decision, as one total function over `DesiredRecordingState × Verb`.
 ///
 /// Fifteen cases, all written out, so the policy reads as a table rather than
 /// being inferred from control flow — and is testable without a device, a
 /// store, a clock, or a task.
 ///
-/// `Ok(phase)` is the phase the device is now *intended* to be in. A verb that
-/// does not move the recording returns the phase it was given.
-pub const fn admit(phase: Phase, verb: Verb) -> Result<Phase, Rejection> {
-    match (phase, verb) {
-        (Phase::Idle, Verb::Start) => Ok(Phase::Recording),
-        (Phase::Idle, Verb::Stop) => Err(Rejection::NotRecording),
-        (Phase::Idle, Verb::Pause) => Err(Rejection::NotRecording),
-        (Phase::Idle, Verb::WriteMetadata) => Ok(Phase::Idle),
-        (Phase::Idle, Verb::WriteSetting) => Ok(Phase::Idle),
+/// `Ok(state)` is the state the device is now *intended* to be in. A verb that
+/// does not move the recording returns the state it was given.
+pub const fn admit(
+    desired_recording_state: DesiredRecordingState,
+    verb: Verb,
+) -> Result<DesiredRecordingState, Rejection> {
+    use DesiredRecordingState::{Idle, Paused, Recording};
 
-        (Phase::Recording, Verb::Start) => Err(Rejection::AlreadyRecording),
-        (Phase::Recording, Verb::Stop) => Ok(Phase::Idle),
-        (Phase::Recording, Verb::Pause) => Ok(Phase::Paused),
-        (Phase::Recording, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
-        (Phase::Recording, Verb::WriteSetting) => Ok(Phase::Recording),
+    match (desired_recording_state, verb) {
+        (Idle, Verb::Start) => Ok(Recording),
+        (Idle, Verb::Stop) => Err(Rejection::NotRecording),
+        (Idle, Verb::Pause) => Err(Rejection::NotRecording),
+        (Idle, Verb::WriteMetadata) => Ok(Idle),
+        (Idle, Verb::WriteSetting) => Ok(Idle),
+
+        (Recording, Verb::Start) => Err(Rejection::AlreadyRecording),
+        (Recording, Verb::Stop) => Ok(Idle),
+        (Recording, Verb::Pause) => Ok(Paused),
+        (Recording, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
+        (Recording, Verb::WriteSetting) => Ok(Recording),
 
         // A paused recording is still a recording: `RecordingState::is_recording`
         // in core returns true for `Paused`, and the metadata of the take in
         // progress is no more writable than it was a moment ago.
-        (Phase::Paused, Verb::Start) => Ok(Phase::Recording),
-        (Phase::Paused, Verb::Stop) => Ok(Phase::Idle),
-        (Phase::Paused, Verb::Pause) => Err(Rejection::AlreadyPaused),
-        (Phase::Paused, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
-        (Phase::Paused, Verb::WriteSetting) => Ok(Phase::Paused),
+        (Paused, Verb::Start) => Ok(Recording),
+        (Paused, Verb::Stop) => Ok(Idle),
+        (Paused, Verb::Pause) => Err(Rejection::AlreadyPaused),
+        (Paused, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
+        (Paused, Verb::WriteSetting) => Ok(Paused),
     }
 }
 
@@ -280,30 +296,38 @@ pub const fn admit(phase: Phase, verb: Verb) -> Result<Phase, Rejection> {
 ///
 /// `Paused -> Recording` is a *resume* and does not open a new take, so it does
 /// not advance the counter.
-pub const fn opens_recording(before: Phase, after: Phase) -> bool {
-    matches!((before, after), (Phase::Idle, Phase::Recording))
+pub const fn opens_recording(before: DesiredRecordingState, after: DesiredRecordingState) -> bool {
+    use DesiredRecordingState::{Idle, Recording};
+
+    matches!((before, after), (Idle, Recording))
 }
 
-/// Undo the phase change a verb caused, for a writing that failed terminally.
+/// Undo the change a verb made to the desired recording state, for a writing
+/// that failed terminally.
 ///
 /// Conservative by construction: it only moves back along the three transitions
-/// a failure can invalidate, and leaves every other phase alone. The point is
+/// a failure can invalidate, and leaves every other state alone. The point is
 /// that a start which never reached the device must stop freezing metadata —
 /// without this, one unreachable recorder makes its own metadata permanently
 /// unwritable. Anything this gets wrong is corrected by the next [`reconcile`]
 /// against a state the device actually reported.
 ///
-/// Not the inverse of [`admit`], and cannot be: `admit` maps two phases onto
-/// `Recording` (a start from idle and a resume from paused), so the phase alone
+/// Not the inverse of [`admit`], and cannot be: `admit` maps two states onto
+/// `Recording` (a start from idle and a resume from paused), so the state alone
 /// does not say which one to undo. Rolling `Recording` back to `Idle` for a
 /// `Start` is right for the first and wrong for the second, and it is the safe
 /// direction of wrong — it unfreezes metadata that a failed writing should not
 /// have frozen, rather than freezing metadata nothing is recording.
-pub const fn rollback(phase: Phase, verb: Verb) -> Phase {
-    match (phase, verb) {
-        (Phase::Recording, Verb::Start) => Phase::Idle,
-        (Phase::Idle, Verb::Stop) => Phase::Recording,
-        (Phase::Paused, Verb::Pause) => Phase::Recording,
+pub const fn rollback(
+    desired_recording_state: DesiredRecordingState,
+    verb: Verb,
+) -> DesiredRecordingState {
+    use DesiredRecordingState::{Idle, Paused, Recording};
+
+    match (desired_recording_state, verb) {
+        (Recording, Verb::Start) => Idle,
+        (Idle, Verb::Stop) => Recording,
+        (Paused, Verb::Pause) => Recording,
         (other, _) => other,
     }
 }
@@ -314,16 +338,20 @@ pub const fn rollback(phase: Phase, verb: Verb) -> Phase {
 /// it is stamped `epoch + 1` — the same number the `Start` that follows it
 /// will carry. That is what makes "these fields belong to that take" a
 /// checkable statement rather than an assumption about ordering.
-pub const fn epoch_of(before: Phase, after: Phase, epoch: u64) -> u64 {
+pub const fn epoch_of(
+    before: DesiredRecordingState,
+    after: DesiredRecordingState,
+    epoch: u64,
+) -> u64 {
     match (before, after) {
-        (Phase::Idle, _) => epoch + 1,
+        (DesiredRecordingState::Idle, _) => epoch + 1,
         _ => epoch,
     }
 }
 
 #[test]
 fn the_admission_policy_is_a_table() {
-    use Phase::*;
+    use DesiredRecordingState::*;
     use Rejection::*;
     use Verb::*;
 
@@ -347,11 +375,16 @@ fn the_admission_policy_is_a_table() {
 /// The requirement, stated once against the whole domain rather than per case.
 #[test]
 fn metadata_is_writable_exactly_when_no_recording_is_in_progress() {
-    for phase in [Phase::Idle, Phase::Recording, Phase::Paused] {
+    for desired_recording_state in [
+        DesiredRecordingState::Idle,
+        DesiredRecordingState::Recording,
+        DesiredRecordingState::Paused,
+    ] {
         assert_eq!(
-            admit(phase, Verb::WriteMetadata).is_ok(),
-            phase == Phase::Idle,
-            "metadata admissibility disagreed with the phase at {phase:?}"
+            admit(desired_recording_state, Verb::WriteMetadata).is_ok(),
+            desired_recording_state == DesiredRecordingState::Idle,
+            "metadata admissibility disagreed with the desired state at \
+             {desired_recording_state:?}"
         );
     }
 }
@@ -360,44 +393,80 @@ fn metadata_is_writable_exactly_when_no_recording_is_in_progress() {
 /// leaving that device's metadata frozen for the life of the process.
 #[test]
 fn a_failed_start_stops_freezing_metadata() {
-    let after_failure = rollback(Phase::Recording, Verb::Start);
-    assert_eq!(after_failure, Phase::Idle);
-    assert_eq!(admit(after_failure, Verb::WriteMetadata), Ok(Phase::Idle));
+    let after_failure = rollback(DesiredRecordingState::Recording, Verb::Start);
+    assert_eq!(after_failure, DesiredRecordingState::Idle);
+    assert_eq!(
+        admit(after_failure, Verb::WriteMetadata),
+        Ok(DesiredRecordingState::Idle)
+    );
 }
 
-/// A write never moved the phase, so a failed one has nothing to undo. Stated
-/// because the tempting simplification — roll back whenever anything fails —
-/// would unfreeze a live recording on a failed metadata write.
+/// A write never moved the desired recording state, so a failed one has
+/// nothing to undo. Stated because the tempting simplification — roll back
+/// whenever anything fails — would unfreeze a live recording on a failed
+/// metadata write.
 #[test]
 fn rolling_back_a_verb_that_moves_nothing_is_the_identity() {
-    for phase in [Phase::Idle, Phase::Recording, Phase::Paused] {
+    for desired_recording_state in [
+        DesiredRecordingState::Idle,
+        DesiredRecordingState::Recording,
+        DesiredRecordingState::Paused,
+    ] {
         for verb in [Verb::WriteMetadata, Verb::WriteSetting] {
-            assert_eq!(rollback(phase, verb), phase);
+            assert_eq!(
+                rollback(desired_recording_state, verb),
+                desired_recording_state
+            );
         }
     }
 }
 
 /// `rollback` undoes only the transition the verb could have caused. A stop
-/// that fails while the phase is already `Paused` was not the thing that put it
-/// there, so it is left alone for [`reconcile`] to settle.
+/// that fails while the desired state is already `Paused` was not the thing
+/// that put it there, so it is left alone for [`reconcile`] to settle.
 #[test]
-fn rollback_leaves_a_phase_the_verb_did_not_produce() {
-    assert_eq!(rollback(Phase::Paused, Verb::Stop), Phase::Paused);
-    assert_eq!(rollback(Phase::Idle, Verb::Start), Phase::Idle);
-    assert_eq!(rollback(Phase::Recording, Verb::Pause), Phase::Recording);
+fn rollback_leaves_a_desired_state_the_verb_did_not_produce() {
+    assert_eq!(
+        rollback(DesiredRecordingState::Paused, Verb::Stop),
+        DesiredRecordingState::Paused
+    );
+    assert_eq!(
+        rollback(DesiredRecordingState::Idle, Verb::Start),
+        DesiredRecordingState::Idle
+    );
+    assert_eq!(
+        rollback(DesiredRecordingState::Recording, Verb::Pause),
+        DesiredRecordingState::Recording
+    );
 }
 
 /// The device is the authority on every disagreement but one.
 #[test]
 fn reconcile_lets_the_device_win_except_when_it_says_nothing() {
-    for phase in [Phase::Idle, Phase::Recording, Phase::Paused] {
-        assert_eq!(reconcile(phase, RecordingState::Stopped), Phase::Idle);
-        assert_eq!(reconcile(phase, RecordingState::Started), Phase::Recording);
-        assert_eq!(reconcile(phase, RecordingState::Paused), Phase::Paused);
+    for desired_recording_state in [
+        DesiredRecordingState::Idle,
+        DesiredRecordingState::Recording,
+        DesiredRecordingState::Paused,
+    ] {
+        assert_eq!(
+            reconcile(desired_recording_state, RecordingState::Stopped),
+            DesiredRecordingState::Idle
+        );
+        assert_eq!(
+            reconcile(desired_recording_state, RecordingState::Started),
+            DesiredRecordingState::Recording
+        );
+        assert_eq!(
+            reconcile(desired_recording_state, RecordingState::Paused),
+            DesiredRecordingState::Paused
+        );
         // A garbled reply is not evidence of anything. Reading `Unknown` as
         // `Stopped` would unfreeze metadata mid-recording, which is the one
         // outcome the freeze exists to prevent.
-        assert_eq!(reconcile(phase, RecordingState::Unknown), phase);
+        assert_eq!(
+            reconcile(desired_recording_state, RecordingState::Unknown),
+            desired_recording_state
+        );
     }
 }
 
@@ -406,14 +475,44 @@ fn reconcile_lets_the_device_win_except_when_it_says_nothing() {
 /// the metadata written for the take still running.
 #[test]
 fn the_epoch_advances_on_a_start_and_not_on_a_resume() {
-    assert!(opens_recording(Phase::Idle, Phase::Recording));
-    assert!(!opens_recording(Phase::Paused, Phase::Recording));
+    assert!(opens_recording(
+        DesiredRecordingState::Idle,
+        DesiredRecordingState::Recording
+    ));
+    assert!(!opens_recording(
+        DesiredRecordingState::Paused,
+        DesiredRecordingState::Recording
+    ));
 
     // A metadata write admitted while idle is stamped with the epoch of the
     // recording it is preparing — the same one the start that follows carries.
-    assert_eq!(epoch_of(Phase::Idle, Phase::Idle, 4), 5);
-    assert_eq!(epoch_of(Phase::Idle, Phase::Recording, 4), 5);
+    assert_eq!(
+        epoch_of(DesiredRecordingState::Idle, DesiredRecordingState::Idle, 4),
+        5
+    );
+    assert_eq!(
+        epoch_of(
+            DesiredRecordingState::Idle,
+            DesiredRecordingState::Recording,
+            4
+        ),
+        5
+    );
     // Nothing admitted during a take can belong to a different one.
-    assert_eq!(epoch_of(Phase::Recording, Phase::Recording, 5), 5);
-    assert_eq!(epoch_of(Phase::Paused, Phase::Recording, 5), 5);
+    assert_eq!(
+        epoch_of(
+            DesiredRecordingState::Recording,
+            DesiredRecordingState::Recording,
+            5
+        ),
+        5
+    );
+    assert_eq!(
+        epoch_of(
+            DesiredRecordingState::Paused,
+            DesiredRecordingState::Recording,
+            5
+        ),
+        5
+    );
 }
