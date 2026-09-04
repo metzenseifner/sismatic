@@ -298,6 +298,30 @@ mod tests {
         }
     }
 
+    /// A firmware that answers the live-state read with the address echoed back
+    /// — the padded form the enable *write* really does use — still decodes to
+    /// the flag at the end of the line, so the bare-flag parser is not merely
+    /// correct for the attested reply but safe against the other shape.
+    #[test]
+    fn a_live_state_read_survives_an_echoed_address() {
+        let instr = Query::RtmpStream1LiveState.instruction();
+        for reply in ["1\r\n", "RtmpS1*1*1\r\n", "RtmpS01*01*1\r\n"] {
+            assert_eq!(
+                drive(&instr, reply),
+                Step::Done(Value::Flag(true)),
+                "{reply:?}"
+            );
+        }
+        let off = Query::RtmpBackupStream3LiveState.instruction();
+        for reply in ["0\r\n", "RtmpS02*03*0\r\n"] {
+            assert_eq!(
+                drive(&off, reply),
+                Step::Done(Value::Flag(false)),
+                "{reply:?}"
+            );
+        }
+    }
+
     #[test]
     fn parses_port_as_u16() {
         let instr = Query::SshPort.instruction();
