@@ -53,13 +53,22 @@ pub struct RusshTransport {
     channel: Channel<Msg>,
     /// Bytes from a channel message that did not fit the previous `read` buffer.
     pending: Vec<u8>,
+    /// The `connect` span, kept alive for as long as the channel is. Exchanges
+    /// hang off it (see [`Transport::span`]), so the wire events below inherit
+    /// the connection's identity from their enclosing exchange.
     span: tracing::Span,
 }
 
 #[async_trait]
 impl Transport for RusshTransport {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        debug!(parent: &self.span, data = %bytes.escape_ascii(), "TX");
+        // Deliberately unparented: these events belong to whichever exchange is
+        // running, and the controller has already made that exchange's span the
+        // current one — a span that is itself a child of `self.span`, so the
+        // connection's fields arrive by inheritance. Naming `self.span` as the
+        // parent here instead would cut the exchange out of the chain and cost
+        // the line its `instruction` and `exchange_id`.
+        debug!(data = %bytes.escape_ascii(), "TX");
         self.channel.data(bytes).await.map_err(io_error)
     }
 
@@ -91,8 +100,12 @@ impl Transport for RusshTransport {
         let n = self.pending.len().min(buf.len());
         buf[..n].copy_from_slice(&self.pending[..n]);
         self.pending.drain(..n);
-        debug!(parent: &self.span, len = n, data = %buf[..n].escape_ascii(), "RX");
+        debug!(len = n, data = %buf[..n].escape_ascii(), "RX");
         Ok(n)
+    }
+
+    fn span(&self) -> tracing::Span {
+        self.span.clone()
     }
 }
 

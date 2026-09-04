@@ -10,9 +10,17 @@
 //! The reply is accumulated as raw bytes and only the valid-UTF-8 prefix is
 //! handed to the parser each round, so a reply arriving in fragments — even one
 //! that splits a multi-byte character across two reads — parses correctly.
+//!
+//! It is also the layer that gives the wire its trace structure. One exchange is
+//! exactly one write and the reads that answer it, so [`Controller::run`] is the
+//! only place that can name a `TX` and the `RX` lines belonging to it as one
+//! thing — see its docs for the span that does so.
 
 use std::fmt;
 use std::time::Duration;
+
+use tracing::{Instrument, Span, debug_span};
+use uuid::Uuid;
 
 use crate::protocol::SisError;
 use crate::protocol::Step;
@@ -78,12 +86,16 @@ impl std::error::Error for ControllerError {}
 pub struct Controller {
     transport: Box<dyn Transport>,
     exchange_timeout: Duration,
+    /// The transport's span, captured once: the parent of every exchange span
+    /// this controller opens. See [`Transport::span`].
+    connection: Span,
 }
 
 impl Controller {
     /// Wrap an open transport. `exchange_timeout` bounds each [`run`](Self::run).
     pub fn new(transport: Box<dyn Transport>, exchange_timeout: Duration) -> Self {
         Self {
+            connection: transport.span(),
             transport,
             exchange_timeout,
         }
@@ -91,14 +103,41 @@ impl Controller {
 
     /// Send `instruction` and return the parsed reply, or fail if the exchange
     /// times out, the channel closes, or the transport errors.
+    ///
+    /// The whole exchange — timeout included, so a stall is inside it too — runs
+    /// in an `exchange` span carrying a fresh `exchange_id` (a v4 [`Uuid`]) and
+    /// the `instruction`'s name, itself a child of the connection's span. Three
+    /// questions a log backend can then answer that it could not before: which
+    /// `RX` lines answer which `TX` (same `exchange_id`), what was being asked
+    /// (`instruction`, rather than decoding the escaped payload by eye), and
+    /// over which connection to which device (inherited from the parent).
+    ///
+    /// The span is *entered* around the transport calls rather than merely named
+    /// as their parent, which is the part that has to be right:
+    /// `tracing-bunyan-formatter` copies fields from the span that is current
+    /// when an event fires, not from the event's declared parent, so an event
+    /// that is only pointed at a span logs none of its fields.
     pub async fn run(&mut self, instruction: &Instruction) -> Result<Value, ControllerError> {
-        match tokio::time::timeout(self.exchange_timeout, self.exchange(instruction)).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(ControllerError::Timeout {
-                instruction: instruction.name.clone(),
-                after: self.exchange_timeout,
-            }),
+        // Field values are evaluated only if a subscriber wants the span, so the
+        // uuid is not minted on a fleet's worth of exchanges when debug is off.
+        let span = debug_span!(
+            parent: &self.connection,
+            "exchange",
+            exchange_id = %Uuid::new_v4(),
+            instruction = %instruction.name,
+        );
+        let exchange_timeout = self.exchange_timeout;
+        async move {
+            match tokio::time::timeout(exchange_timeout, self.exchange(instruction)).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(ControllerError::Timeout {
+                    instruction: instruction.name.clone(),
+                    after: exchange_timeout,
+                }),
+            }
         }
+        .instrument(span)
+        .await
     }
 
     /// The untimed write-then-read-until-complete loop. [`run`](Self::run) wraps

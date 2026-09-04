@@ -40,6 +40,18 @@ pub trait Transport: Send {
     /// Read whatever bytes are available into `buf`, returning how many were
     /// read. `Ok(0)` means the peer closed the channel.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
+
+    /// The span this channel belongs to — the one the connection was opened in,
+    /// carrying whatever identifies it (for SSH: the connection id, the device,
+    /// its host and port).
+    ///
+    /// The layer above parents each exchange's span to this one, which is what
+    /// puts connection identity on the `TX`/`RX` events without the transport
+    /// having to repeat those fields on every line. A channel opened out of band
+    /// keeps the default, its creator's ambient span.
+    fn span(&self) -> tracing::Span {
+        tracing::Span::current()
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
