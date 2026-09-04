@@ -8,7 +8,7 @@
 //! when the two instruction catalogs did.
 //!
 //! The outbox and the catalog are the real adapters rather than doubles, for
-//! the reason `tests/readings/` already gives for using the real
+//! the reason `tests/reads/` already gives for using the real
 //! `MemoryStore`: a double would have to restate the admission table and the
 //! epoch rules, and a test of a handler over a double that drifted from the
 //! adapter would pass while the server was wrong.
@@ -21,16 +21,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{
     Barrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary, InstructionSummary,
-    Timestamp, WritingsCatalog,
+    Timestamp, WritesCatalog,
 };
 use sismatic_http_api::Stamp;
 use sismatic_store::group::DynGroupState;
-use sismatic_store::outbox::{DynWritingLog, DynWritingSubmit};
+use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit};
 use sismatic_store::status::DeviceStatus;
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox};
 
-/// The instant every submitted writing is stamped with. Fixed, because no
+/// The instant every submitted write is stamped with. Fixed, because no
 /// assertion here is about time passing, and a real clock would put an
 /// unpredictable value in a body a test wants to compare whole.
 pub const AT: &str = "2026-08-17T00:00:00.000Z";
@@ -39,7 +39,7 @@ pub const AT: &str = "2026-08-17T00:00:00.000Z";
 ///
 /// The whole reason [`Stamp`] is injected. With a UUID a test can assert that
 /// *an* id came back and that the `Location` header contains *something*; with
-/// a counter it can assert the header names the writing the body does, and that
+/// a counter it can assert the header names the write the body does, and that
 /// a second submission got a second id rather than reusing the first.
 pub fn counting_stamp() -> Stamp {
     let issued = AtomicUsize::new(0);
@@ -122,8 +122,8 @@ pub fn field_catalog() -> FieldCatalog {
 }
 
 /// The write-side catalog the suites run against unless they state their own.
-pub fn writings_catalog() -> WritingsCatalog {
-    WritingsCatalog {
+pub fn writes_catalog() -> WritesCatalog {
+    WritesCatalog {
         commands: vec![instruction(
             "STARTRECORDING",
             &["START"],
@@ -168,7 +168,7 @@ pub fn serve_with_status(
         catalog,
         status,
         field_catalog(),
-        writings_catalog(),
+        writes_catalog(),
     )
 }
 
@@ -186,13 +186,13 @@ pub fn serve_all(
     catalog: MemoryCatalog,
     status: StatedStatus,
     fields: FieldCatalog,
-    writings: WritingsCatalog,
+    writes: WritesCatalog,
 ) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
     let status: DynDeviceStatus = Arc::new(status);
-    let submit: DynWritingSubmit = Arc::new(outbox.clone());
-    let log: DynWritingLog = Arc::new(outbox.clone());
+    let submit: DynWriteSubmit = Arc::new(outbox.clone());
+    let log: DynWriteLog = Arc::new(outbox.clone());
     // The same object again, as the read-only view of what each device group
     // was told — the real adapter rather than a double, for the reason at the
     // top of this file: a double would have to restate when an expectation is
@@ -210,7 +210,7 @@ pub fn serve_all(
             log,
             group_state,
             fields,
-            writings,
+            writes,
         },
         counting_stamp(),
     )
@@ -255,7 +255,7 @@ pub fn spawn_with_status(
 pub fn spawn_with_instructions(
     store: DynReadStore,
     fields: FieldCatalog,
-    writings: WritingsCatalog,
+    writes: WritesCatalog,
 ) -> (String, MemoryOutbox) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
     let port = listener
@@ -268,7 +268,7 @@ pub fn spawn_with_instructions(
         catalog(),
         StatedStatus::default(),
         fields,
-        writings,
+        writes,
     );
     (format!("http://127.0.0.1:{port}"), outbox)
 }

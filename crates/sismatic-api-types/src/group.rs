@@ -1,6 +1,6 @@
 //! Reading a whole group: what it was told to be, and what its members report.
 //!
-//! The device readings routes answer "what did this device last say". A group
+//! The device reads routes answer "what did this device last say". A group
 //! is not a device and has nothing to say, so the group routes answer a
 //! different question — one that only exists once there is more than one
 //! device in a device group:
@@ -15,7 +15,7 @@
 //!
 //! [`GroupExpectation`] is what the group was last *told* to be — recorded when
 //! a group-addressed write is admitted, and read back here beside the members'
-//! readings. It is what makes "the device group is not recording, and it was
+//! reads. It is what makes "the device group is not recording, and it was
 //! asked to be" a statement the API can make. Without it, five members that all
 //! failed to start agree perfectly with each other and look fine.
 //!
@@ -39,15 +39,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::reading::{Reading, Timestamp};
-use crate::value::ReadingValue;
-use crate::writing::{DesiredRecordingState, WritingRecord};
+use crate::read::{Read, Timestamp};
+use crate::value::ReadValue;
+use crate::write::{DesiredRecordingState, WriteRecord};
 use crate::{DeviceId, FieldName, GroupId};
 
 /// What a group was last told one of its fields should hold.
 ///
 /// Recorded at *submission*, not at success: this is the value the device group
-/// was asked for, and a writing that never reached a device is precisely the
+/// was asked for, and a write that never reached a device is precisely the
 /// case drift detection exists to surface. An expectation that rolled back on
 /// failure would make the one situation worth an alarm — five members told to
 /// start, none of which did — indistinguishable from a device group that is
@@ -57,18 +57,18 @@ use crate::{DeviceId, FieldName, GroupId};
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GroupExpectation {
     /// The field the expectation is about, by canonical name.
-    // See `Reading::device` for why the alias is spelled out for utoipa.
+    // See `Read::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "RUNNING_STATE"))]
     pub field: FieldName,
     /// The value the members are expected to hold.
     ///
     /// A metadata or setting write carries the caller's text
-    /// ([`ReadingValue::Text`]) because that is what the intent held, while a
-    /// reading carries the device's decode — so `"1"` is expected and
+    /// ([`ReadValue::Text`]) because that is what the intent held, while a
+    /// read carries the device's decode — so `"1"` is expected and
     /// `{"type":"flag","value":true}` is observed, and the two agree. The
     /// comparison that reconciles them is the server's; a client should read
     /// [`SyncState`] rather than re-derive it.
-    pub value: ReadingValue,
+    pub value: ReadValue,
     /// When the group was told. The submission's instant, so every member of
     /// one request shares it.
     pub since: Timestamp,
@@ -103,17 +103,17 @@ pub enum SyncState {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MemberState {
-    // See `Reading::device` for why the alias is spelled out for utoipa.
+    // See `Read::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    /// The member's most recent reading of the field, or `null` if it has never
+    /// The member's most recent read of the field, or `null` if it has never
     /// reported one.
     ///
     /// `null` rather than omitting the member, because *which* member is silent
     /// is the answer: a device group where one member has stopped reporting
     /// looks identical to a one-member device group if the silent one is
     /// dropped.
-    pub reading: Option<Reading>,
+    pub read: Option<Read>,
     pub sync: SyncState,
 }
 
@@ -167,7 +167,7 @@ pub struct GroupFieldStateList {
 pub struct MemberHistory {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    pub readings: Vec<Reading>,
+    pub reads: Vec<Read>,
 }
 
 /// A group's history of one field: one series per member.
@@ -198,22 +198,22 @@ pub struct GroupHistory {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MemberDesiredRecordingState {
-    // See `Reading::device` for why the alias is spelled out for utoipa.
+    // See `Read::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
     pub desired_recording_state: DesiredRecordingState,
     pub epoch: u64,
 }
 
-/// A device group's write-side state, as `GET /v1/writings/groups/{id}/recording`
+/// A device group's write-side state, as `GET /v1/writes/groups/{id}/recording`
 /// reports it.
 ///
 /// The write-side counterpart of [`GroupFieldState`] over `RUNNING_STATE`, and
 /// deliberately a different answer: this is what the outbox *accepted*, which
 /// moves the moment a start is admitted and before any device has been
-/// contacted, while the reading is what a member last reported. A group whose
+/// contacted, while the read is what a member last reported. A group whose
 /// members are all `recording` here and all `stopped` there is a group whose
-/// writings have not landed yet — or have failed.
+/// writes have not landed yet — or have failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -240,14 +240,14 @@ pub struct GroupDesiredRecordingState {
     pub members: Vec<MemberDesiredRecordingState>,
 }
 
-/// One member's writing history, newest first.
+/// One member's write history, newest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MemberWritings {
+pub struct MemberWrites {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
-    pub writings: Vec<WritingRecord>,
+    pub writes: Vec<WriteRecord>,
 }
 
 /// Everything a device group's members have been asked to do.
@@ -262,8 +262,8 @@ pub struct MemberWritings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GroupWritingList {
+pub struct GroupWriteList {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub group: GroupId,
-    pub members: Vec<MemberWritings>,
+    pub members: Vec<MemberWrites>,
 }

@@ -1,4 +1,4 @@
-//! tests/readings/ — the `/v1/readings` scope as a client meets it.
+//! tests/reads/ — the `/v1/reads` scope as a client meets it.
 //!
 //! Black-box, like every suite here: each test starts the real server on an
 //! ephemeral port and talks to it over HTTP, so what is pinned is the status
@@ -14,16 +14,16 @@
 //! # The two halves
 //!
 //! One suite per URL scope, and one module per id-space inside it, which is the
-//! shape `src/handlers` has: [`devices`] covers `/v1/readings/devices/…`
-//! against `handlers::readings`, and [`groups`] covers `/v1/readings/groups/…`
-//! against `handlers::group_readings`. They are modules of one binary rather
+//! shape `src/handlers` has: [`devices`] covers `/v1/reads/devices/…`
+//! against `handlers::reads`, and [`groups`] covers `/v1/reads/groups/…`
+//! against `handlers::group_reads`. They are modules of one binary rather
 //! than two top-level suites because the helpers below are shared by both, and
 //! because a scope is the unit worth being able to run on its own —
-//! `cargo test --test readings` is then exactly "the readings scope".
+//! `cargo test --test reads` is then exactly "the reads scope".
 //!
-//! A directory with a `main.rs` rather than `readings.rs` beside a `readings/`:
+//! A directory with a `main.rs` rather than `reads.rs` beside a `reads/`:
 //! Cargo builds both as one test target, but a crate *root* resolves `mod foo;`
-//! against its own directory, so `tests/readings.rs` would look for
+//! against its own directory, so `tests/reads.rs` would look for
 //! `tests/devices.rs` and find the wrong file — or none.
 //!
 //! [`MemoryStore`]: sismatic_store_memory::MemoryStore
@@ -31,7 +31,7 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{Reading, ReadingValue, Timestamp};
+use sismatic_api_types::{Read, ReadValue, Timestamp};
 use sismatic_store::{DynReadStore, WriteStore};
 use sismatic_store_memory::MemoryStore;
 
@@ -50,7 +50,7 @@ mod groups;
 /// scope is the thing the suite is organized around: a route that moved out of
 /// it should fail every test in this file at once, not be quietly rewritten
 /// thirty times.
-const SCOPE: &str = "/v1/readings";
+const SCOPE: &str = "/v1/reads";
 
 /// The two ids the group tests address, and the group over them.
 ///
@@ -61,9 +61,9 @@ const ATRIUM: &str = "atrium";
 const ANNEX: &str = "annex";
 const GROUP: &str = harness::GROUP;
 
-/// A `Reading` for `device`/`field` stamped at `at`.
-fn reading_at(device: &str, field: &str, value: ReadingValue, at: &str) -> Reading {
-    Reading {
+/// A `Read` for `device`/`field` stamped at `at`.
+fn read_at(device: &str, field: &str, value: ReadValue, at: &str) -> Read {
+    Read {
         device: device.into(),
         field: field.into(),
         value,
@@ -84,11 +84,11 @@ fn spawn_app(store: DynReadStore) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// Start the application over a [`MemoryStore`] pre-loaded with `readings`, and
+/// Start the application over a [`MemoryStore`] pre-loaded with `reads`, and
 /// a catalog of `members` under one device group.
-async fn spawn_over(readings: impl IntoIterator<Item = Reading>, members: &[&str]) -> String {
+async fn spawn_over(reads: impl IntoIterator<Item = Read>, members: &[&str]) -> String {
     let store = MemoryStore::default();
-    for r in readings {
+    for r in reads {
         store.upsert_latest(r).await.expect("seeding the store");
     }
 

@@ -20,26 +20,26 @@
 //!
 //! # Layout
 //!
-//! - [`value`] — the decoded value model ([`ReadingValue`], [`RecordingState`], …)
-//! - [`reading`] — [`Reading`], [`Timestamp`], and the history-query DTOs
+//! - [`value`] — the decoded value model ([`ReadValue`], [`RecordingState`], …)
+//! - [`mod@read`] — [`Read`], [`Timestamp`], and the history-query DTOs
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
 //! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
 //!   member-wise response shapes
-//! - [`writing`] — write-side request bodies and instruction results
+//! - [`mod@write`] — write-side request bodies and instruction results
 //! - [`instruction`] — which names the routes above accept: [`FieldCatalog`],
-//!   [`WritingsCatalog`]
+//!   [`WritesCatalog`]
 //! - [`error`] — the [`ApiError`] envelope and [`Health`]
 //!
 //! Enable the `ts` feature to derive `ts_rs::TS` on every DTO and emit
 //! TypeScript definitions for the web frontend.
 //!
 //! ```
-//! use sismatic_api_types::{Reading, ReadingValue, Timestamp};
+//! use sismatic_api_types::{Read, ReadValue, Timestamp};
 //!
-//! let r = Reading {
+//! let r = Read {
 //!     device: "atrium-101".into(),
 //!     field: "SSH_PORT".into(),
-//!     value: ReadingValue::Port(22023),
+//!     value: ReadValue::Port(22023),
 //!     at: Timestamp("2026-07-23T14:03:11Z".into()),
 //! };
 //! let json = serde_json::to_string(&r).unwrap();
@@ -53,9 +53,9 @@ pub mod device;
 pub mod error;
 pub mod group;
 pub mod instruction;
-pub mod reading;
+pub mod read;
 pub mod value;
-pub mod writing;
+pub mod write;
 
 /// A device's id. An alias, not a newtype, to match `core`'s `String` ids and
 /// stay ergonomic in JSON, while still documenting intent at every use site.
@@ -75,13 +75,13 @@ pub use device::{
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
 pub use group::{
     GroupDesiredRecordingState, GroupExpectation, GroupFieldState, GroupFieldStateList,
-    GroupHistory, GroupWritingList, MemberDesiredRecordingState, MemberHistory, MemberState,
-    MemberWritings, SyncState,
+    GroupHistory, GroupWriteList, MemberDesiredRecordingState, MemberHistory, MemberState,
+    MemberWrites, SyncState,
 };
-pub use instruction::{FieldCatalog, InstructionSummary, WritingsCatalog};
-pub use reading::{Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp};
-pub use value::{Alarm, MacAddr, ReadingValue, RecordingState};
-pub use writing::{
+pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
+pub use read::{Read, ReadList, ReadQuery, TimeSpan, Timestamp};
+pub use value::{Alarm, MacAddr, ReadValue, RecordingState};
+pub use write::{
     Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
-    Intent, Rejection, WritingId, WritingList, WritingRecord, WritingStatus,
+    Intent, Rejection, WriteId, WriteList, WriteRecord, WriteStatus,
 };

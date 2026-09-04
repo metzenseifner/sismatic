@@ -1,5 +1,5 @@
-//! An in-memory outbox: the [`WritingSubmit`] / [`WritingLog`] /
-//! [`WritingDrain`] trio the write side runs on today, plus the [`GroupState`]
+//! An in-memory outbox: the [`WriteSubmit`] / [`WriteLog`] /
+//! [`WriteDrain`] trio the write side runs on today, plus the [`GroupState`]
 //! read the group routes answer from.
 //!
 //! # Shape
@@ -8,19 +8,19 @@
 //! logs:    device -> DeviceLog { desired_recording_state, epoch, queue, history, keys }
 //! batches: batch_id -> Batch { members, ready, armed_at, barrier }
 //! groups:  group -> field -> GroupExpectation
-//! records: writing_id -> WritingRecord
+//! records: write_id -> WriteRecord
 //! ```
 //!
-//! `groups` is here rather than beside the readings because it holds what a
+//! `groups` is here rather than beside the reads because it holds what a
 //! device group was *told*, which is the same kind of belief a `DeviceLog`'s
 //! desired recording state is, and is written by the same call under the same
 //! lock — see [`sismatic_store::group`].
 //!
 //! `records` is separate from `logs` because the two lookups are different
-//! questions. `GET /v1/writings/{id}` names a writing and nothing else, so it
+//! questions. `GET /v1/writes/{id}` names a write and nothing else, so it
 //! must not have to scan a fleet to find which device's log holds it; the
 //! admission decision names devices and nothing else, so it must not have to
-//! scan writings.
+//! scan writes.
 //!
 //! # One lock, not a sharded map
 //!
@@ -50,7 +50,7 @@
 //!
 //! `state` (the mutex) is always taken before `records`, never the reverse.
 //! [`MemoryOutbox::settle`] is the one place that is not free: it is handed a
-//! writing id and has to learn the device before it can take the right guard,
+//! write id and has to learn the device before it can take the right guard,
 //! which it does with a separate short-lived `records` read that is released
 //! first.
 //!
@@ -60,7 +60,7 @@
 //! for the same reason `MemoryStore::history` does and with the same
 //! consequence: fine for a test and a development server, not the deployment
 //! story. The outbox adds a second reason to want a durable adapter — a pending
-//! writing is lost on restart, so the delivery guarantee holds only for a
+//! write is lost on restart, so the delivery guarantee holds only for a
 //! process that stays up. Neither limit is part of the port.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -71,19 +71,19 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
 use sismatic_api_types::{
     Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
-    DeviceId, FieldName, GroupExpectation, GroupId, RecordingState, Timestamp, WritingId,
-    WritingRecord, WritingStatus,
+    DeviceId, FieldName, GroupExpectation, GroupId, RecordingState, Timestamp, WriteId,
+    WriteRecord, WriteStatus,
 };
 use sismatic_store::group::{GroupState, expects};
 use sismatic_store::outbox::{
-    BarrierPolicy, Claim, Outcome, Submission, SubmitError, Verb, WritingDrain, WritingLog,
-    WritingSubmit, admit, epoch_of, opens_recording, reconcile, rollback,
+    BarrierPolicy, Claim, Outcome, Submission, SubmitError, Verb, WriteDrain, WriteLog,
+    WriteSubmit, admit, epoch_of, opens_recording, reconcile, rollback,
 };
 use sismatic_store::{ReadError, WriteError};
 
 /// One device's write-side state and queue.
 ///
-/// Invariant: every `WritingId` in `queue` or `history` names a record already
+/// Invariant: every `WriteId` in `queue` or `history` names a record already
 /// present in [`MemoryOutbox::records`]. Insert the record first, push the id
 /// second — the two live under different locks, so a reader walking a queue
 /// mid-append would otherwise meet an id with nothing behind it.
@@ -92,15 +92,15 @@ struct DeviceLog {
     desired_recording_state: DesiredRecordingState,
     epoch: u64,
     /// Ids awaiting dispatch, oldest first.
-    queue: VecDeque<WritingId>,
+    queue: VecDeque<WriteId>,
     /// Every id ever admitted for this device, in submission order. Kept
     /// separately from `queue` because `queue` is consumed by the relay, and
     /// "what has this device been asked to do" outlives "what is still owed".
-    /// An explicit order is also what lets `writings_for` promise newest-first
+    /// An explicit order is also what lets `writes_for` promise newest-first
     /// without sorting on a timestamp that two submissions can share.
-    history: Vec<WritingId>,
-    /// Idempotency key -> the writing it first produced.
-    keys: BTreeMap<String, WritingId>,
+    history: Vec<WriteId>,
+    /// Idempotency key -> the write it first produced.
+    keys: BTreeMap<String, WriteId>,
 }
 
 /// An unknown device is idle at epoch 0 — the same reasoning `ReadStore::latest`
@@ -134,10 +134,10 @@ struct Batch {
     ///
     /// Recomputed from the live queues on every tick rather than accumulated as
     /// members announce themselves. A member that reached the head and was then
-    /// overtaken — by the `push_front` a retry of the writing *ahead* of it
+    /// overtaken — by the `push_front` a retry of the write *ahead* of it
     /// performs — is no longer ready, and an accumulated set would not notice:
     /// the batch would release and claim whatever now sat at that member's
-    /// head, which is a different writing entirely. Kept as a field rather than
+    /// head, which is a different write entirely. Kept as a field rather than
     /// a local because it is the one piece of barrier state worth reading back.
     ready: BTreeSet<DeviceId>,
     /// When the barrier was armed, so a stuck member cannot hold it forever.
@@ -191,13 +191,13 @@ struct State {
 #[derive(Clone)]
 pub struct MemoryOutbox {
     state: Arc<Mutex<State>>,
-    records: Arc<DashMap<WritingId, WritingRecord>>,
+    records: Arc<DashMap<WriteId, WriteRecord>>,
     max_attempts: u32,
     backoff: Duration,
 }
 
 impl MemoryOutbox {
-    /// The default delay before a failed writing is retried, multiplied by the
+    /// The default delay before a failed write is retried, multiplied by the
     /// number of attempts already spent. Chosen against the same clock the
     /// relay polls on: shorter than this and a device that is down for a second
     /// burns the whole retry budget before it can answer.
@@ -237,10 +237,10 @@ impl MemoryOutbox {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The device a writing belongs to, read and released before the state lock
+    /// The device a write belongs to, read and released before the state lock
     /// is taken. Exists to keep the `state`-before-`records` order in `settle`,
     /// which is handed an id and has to learn the device from it.
-    fn device_of(&self, id: &WritingId) -> Option<DeviceId> {
+    fn device_of(&self, id: &WriteId) -> Option<DeviceId> {
         self.records.get(id).map(|r| r.device.clone())
     }
 }
@@ -250,7 +250,7 @@ impl MemoryOutbox {
 ///
 /// Degrading to "retry immediately" rather than propagating a parse failure:
 /// the timestamp comes from the relay, an unparseable one is a bug in the
-/// caller and not a reason to lose a writing, and the fallback is the behaviour
+/// caller and not a reason to lose a write, and the fallback is the behaviour
 /// the field was added to improve on rather than a new failure mode.
 fn delay_from(at: &Timestamp, delay: Duration) -> Timestamp {
     let Ok(parsed) = DateTime::parse_from_rfc3339(at.as_str()) else {
@@ -281,7 +281,7 @@ fn elapsed_past(armed_at: &Timestamp, timeout: Duration, now: &Timestamp) -> boo
 }
 
 #[async_trait::async_trait]
-impl WritingSubmit for MemoryOutbox {
+impl WriteSubmit for MemoryOutbox {
     async fn submit(&self, s: Submission) -> Result<Acceptance, SubmitError> {
         if s.targets.is_empty() {
             return Err(SubmitError::Malformed("no targets".into()));
@@ -302,7 +302,7 @@ impl WritingSubmit for MemoryOutbox {
         let mut state = self.state();
 
         // Idempotent Receiver: a client whose POST timed out and was retried
-        // gets the original writings back, rather than a second start that the
+        // gets the original writes back, rather than a second start that the
         // admission table would then refuse with a 409 for something the client
         // believes never landed.
         //
@@ -317,7 +317,7 @@ impl WritingSubmit for MemoryOutbox {
                 .cloned()
             && let Some(first) = self.records.get(&existing).map(|r| r.clone())
         {
-            let writings = match &first.batch {
+            let writes = match &first.batch {
                 // Every row of the batch, so a retry of a group request sees
                 // the same set it was first told about.
                 Some(batch) => self.batch_acceptances(&state, batch),
@@ -329,7 +329,7 @@ impl WritingSubmit for MemoryOutbox {
             };
             return Ok(Acceptance {
                 batch: first.batch.clone(),
-                writings,
+                writes,
             });
         }
 
@@ -350,18 +350,18 @@ impl WritingSubmit for MemoryOutbox {
         }
 
         // Past this point nothing can fail, so nothing needs unwinding.
-        let mut writings = Vec::with_capacity(s.targets.len());
+        let mut writes = Vec::with_capacity(s.targets.len());
         for (i, device) in s.targets.iter().enumerate() {
             let (before, after, epoch) = admitted[i];
             let id = s.ids[i].clone();
 
-            let record = WritingRecord {
+            let record = WriteRecord {
                 id: id.clone(),
                 device: device.clone(),
                 intent: s.intent.clone(),
                 batch: s.batch.clone(),
                 epoch,
-                status: WritingStatus::Pending,
+                status: WriteStatus::Pending,
                 attempts: 0,
                 enqueued_at: s.at.clone(),
                 updated_at: s.at.clone(),
@@ -385,7 +385,7 @@ impl WritingSubmit for MemoryOutbox {
                 log.keys.insert(key.clone(), id.clone());
             }
 
-            writings.push(Accepted {
+            writes.push(Accepted {
                 id,
                 device: device.clone(),
                 epoch,
@@ -398,7 +398,7 @@ impl WritingSubmit for MemoryOutbox {
         // group's previous expectation untouched, which is what stops a
         // rejected start from claiming the device group was asked to record.
         // An idempotent replay returned above too, and deliberately: it
-        // produced no new writings, so moving `since` forward would report a
+        // produced no new writes, so moving `since` forward would report a
         // device group as freshly told when nothing was sent.
         //
         // Every accepted group write gets one, batched or not: a metadata write
@@ -443,7 +443,7 @@ impl WritingSubmit for MemoryOutbox {
 
         Ok(Acceptance {
             batch: s.batch,
-            writings,
+            writes,
         })
     }
 }
@@ -478,12 +478,12 @@ impl MemoryOutbox {
 }
 
 #[async_trait::async_trait]
-impl WritingLog for MemoryOutbox {
-    async fn writing(&self, id: WritingId) -> Result<Option<WritingRecord>, ReadError> {
+impl WriteLog for MemoryOutbox {
+    async fn write(&self, id: WriteId) -> Result<Option<WriteRecord>, ReadError> {
         Ok(self.records.get(&id).map(|r| r.clone()))
     }
 
-    async fn writings_for(&self, device: DeviceId) -> Result<Vec<WritingRecord>, ReadError> {
+    async fn writes_for(&self, device: DeviceId) -> Result<Vec<WriteRecord>, ReadError> {
         let state = self.state();
         let Some(log) = state.logs.get(&device) else {
             return Ok(Vec::new());
@@ -514,13 +514,13 @@ impl WritingLog for MemoryOutbox {
     }
 }
 
-/// The read half of what [`WritingSubmit::submit`] recorded about device
+/// The read half of what [`WriteSubmit::submit`] recorded about device
 /// groups.
 ///
 /// On the outbox rather than on `MemoryStore`, because an expectation is
 /// write-side belief — the same kind of thing a [`DesiredRecordingState`] is,
 /// written by the same call, under the same lock. Putting it beside the
-/// readings would have made "what the device group was told" and "what a
+/// reads would have made "what the device group was told" and "what a
 /// device reported" two rows in one table, which is exactly the conflation the
 /// group routes exist to undo.
 #[async_trait::async_trait]
@@ -564,7 +564,7 @@ enum BatchStep {
 }
 
 #[async_trait::async_trait]
-impl WritingDrain for MemoryOutbox {
+impl WriteDrain for MemoryOutbox {
     async fn claim_next(
         &self,
         device: DeviceId,
@@ -573,7 +573,7 @@ impl WritingDrain for MemoryOutbox {
         let mut state = self.state();
 
         // Peek rather than pop: a batched row at the head must stay there until
-        // every sibling has arrived, because popping it would let the writing
+        // every sibling has arrived, because popping it would let the write
         // behind it overtake — the exact reordering per-device FIFO exists to
         // prevent.
         let Some(head) = state
@@ -587,8 +587,8 @@ impl WritingDrain for MemoryOutbox {
             return Err(WriteError::backend("a queued id has no record behind it"));
         };
 
-        // A writing still serving its backoff blocks the queue rather than
-        // being skipped over. Skipping would let a later writing overtake the
+        // A write still serving its backoff blocks the queue rather than
+        // being skipped over. Skipping would let a later write overtake the
         // retry of an earlier one.
         if at.as_str() < record.not_before.as_str() {
             return Ok(None);
@@ -627,38 +627,33 @@ impl WritingDrain for MemoryOutbox {
         }
     }
 
-    async fn settle(
-        &self,
-        id: WritingId,
-        outcome: Outcome,
-        at: Timestamp,
-    ) -> Result<(), WriteError> {
+    async fn settle(&self, id: WriteId, outcome: Outcome, at: Timestamp) -> Result<(), WriteError> {
         // Read the device and release, so the guards below are taken in the
         // `state`-then-`records` order every other method uses.
         let device = self
             .device_of(&id)
-            .ok_or_else(|| WriteError::backend("settling an unknown writing"))?;
+            .ok_or_else(|| WriteError::backend("settling an unknown write"))?;
         let mut state = self.state();
         let mut record = self
             .records
             .get_mut(&id)
-            .ok_or_else(|| WriteError::backend("settling an unknown writing"))?;
+            .ok_or_else(|| WriteError::backend("settling an unknown write"))?;
 
-        if record.status != WritingStatus::InFlight {
+        if record.status != WriteStatus::InFlight {
             return Err(WriteError::backend(
-                "settling a writing that was not in flight",
+                "settling a write that was not in flight",
             ));
         }
 
         let log = state.logs.entry(device.clone()).or_default();
         match outcome {
             Outcome::Succeeded(value) => {
-                record.status = WritingStatus::Succeeded { value };
+                record.status = WriteStatus::Succeeded { value };
             }
             Outcome::Failed(_) if record.attempts < self.max_attempts => {
-                record.status = WritingStatus::Pending;
+                record.status = WriteStatus::Pending;
                 // Back onto the *front* of the queue: a retry must not be
-                // overtaken by writings submitted after it.
+                // overtaken by writes submitted after it.
                 log.queue.push_front(id.clone());
                 // Spaced out proportionally to what has already been spent, so
                 // three attempts against a device that is down do not all land
@@ -673,8 +668,8 @@ impl WritingDrain for MemoryOutbox {
                 }
             }
             Outcome::Failed(reason) => {
-                record.status = WritingStatus::Failed { reason };
-                // Dead Letter Channel. The desired state this writing
+                record.status = WriteStatus::Failed { reason };
+                // Dead Letter Channel. The desired state this write
                 // optimistically moved is rolled back, so a start that never
                 // reached the device stops freezing this device's metadata.
                 log.desired_recording_state =
@@ -707,7 +702,7 @@ impl WritingDrain for MemoryOutbox {
         Ok(())
     }
 
-    async fn in_flight(&self, device: DeviceId) -> Result<Vec<WritingRecord>, WriteError> {
+    async fn in_flight(&self, device: DeviceId) -> Result<Vec<WriteRecord>, WriteError> {
         let state = self.state();
         let Some(log) = state.logs.get(&device) else {
             return Ok(Vec::new());
@@ -716,7 +711,7 @@ impl WritingDrain for MemoryOutbox {
             .history
             .iter()
             .filter_map(|id| self.records.get(id).map(|r| r.clone()))
-            .filter(|r| r.status == WritingStatus::InFlight)
+            .filter(|r| r.status == WriteStatus::InFlight)
             .collect())
     }
 }
@@ -729,7 +724,7 @@ impl MemoryOutbox {
         state: &mut State,
         device: &DeviceId,
         at: &Timestamp,
-    ) -> Result<Option<WritingRecord>, WriteError> {
+    ) -> Result<Option<WriteRecord>, WriteError> {
         let Some(log) = state.logs.get_mut(device) else {
             return Ok(None);
         };
@@ -740,7 +735,7 @@ impl MemoryOutbox {
             .records
             .get_mut(&id)
             .ok_or_else(|| WriteError::backend("a queued id has no record behind it"))?;
-        record.status = WritingStatus::InFlight;
+        record.status = WriteStatus::InFlight;
         record.attempts += 1;
         record.updated_at = at.clone();
         Ok(Some(record.clone()))
@@ -765,7 +760,7 @@ impl MemoryOutbox {
         let Some(mut record) = self.records.get_mut(&id) else {
             return;
         };
-        record.status = WritingStatus::Failed {
+        record.status = WriteStatus::Failed {
             reason: "the group barrier expired before every member was ready".to_owned(),
         };
         record.updated_at = at.clone();
@@ -840,8 +835,8 @@ impl MemoryOutbox {
     /// Whether `member`'s batched row is at the head of its queue and due.
     ///
     /// This *is* the definition of ready, and it is asked of the live queue so
-    /// it cannot be stale. A member whose head is some other writing — because
-    /// a retry of the writing ahead was pushed back to the front — is not
+    /// it cannot be stale. A member whose head is some other write — because
+    /// a retry of the write ahead was pushed back to the front — is not
     /// ready, however recently it was.
     fn is_ready_for(
         &self,
@@ -868,7 +863,7 @@ impl MemoryOutbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{Intent, ReadingValue, Rejection};
+    use sismatic_api_types::{Intent, ReadValue, Rejection};
 
     pub(super) const T0: &str = "2026-08-17T00:00:00.000Z";
     const DEV: &str = "sim";
@@ -920,13 +915,13 @@ mod tests {
 
     /// Claim, then settle with `outcome`. The pair the relay always performs
     /// together.
-    async fn dispatch(outbox: &MemoryOutbox, outcome: Outcome) -> Option<WritingId> {
+    async fn dispatch(outbox: &MemoryOutbox, outcome: Outcome) -> Option<WriteId> {
         let claimed = outbox
             .claim_next(DEV.to_owned(), at(T0))
             .await
             .expect("claim")?;
         let Claim::One(record) = claimed else {
-            panic!("expected a lone writing, got a batch");
+            panic!("expected a lone write, got a batch");
         };
         outbox
             .settle(record.id.clone(), outcome, at(T0))
@@ -945,12 +940,12 @@ mod tests {
             .expect("desired_recording_state")
     }
 
-    pub(super) async fn status_of(outbox: &MemoryOutbox, id: &str) -> WritingStatus {
+    pub(super) async fn status_of(outbox: &MemoryOutbox, id: &str) -> WriteStatus {
         outbox
-            .writing(id.to_owned())
+            .write(id.to_owned())
             .await
             .expect("read")
-            .expect("the writing exists")
+            .expect("the write exists")
             .status
     }
 
@@ -1036,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_prepared_for_a_take_shares_that_takes_epoch() {
         let outbox = outbox();
-        let epoch = |a: Acceptance| a.writings[0].epoch;
+        let epoch = |a: Acceptance| a.writes[0].epoch;
 
         let first = submit(&outbox, "a", title("Week 4")).await.map(epoch);
         let presenter = submit(
@@ -1068,7 +1063,7 @@ mod tests {
         submit(&outbox, "a", Intent::StartRecording).await.unwrap();
         submit(&outbox, "b", Intent::PauseRecording).await.unwrap();
         let resumed = submit(&outbox, "c", Intent::StartRecording).await.unwrap();
-        assert_eq!(resumed.writings[0].epoch, 1);
+        assert_eq!(resumed.writes[0].epoch, 1);
         assert_eq!(desired_recording_state_of(&outbox, DEV).await.epoch, 1);
     }
 
@@ -1111,7 +1106,7 @@ mod tests {
             .unwrap();
 
         let mut claimed = Vec::new();
-        while let Some(id) = dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true))).await {
+        while let Some(id) = dispatch(&outbox, Outcome::Succeeded(ReadValue::Flag(true))).await {
             claimed.push(id);
         }
         assert_eq!(claimed, ["first", "second", "third"]);
@@ -1126,7 +1121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retry_is_re_dispatched_before_later_writings() {
+    async fn a_retry_is_re_dispatched_before_later_writes() {
         let outbox = outbox();
         submit(&outbox, "write", title("a")).await.unwrap();
         submit(&outbox, "start", Intent::StartRecording)
@@ -1140,7 +1135,7 @@ mod tests {
             Some("write")
         );
         assert_eq!(
-            dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true)))
+            dispatch(&outbox, Outcome::Succeeded(ReadValue::Flag(true)))
                 .await
                 .as_deref(),
             Some("write"),
@@ -1159,18 +1154,18 @@ mod tests {
             outbox.claim_next(DEV.to_owned(), at(T0)).await.unwrap(),
             None
         );
-        let record = outbox.writing("cmd".to_owned()).await.unwrap().unwrap();
+        let record = outbox.write("cmd".to_owned()).await.unwrap().unwrap();
         assert_eq!(record.attempts, 3);
         assert_eq!(
             record.status,
-            WritingStatus::Failed {
+            WriteStatus::Failed {
                 reason: "down".to_owned()
             }
         );
     }
 
     #[tokio::test]
-    async fn a_backing_off_writing_holds_the_queue() {
+    async fn a_backing_off_write_holds_the_queue() {
         let outbox = MemoryOutbox::with_max_attempts(3).with_backoff(Duration::from_secs(60));
         submit(&outbox, "write", title("a")).await.unwrap();
         submit(&outbox, "start", Intent::StartRecording)
@@ -1190,16 +1185,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settling_a_writing_twice_is_refused() {
+    async fn settling_a_write_twice_is_refused() {
         let outbox = outbox();
         submit(&outbox, "cmd", title("a")).await.unwrap();
-        dispatch(&outbox, Outcome::Succeeded(ReadingValue::Flag(true))).await;
+        dispatch(&outbox, Outcome::Succeeded(ReadValue::Flag(true))).await;
         assert_eq!(
             outbox
                 .settle("cmd".to_owned(), Outcome::Failed("late".into()), at(T0))
                 .await,
             Err(WriteError::backend(
-                "settling a writing that was not in flight"
+                "settling a write that was not in flight"
             ))
         );
     }
@@ -1263,7 +1258,7 @@ mod tests {
     // ---- idempotency ------------------------------------------------------
 
     #[tokio::test]
-    async fn a_repeated_key_returns_the_original_writing() {
+    async fn a_repeated_key_returns_the_original_write() {
         let outbox = outbox();
         let submission = |id: &str| Submission {
             idempotency_key: Some("take-4".to_owned()),
@@ -1274,13 +1269,13 @@ mod tests {
         let second = outbox.submit(submission("two")).await.unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(outbox.writings_for(DEV.to_owned()).await.unwrap().len(), 1);
+        assert_eq!(outbox.writes_for(DEV.to_owned()).await.unwrap().len(), 1);
     }
 
     // ---- the log ----------------------------------------------------------
 
     #[tokio::test]
-    async fn writings_are_listed_newest_first_and_scoped_to_one_device() {
+    async fn writes_are_listed_newest_first_and_scoped_to_one_device() {
         let outbox = outbox();
         submit(&outbox, "first", title("a")).await.unwrap();
         submit(&outbox, "second", title("b")).await.unwrap();
@@ -1293,7 +1288,7 @@ mod tests {
             .unwrap();
 
         let ids: Vec<_> = outbox
-            .writings_for(DEV.to_owned())
+            .writes_for(DEV.to_owned())
             .await
             .unwrap()
             .into_iter()
@@ -1305,17 +1300,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_writing_is_absence_not_an_error() {
+    async fn an_unknown_write_is_absence_not_an_error() {
         let outbox = outbox();
-        assert_eq!(outbox.writing("nope".to_owned()).await.unwrap(), None);
+        assert_eq!(outbox.write("nope".to_owned()).await.unwrap(), None);
         assert_eq!(
-            outbox.writings_for("nobody".to_owned()).await.unwrap(),
+            outbox.writes_for("nobody".to_owned()).await.unwrap(),
             Vec::new()
         );
     }
 
     #[tokio::test]
-    async fn only_claimed_writings_are_in_flight() {
+    async fn only_claimed_writes_are_in_flight() {
         let outbox = outbox();
         submit(&outbox, "claimed", title("a")).await.unwrap();
         submit(&outbox, "queued", title("b")).await.unwrap();
@@ -1329,12 +1324,12 @@ mod tests {
     }
 }
 
-/// The rendezvous: what a group-addressed writing does across its members.
+/// The rendezvous: what a group-addressed write does across its members.
 #[cfg(test)]
 mod batch_tests {
     use super::tests::*;
     use super::*;
-    use sismatic_api_types::{Intent, ReadingValue};
+    use sismatic_api_types::{Intent, ReadValue};
 
     const A: &str = "atrium";
     const B: &str = "annex";
@@ -1359,7 +1354,7 @@ mod batch_tests {
         }
     }
 
-    /// A lone writing queued on `device` *ahead* of the batch, so that member
+    /// A lone write queued on `device` *ahead* of the batch, so that member
     /// is not at the head when the batch is submitted.
     fn blocker(id: &str, device: &str) -> Submission {
         Submission {
@@ -1397,7 +1392,7 @@ mod batch_tests {
         assert_eq!(accepted.batch.as_deref(), Some(BATCH));
         assert_eq!(
             accepted
-                .writings
+                .writes
                 .iter()
                 .map(|c| (c.id.as_str(), c.device.as_str()))
                 .collect::<Vec<_>>(),
@@ -1405,7 +1400,7 @@ mod batch_tests {
         );
         // Each row lands in its own device's queue and carries the batch.
         for (id, device) in [("cmd-a", A), ("cmd-b", B)] {
-            let record = outbox.writing(id.to_owned()).await.unwrap().unwrap();
+            let record = outbox.write(id.to_owned()).await.unwrap().unwrap();
             assert_eq!(record.device, device);
             assert_eq!(record.batch.as_deref(), Some(BATCH));
             assert_eq!(record.epoch, 1, "every member starts its own first take");
@@ -1438,7 +1433,7 @@ mod batch_tests {
         );
 
         // A never learned about it.
-        assert!(outbox.writings_for(A.to_owned()).await.unwrap().is_empty());
+        assert!(outbox.writes_for(A.to_owned()).await.unwrap().is_empty());
         assert_eq!(
             desired_recording_state_of(&outbox, A)
                 .await
@@ -1454,7 +1449,7 @@ mod batch_tests {
     #[tokio::test]
     async fn no_member_dispatches_until_every_member_is_ready() {
         let outbox = outbox();
-        // B has a writing ahead of its batched row, so it cannot be ready yet.
+        // B has a write ahead of its batched row, so it cannot be ready yet.
         outbox.submit(blocker("ahead-b", B)).await.unwrap();
         outbox
             .submit(group_start(Barrier::FailBatch))
@@ -1473,11 +1468,7 @@ mod batch_tests {
         };
         assert_eq!(ahead.id, "ahead-b");
         outbox
-            .settle(
-                ahead.id,
-                Outcome::Succeeded(ReadingValue::Flag(true)),
-                at(T0),
-            )
+            .settle(ahead.id, Outcome::Succeeded(ReadValue::Flag(true)), at(T0))
             .await
             .unwrap();
 
@@ -1515,7 +1506,7 @@ mod batch_tests {
     }
 
     /// The reordering the peek-not-pop rule exists for: a batched row that is
-    /// waiting must stay at the head, or the writing behind it overtakes.
+    /// waiting must stay at the head, or the write behind it overtakes.
     #[tokio::test]
     async fn a_waiting_batched_row_is_not_overtaken() {
         let outbox = outbox();
@@ -1527,7 +1518,7 @@ mod batch_tests {
         // Queued behind A's batched row. A *setting* rather than a metadata
         // write, because the group start already moved A's desired state to
         // Recording and metadata is frozen there — settings are admissible in
-        // every state, which is what makes this the writing that could
+        // every state, which is what makes this the write that could
         // overtake.
         outbox
             .submit(Submission {
@@ -1550,8 +1541,8 @@ mod batch_tests {
         assert!(claim(&outbox, A, at(T0)).await.is_none());
         assert_eq!(
             status_of(&outbox, "after-a").await,
-            WritingStatus::Pending,
-            "the writing behind a waiting batch must stay behind it"
+            WriteStatus::Pending,
+            "the write behind a waiting batch must stay behind it"
         );
     }
 
@@ -1599,7 +1590,7 @@ mod batch_tests {
         outbox
             .settle(
                 ahead.id,
-                Outcome::Succeeded(ReadingValue::Flag(true)),
+                Outcome::Succeeded(ReadValue::Flag(true)),
                 at_plus(12),
             )
             .await
@@ -1632,7 +1623,7 @@ mod batch_tests {
         assert!(
             matches!(
                 status_of(&outbox, "cmd-a").await,
-                WritingStatus::Failed { .. }
+                WriteStatus::Failed { .. }
             ),
             "the ready member's row is failed, not left pending"
         );
@@ -1663,7 +1654,7 @@ mod batch_tests {
         outbox
             .settle(
                 ahead.id,
-                Outcome::Succeeded(ReadingValue::Flag(true)),
+                Outcome::Succeeded(ReadValue::Flag(true)),
                 at_plus(12),
             )
             .await
@@ -1675,7 +1666,7 @@ mod batch_tests {
         );
         assert!(matches!(
             status_of(&outbox, "cmd-b").await,
-            WritingStatus::Failed { .. }
+            WriteStatus::Failed { .. }
         ));
         assert_eq!(
             desired_recording_state_of(&outbox, B)
@@ -1736,11 +1727,7 @@ mod batch_tests {
             panic!("B's blocker should be claimable");
         };
         outbox
-            .settle(
-                b_head.id,
-                Outcome::Succeeded(ReadingValue::Flag(true)),
-                at(T0),
-            )
+            .settle(b_head.id, Outcome::Succeeded(ReadValue::Flag(true)), at(T0))
             .await
             .unwrap();
 
@@ -1751,7 +1738,7 @@ mod batch_tests {
         );
         assert_eq!(
             status_of(&outbox, "ahead-a").await,
-            WritingStatus::Pending,
+            WriteStatus::Pending,
             "A's retry is what sits at its head"
         );
     }
@@ -1807,7 +1794,7 @@ mod batch_tests {
             expected(&outbox, RUNNING_STATE).await,
             Some(GroupExpectation {
                 field: RUNNING_STATE.to_owned(),
-                value: ReadingValue::State(RecordingState::Started),
+                value: ReadValue::State(RecordingState::Started),
                 // The submission's instant, shared by every member's row.
                 since: at(T0),
             })
@@ -1838,8 +1825,8 @@ mod batch_tests {
 
         assert_eq!(
             expected(&outbox, RUNNING_STATE).await.map(|e| e.value),
-            Some(ReadingValue::State(RecordingState::Started)),
-            "a failed writing must not erase what the device group was asked for"
+            Some(ReadValue::State(RecordingState::Started)),
+            "a failed write must not erase what the device group was asked for"
         );
     }
 
@@ -1924,10 +1911,10 @@ mod batch_tests {
         // A write carries the caller's text unchanged; reconciling it with the
         // device's decode is `sismatic_store::group::satisfies`' job, not this
         // adapter's.
-        assert_eq!(all[1].value, ReadingValue::Text("Week 4".to_owned()));
+        assert_eq!(all[1].value, ReadValue::Text("Week 4".to_owned()));
     }
 
-    /// An idempotent replay produced no new writings, so it must not report
+    /// An idempotent replay produced no new writes, so it must not report
     /// the device group as freshly told.
     #[tokio::test]
     async fn an_idempotent_replay_does_not_move_the_expectation() {

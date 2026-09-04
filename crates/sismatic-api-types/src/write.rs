@@ -3,35 +3,35 @@
 //!
 //! An `Intent` is a *request to act*, not an act. It is accepted, recorded, and
 //! answered with `202 Accepted` before any device has been contacted; the
-//! device is reached later by `sismatic-relay`. `WritingRecord` is how a caller
+//! device is reached later by `sismatic-relay`. `WriteRecord` is how a caller
 //! learns what happened afterwards.
 //!
-//! # A writing, not a command
+//! # A write, not a command
 //!
-//! Every accepted request is a *writing*, whatever it asks for. Only three of
+//! Every accepted request is a *write*, whatever it asks for. Only three of
 //! the five [`Intent`]s are commands in the sense `sismatic-core` uses the word
 //! — `StartRecording`, `StopRecording` and `PauseRecording` are its `Command`
 //! enum — while `SetMetadata` and `SetSetting` write a register and are not
 //! commands at all. Naming the whole class after one third of it is what made
 //! `GET /v1/commands` ambiguous, so the class is named for what all five have
-//! in common: they go out on the write path. [`WritingsCatalog`] is where both
+//! in common: they go out on the write path. [`WritesCatalog`] is where both
 //! words survive together, and there `commands` means only the lifecycle trio.
 //!
-//! [`WritingsCatalog`]: crate::WritingsCatalog
+//! [`WritesCatalog`]: crate::WritesCatalog
 
 use serde::{Deserialize, Serialize};
 
-use crate::value::ReadingValue;
+use crate::value::ReadValue;
 use crate::{DeviceId, FieldName, Timestamp};
 
-/// A submitted writing's identifier. A `String` for the same reason
+/// A submitted write's identifier. A `String` for the same reason
 /// [`DeviceId`] is: it travels as JSON and is opaque to every reader. The
 /// server mints a v4 UUID.
-pub type WritingId = String;
+pub type WriteId = String;
 
 /// Ties together the rows one group-addressed request was expanded into.
 ///
-/// A `String` for the same reason [`WritingId`] is, and a *separate* id rather
+/// A `String` for the same reason [`WriteId`] is, and a *separate* id rather
 /// than the group's: a group can be addressed many times, and "these rows are
 /// one take's worth" is a statement about one request, not about the device
 /// group.
@@ -58,7 +58,7 @@ pub enum Barrier {
 /// What a caller wants done.
 ///
 /// Internally tagged (`{"kind": "set_metadata", "field": "TITLE", ...}`) rather
-/// than adjacently tagged like [`ReadingValue`]: two variants carry no payload
+/// than adjacently tagged like [`ReadValue`]: two variants carry no payload
 /// at all, and the adjacent form would render those as `"value": null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -151,24 +151,24 @@ impl std::fmt::Display for Rejection {
     }
 }
 
-/// Where a submitted writing has got to.
+/// Where a submitted write has got to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum WritingStatus {
+pub enum WriteStatus {
     /// Recorded, no device contacted yet.
     Pending,
     /// A relay task has claimed it and the SIS exchange is running.
     InFlight,
     /// The device answered. `value` is the decoded echo — for a register write
     /// the device echoes the value it stored, which is worth returning.
-    Succeeded { value: ReadingValue },
+    Succeeded { value: ReadValue },
     /// Terminal failure after `attempts` tries.
     Failed { reason: String },
 }
 
-/// A device's write-side state, as `GET /v1/writings/devices/{id}/recording` reports it.
+/// A device's write-side state, as `GET /v1/writes/devices/{id}/recording` reports it.
 /// A product type because the two fields are only meaningful together: an epoch
 /// without a desired recording state does not say whether metadata is
 /// writable.
@@ -186,14 +186,14 @@ pub struct DeviceDesiredRecordingState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct WritingRecord {
+pub struct WriteRecord {
     // Annotated for the same reason `device` is: a derive sees the alias name
-    // it was written with, so an un-annotated `WritingId` makes utoipa invent a
+    // it was written with, so an un-annotated `WriteId` makes utoipa invent a
     // component called `String` and every generated client grows a wrapper type
     // around a plain string. `the_string_aliases_are_documented_as_strings` in
     // `sismatic-http-api` is what notices when one of these is missing.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub id: WritingId,
+    pub id: WriteId,
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
     pub intent: Intent,
@@ -206,24 +206,24 @@ pub struct WritingRecord {
     /// a barrier timeout they have no use for.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub batch: Option<BatchId>,
-    /// The recording epoch this writing was admitted against.
+    /// The recording epoch this write was admitted against.
     pub epoch: u64,
-    pub status: WritingStatus,
+    pub status: WriteStatus,
     pub attempts: u32,
     pub enqueued_at: Timestamp,
     pub updated_at: Timestamp,
-    // protects a writing from quick exhaustion of retries
+    // protects a write from quick exhaustion of retries
     pub not_before: Timestamp,
 }
 
-/// One writing a submission produced. `epoch` is returned so a caller writing
+/// One write a submission produced. `epoch` is returned so a caller writing
 /// several metadata fields can check that all of them landed on one recording.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Accepted {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub id: WritingId,
+    pub id: WriteId,
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub device: DeviceId,
     pub epoch: u64,
@@ -232,7 +232,7 @@ pub struct Accepted {
 /// The `202 Accepted` body.
 ///
 /// Always a list, even for a device-addressed request that can only ever
-/// produce one writing. The alternative — a bare [`Accepted`] for a device and
+/// produce one write. The alternative — a bare [`Accepted`] for a device and
 /// a list for a group — would make the response shape depend on which kind of
 /// id the caller happened to use, so every client would need both parsers and
 /// the generated document would carry a `oneOf` for a route that does one
@@ -248,14 +248,14 @@ pub struct Acceptance {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub batch: Option<BatchId>,
     /// One entry per target, in the order the group lists its members.
-    pub writings: Vec<Accepted>,
+    pub writes: Vec<Accepted>,
 }
 
-/// A page of writings, wrapped for the same reason
-/// [`ReadingList`](crate::ReadingList) is.
+/// A page of writes, wrapped for the same reason
+/// [`ReadList`](crate::ReadList) is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct WritingList {
-    pub writings: Vec<WritingRecord>,
+pub struct WriteList {
+    pub writes: Vec<WriteRecord>,
 }

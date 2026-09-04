@@ -64,7 +64,7 @@ instruction_catalog! {
         // Whether a push is actually *live* is not here, and not because its
         // wire form is unknown: SIS offers no write for it. Enabling a stream
         // arms it; what puts it on air is a scheduled session, which this
-        // protocol does not reach. So live state is a reading, and lives in
+        // protocol does not reach. So live state is a read, and lives in
         // `Query` alone — the one RTMP field where the read and the write of a
         // name do not pair up, because the write does not exist.
     }
@@ -794,7 +794,7 @@ mod tests {
 
     /// Arming a push stream is a write; putting it on air is not reachable over
     /// SIS at all — that is a scheduled session's doing. So `RTMP_1_STATE` is a
-    /// setting and `RTMP_STREAM_1_LIVE_STATE` is only ever a reading, and asking
+    /// setting and `RTMP_STREAM_1_LIVE_STATE` is only ever a read, and asking
     /// to write the latter has to fail as an unknown *setting* rather than
     /// half-succeed as a write of the former.
     ///

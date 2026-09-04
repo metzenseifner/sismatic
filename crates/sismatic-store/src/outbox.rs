@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use sismatic_api_types::{
     Acceptance, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState, DeviceId,
-    GroupId, Intent, ReadingValue, RecordingState, Rejection, Timestamp, WritingId, WritingRecord,
+    GroupId, Intent, ReadValue, RecordingState, Rejection, Timestamp, WriteId, WriteRecord,
 };
 
 use crate::{ReadError, WriteError};
 
-pub type DynWritingSubmit = Arc<dyn WritingSubmit>;
-pub type DynWritingLog = Arc<dyn WritingLog>;
-pub type DynWritingDrain = Arc<dyn WritingDrain>;
+pub type DynWriteSubmit = Arc<dyn WriteSubmit>;
+pub type DynWriteLog = Arc<dyn WriteLog>;
+pub type DynWriteDrain = Arc<dyn WriteDrain>;
 
 /// Everything one submission carries, grouped because the values are only
 /// meaningful together and an adapter needs all of them inside one critical
@@ -27,7 +27,7 @@ pub struct Submission {
     /// One id per target, in the same order, minted by the caller so a retry
     /// can carry the same ids. An adapter must reject a length mismatch rather
     /// than zipping the shorter of the two.
-    pub ids: Vec<WritingId>,
+    pub ids: Vec<WriteId>,
     pub targets: Vec<DeviceId>,
     /// The group this request was addressed to, when it was addressed to one.
     ///
@@ -53,7 +53,7 @@ pub struct Submission {
     pub intent: Intent,
     pub at: Timestamp,
     /// When present, a repeat submission with the same `(device, key)` returns
-    /// the original writing instead of appending a second one.
+    /// the original write instead of appending a second one.
     pub idempotency_key: Option<String>,
 }
 
@@ -64,7 +64,7 @@ pub struct BarrierPolicy {
     pub on_timeout: Barrier,
 }
 
-/// Why a submission did not become a queued writing.
+/// Why a submission did not become a queued write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
     /// The admission table refused it.
@@ -88,7 +88,7 @@ pub enum SubmitError {
 
 /// Appending intent. The only write capability the HTTP layer is given.
 #[async_trait::async_trait]
-pub trait WritingSubmit: Send + Sync {
+pub trait WriteSubmit: Send + Sync {
     /// Admit `submission` against the device's current desired recording state
     /// and, if admitted, append it to that device's queue.
     ///
@@ -109,11 +109,11 @@ pub trait WritingSubmit: Send + Sync {
 /// Reading what was submitted. Absence is never an error, matching
 /// [`ReadStore`](crate::ReadStore).
 #[async_trait::async_trait]
-pub trait WritingLog: Send + Sync {
-    async fn writing(&self, id: WritingId) -> Result<Option<WritingRecord>, ReadError>;
+pub trait WriteLog: Send + Sync {
+    async fn write(&self, id: WriteId) -> Result<Option<WriteRecord>, ReadError>;
 
-    /// Every writing recorded for `device`, newest first.
-    async fn writings_for(&self, device: DeviceId) -> Result<Vec<WritingRecord>, ReadError>;
+    /// Every write recorded for `device`, newest first.
+    async fn writes_for(&self, device: DeviceId) -> Result<Vec<WriteRecord>, ReadError>;
 
     /// The device's desired recording state and epoch. An unknown device
     /// reports `DesiredRecordingState::Idle` at epoch 0, for the same reason
@@ -147,7 +147,7 @@ pub const fn reconcile(
 /// What was claimed and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Succeeded(ReadingValue),
+    Succeeded(ReadValue),
     /// Retryable if `attempts < max_attempts`; the adapter decides.
     Failed(String),
 }
@@ -155,15 +155,15 @@ pub enum Outcome {
 /// What a claim yielded.
 ///
 /// Two cases rather than always a `Vec`, because the caller does genuinely
-/// different things with them: a lone writing goes to `Device::run`, a batch
+/// different things with them: a lone write goes to `Device::run`, a batch
 /// goes to `DeviceGroup::run` so the members act in unison. Collapsing them
 /// into a one-element list would put the "is this really a group" branch back
 /// in the relay, decided by a length rather than by the outbox that armed the
 /// rendezvous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Claim {
-    /// One writing for the device that asked. The ordinary path.
-    One(WritingRecord),
+    /// One write for the device that asked. The ordinary path.
+    One(WriteRecord),
     /// A whole batch, handed to the member whose arrival completed the barrier
     /// (or whose tick found it timed out under [`Barrier::DispatchReady`]).
     ///
@@ -182,14 +182,14 @@ pub enum Claim {
         ///
         /// Under `DispatchReady` after a timeout this is a *subset* of the
         /// batch: the members that never arrived are not included.
-        records: Vec<WritingRecord>,
+        records: Vec<WriteRecord>,
     },
 }
 
 /// Draining the queue. Held only by `sismatic-intent-relay`.
 #[async_trait::async_trait]
-pub trait WritingDrain: Send + Sync {
-    /// Take the oldest claimable writing for `device`, mark it `InFlight`, and
+pub trait WriteDrain: Send + Sync {
+    /// Take the oldest claimable write for `device`, mark it `InFlight`, and
     /// return it.
     ///
     /// FIFO order per device is part of this contract: a metadata write
@@ -198,7 +198,7 @@ pub trait WritingDrain: Send + Sync {
     /// A batched row at the head of a device's queue is *not* claimable until
     /// every sibling has reached the head of its own queue. Until then this
     /// answers `None` — and it must leave that row where it is rather than
-    /// setting it aside, because the writing behind it would otherwise
+    /// setting it aside, because the write behind it would otherwise
     /// overtake, which is the exact reordering per-device FIFO exists to
     /// prevent. When the last member arrives, that member's call returns
     /// [`Claim::Batch`] carrying every row.
@@ -208,24 +208,19 @@ pub trait WritingDrain: Send + Sync {
         at: Timestamp,
     ) -> Result<Option<Claim>, WriteError>;
 
-    /// Record what happened. A `Failed` outcome on a writing whose recorded
+    /// Record what happened. A `Failed` outcome on a write whose recorded
     /// transition moved the desired recording state rolls that state back, so
     /// a start that never reached the device does not freeze metadata forever.
-    async fn settle(
-        &self,
-        id: WritingId,
-        outcome: Outcome,
-        at: Timestamp,
-    ) -> Result<(), WriteError>;
+    async fn settle(&self, id: WriteId, outcome: Outcome, at: Timestamp) -> Result<(), WriteError>;
 
     /// Fold a state the device actually reported into the desired recording
     /// state. This is how a recording started from the device's front panel
     /// becomes visible to the admission table.
     async fn observe(&self, device: DeviceId, observed: RecordingState) -> Result<(), WriteError>;
 
-    /// Writings left `InFlight` by a previous process. Returned so the relay
-    /// can decide per writing whether to replay; see the recovery section.
-    async fn in_flight(&self, device: DeviceId) -> Result<Vec<WritingRecord>, WriteError>;
+    /// Writes left `InFlight` by a previous process. Returned so the relay
+    /// can decide per write whether to replay; see the recovery section.
+    async fn in_flight(&self, device: DeviceId) -> Result<Vec<WriteRecord>, WriteError>;
 }
 
 /// An [`Intent`] with its payload stripped. The admission table depends on the
@@ -302,7 +297,7 @@ pub const fn opens_recording(before: DesiredRecordingState, after: DesiredRecord
     matches!((before, after), (Idle, Recording))
 }
 
-/// Undo the change a verb made to the desired recording state, for a writing
+/// Undo the change a verb made to the desired recording state, for a write
 /// that failed terminally.
 ///
 /// Conservative by construction: it only moves back along the three transitions
@@ -316,7 +311,7 @@ pub const fn opens_recording(before: DesiredRecordingState, after: DesiredRecord
 /// `Recording` (a start from idle and a resume from paused), so the state alone
 /// does not say which one to undo. Rolling `Recording` back to `Idle` for a
 /// `Start` is right for the first and wrong for the second, and it is the safe
-/// direction of wrong — it unfreezes metadata that a failed writing should not
+/// direction of wrong — it unfreezes metadata that a failed write should not
 /// have frozen, rather than freezing metadata nothing is recording.
 pub const fn rollback(
     desired_recording_state: DesiredRecordingState,
@@ -332,7 +327,7 @@ pub const fn rollback(
     }
 }
 
-/// The epoch a writing admitted from `before` into `after` belongs to.
+/// The epoch a write admitted from `before` into `after` belongs to.
 ///
 /// A metadata write admitted while idle is preparing the *next* recording, so
 /// it is stamped `epoch + 1` — the same number the `Start` that follows it

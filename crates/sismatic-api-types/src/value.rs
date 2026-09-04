@@ -8,8 +8,8 @@
 //! (design note §2, "dependency direction as a partial order").
 //!
 //! So we re-declare the shape as plain serde DTOs. The translation
-//! `core::Value -> ReadingValue` lives wherever both crates already meet —
-//! `sismatic-sync` (which writes readings) or `sismatic-db` — never here. This
+//! `core::Value -> ReadValue` lives wherever both crates already meet —
+//! `sismatic-sync` (which writes reads) or `sismatic-db` — never here. This
 //! crate stays a pure description of bytes on the wire.
 
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ pub struct Alarm {
     pub level: String,
 }
 
-/// A decoded reading value. The variant reflects what the field *means*, so a
+/// A decoded read value. The variant reflects what the field *means*, so a
 /// client pattern-matches instead of re-parsing a string — the same benefit the
 /// core `Value` enum gives in-process, preserved across the network boundary.
 ///
@@ -76,7 +76,7 @@ pub struct Alarm {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum ReadingValue {
+pub enum ReadValue {
     /// Free-form text (names, metadata registers, SNMP strings, model info).
     Text(String),
     /// A firmware/version string such as `2.11`.

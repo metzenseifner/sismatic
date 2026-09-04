@@ -11,7 +11,7 @@
 //! handler, and each schema those attributes name is derived from the very DTO
 //! the handler serializes. So the document is not a second description of the
 //! API that has to be kept in step with the first — rename a field on
-//! [`Reading`] and the schema renames with it, because both come off one
+//! [`Read`] and the schema renames with it, because both come off one
 //! `#[derive]` (see `sismatic-api-types`' `openapi` feature).
 //!
 //! # What is still hand-written, and how it is held down
@@ -27,7 +27,7 @@
 //! handler's own 404.
 //!
 //! `context_path` carries the two [`web::scope`]s a route is nested in —
-//! `/v1/readings`, `/v1/writings` or `/v1/inventory` — which is a third literal
+//! `/v1/reads`, `/v1/writes` or `/v1/inventory` — which is a third literal
 //! written twice, and the one a reader of the document depends on to build a
 //! URL that works at all. The same test is what keeps it honest.
 //!
@@ -74,7 +74,7 @@
 //! makes each response a refcount bump instead. It is built before the workers
 //! are, so all of them share one copy — see [`crate::startup`].
 //!
-//! [`Reading`]: sismatic_api_types::Reading
+//! [`Read`]: sismatic_api_types::Read
 //! [`web::scope`]: actix_web::web::scope
 
 use actix_web::web::Bytes;
@@ -128,57 +128,57 @@ const SCALAR_HTML: &str = r#"<!doctype html>
 /// The read side's OpenAPI description.
 ///
 /// `components(schemas(..))` lists only the types a response body names at top
-/// level; utoipa walks into them for the rest, so [`ReadingValue`] and its
-/// payloads arrive by being reachable from [`Reading`] rather than by being
+/// level; utoipa walks into them for the rest, so [`ReadValue`] and its
+/// payloads arrive by being reachable from [`Read`] rather than by being
 /// enumerated here and drifting when one is added.
 ///
-/// [`ReadingValue`]: sismatic_api_types::ReadingValue
-/// [`Reading`]: sismatic_api_types::Reading
+/// [`ReadValue`]: sismatic_api_types::ReadValue
+/// [`Read`]: sismatic_api_types::Read
 #[derive(OpenApi)]
 #[openapi(
     paths(
         crate::handlers::health_check::health_check,
         crate::handlers::instructions::field_catalog,
-        crate::handlers::instructions::writings_catalog,
-        crate::handlers::readings::list_fields,
-        crate::handlers::readings::read_field,
-        crate::handlers::readings::field_history,
-        crate::handlers::writings::start_recording,
-        crate::handlers::writings::stop_recording,
-        crate::handlers::writings::pause_recording,
-        crate::handlers::writings::set_metadata,
-        crate::handlers::writings::set_setting,
-        crate::handlers::writings::read_desired_recording_state,
-        crate::handlers::writings::list_writings,
-        crate::handlers::writings::read_writing,
+        crate::handlers::instructions::writes_catalog,
+        crate::handlers::reads::list_fields,
+        crate::handlers::reads::read_field,
+        crate::handlers::reads::field_history,
+        crate::handlers::writes::start_recording,
+        crate::handlers::writes::stop_recording,
+        crate::handlers::writes::pause_recording,
+        crate::handlers::writes::set_metadata,
+        crate::handlers::writes::set_setting,
+        crate::handlers::writes::read_desired_recording_state,
+        crate::handlers::writes::list_writes,
+        crate::handlers::writes::read_write,
         crate::handlers::devices::list_devices,
         crate::handlers::devices::read_device,
         crate::handlers::devices::list_groups,
         crate::handlers::devices::read_group,
-        crate::handlers::group_readings::list_group_fields,
-        crate::handlers::group_readings::read_group_field,
-        crate::handlers::group_readings::group_field_history,
-        crate::handlers::writings::start_group_recording,
-        crate::handlers::writings::stop_group_recording,
-        crate::handlers::writings::pause_group_recording,
-        crate::handlers::writings::set_group_metadata,
-        crate::handlers::writings::set_group_setting,
-        crate::handlers::writings::read_group_desired_recording_state,
-        crate::handlers::writings::list_group_writings,
+        crate::handlers::group_reads::list_group_fields,
+        crate::handlers::group_reads::read_group_field,
+        crate::handlers::group_reads::group_field_history,
+        crate::handlers::writes::start_group_recording,
+        crate::handlers::writes::stop_group_recording,
+        crate::handlers::writes::pause_group_recording,
+        crate::handlers::writes::set_group_metadata,
+        crate::handlers::writes::set_group_setting,
+        crate::handlers::writes::read_group_desired_recording_state,
+        crate::handlers::writes::list_group_writes,
     ),
     components(schemas(
-        sismatic_api_types::Reading,
-        sismatic_api_types::ReadingList,
+        sismatic_api_types::Read,
+        sismatic_api_types::ReadList,
         sismatic_api_types::ApiError,
-        // The write side's top-level bodies. `Intent`, `WritingStatus`,
+        // The write side's top-level bodies. `Intent`, `WriteStatus`,
         // `DesiredRecordingState`, `Rejection` and `Accepted` are reachable
         // from these and so arrive by being walked into, for the same reason
-        // `ReadingValue` does.
+        // `ReadValue` does.
         sismatic_api_types::Acceptance,
-        sismatic_api_types::WritingRecord,
-        sismatic_api_types::WritingList,
+        sismatic_api_types::WriteRecord,
+        sismatic_api_types::WriteList,
         sismatic_api_types::DeviceDesiredRecordingState,
-        crate::handlers::writings::ValueWrite,
+        crate::handlers::writes::ValueWrite,
         // The inventory bodies. `DeviceSummary` and `ConnectionStatus` arrive
         // by being reachable from these.
         sismatic_api_types::DeviceList,
@@ -187,32 +187,32 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::GroupSummary,
         // The group read bodies. `MemberState`, `MemberHistory`,
         // `GroupExpectation` and `SyncState` arrive by being reachable from
-        // these, for the same reason `ReadingValue` does.
+        // these, for the same reason `ReadValue` does.
         sismatic_api_types::GroupFieldState,
         sismatic_api_types::GroupFieldStateList,
         sismatic_api_types::GroupHistory,
-        // The group write-side bodies. `MemberDesiredRecordingState` and `MemberWritings`
+        // The group write-side bodies. `MemberDesiredRecordingState` and `MemberWrites`
         // arrive by being reachable from these.
         sismatic_api_types::GroupDesiredRecordingState,
-        sismatic_api_types::GroupWritingList,
+        sismatic_api_types::GroupWriteList,
         // The two scope-root catalogs. `InstructionSummary` arrives by being
         // reachable from both.
         sismatic_api_types::FieldCatalog,
-        sismatic_api_types::WritingsCatalog,
+        sismatic_api_types::WritesCatalog,
     )),
     tags(
-        (name = "readings", description =
-            "Stored readings, of one device or of a whole device group. Every \
+        (name = "reads", description =
+            "Stored reads, of one device or of a whole device group. Every \
              queryable field of every device is reachable through these six \
              routes, because the field is a path parameter passed through to the \
              store rather than a symbol the server was compiled against — a field \
              added to the device catalog is served here with no code change. \
-             `/v1/readings` lists every name those six accept, which is the one \
+             `/v1/reads` lists every name those six accept, which is the one \
              thing a path parameter cannot tell you.\n\n\
-             The `/v1/readings/devices` half answers from the store alone, so an \
+             The `/v1/reads/devices` half answers from the store alone, so an \
              unknown id there is `nothing stored` rather than a `404`. The \
-             `/v1/readings/groups` half \
-             also consults the catalog, because a device group has no readings of \
+             `/v1/reads/groups` half \
+             also consults the catalog, because a device group has no reads of \
              its own and its membership has to come from somewhere — so an unknown \
              *group* is a `404`, and each response additionally carries what the \
              device group was last told to be, which is what makes a device group \
@@ -221,15 +221,15 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         (name = "inventory", description =
             "What this server was configured with. Answered from the device catalog \
              rather than the store, so an unknown id here is a `404` — a real claim \
-             about the devices file — where the readings routes can only answer \
+             about the devices file — where the reads routes can only answer \
              `nothing stored`."),
-        (name = "writings", description =
+        (name = "writes", description =
             "Any operation on the write path — asking a device to do something, or \
              setting something on it. Every write is recorded and answered \
              `202 Accepted` before any device is contacted, so no response here is \
              ever waiting on one — follow the `Location` header to learn what \
              happened. Metadata is writable only while nothing is recording; \
-             settings are writable always, and `/v1/writings` lists which names \
+             settings are writable always, and `/v1/writes` lists which names \
              are which."),
         (name = "health", description =
             "Liveness. Consults nothing, so it reports on this process and never on \
@@ -256,7 +256,7 @@ impl ApiDoc {
                  driver polled and stored; writes are recorded as intents and \
                  performed later by the intent relay. Nothing here reaches a device \
                  during a request, so no response is ever waiting on one — a \
-                 reading's `at` says how fresh it is, and a writing's `202` says it \
+                 read's `at` says how fresh it is, and a write's `202` says it \
                  was accepted rather than done.",
             ))
             .license(Some(License::new(env!("CARGO_PKG_LICENSE"))))

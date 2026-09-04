@@ -21,21 +21,21 @@ use std::net::TcpListener;
 
 use actix_web::dev::Server;
 use actix_web::{App, HttpServer, web};
-use sismatic_api_types::{FieldCatalog, WritingsCatalog};
+use sismatic_api_types::{FieldCatalog, WritesCatalog};
 use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
 use sismatic_store::group::{DynGroupState, GroupState};
-use sismatic_store::outbox::{DynWritingLog, DynWritingSubmit, WritingLog, WritingSubmit};
+use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit, WriteLog, WriteSubmit};
 use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 
-use crate::handlers::target::{INVENTORY, READINGS, WRITINGS};
+use crate::handlers::target::{INVENTORY, READS, WRITES};
 use crate::handlers::{
     field_catalog, field_history, group_field_history, list_devices, list_fields,
-    list_group_fields, list_group_writings, list_groups, list_writings, pause_group_recording,
+    list_group_fields, list_group_writes, list_groups, list_writes, pause_group_recording,
     pause_recording, read_desired_recording_state, read_device, read_field, read_group,
-    read_group_desired_recording_state, read_group_field, read_writing, set_group_metadata,
+    read_group_desired_recording_state, read_group_field, read_write, set_group_metadata,
     set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
-    stop_group_recording, stop_recording, writings_catalog,
+    stop_group_recording, stop_recording, writes_catalog,
 };
 use crate::health_check;
 use crate::openapi::{
@@ -75,18 +75,18 @@ pub struct Ports {
     /// Live connection state, read from the running registry without dialing.
     pub status: DynDeviceStatus,
     /// Appending an intent. The one write verb the HTTP surface has.
-    pub submit: DynWritingSubmit,
-    /// Reading what was appended. No `WritingDrain` beside it, deliberately.
-    pub log: DynWritingLog,
+    pub submit: DynWriteSubmit,
+    /// Reading what was appended. No `WriteDrain` beside it, deliberately.
+    pub log: DynWriteLog,
     /// Reading what each device group was last told to be. Read-only by
     /// construction — see [`run`].
     pub group_state: DynGroupState,
-    /// Every field a reading can be asked for, projected from core's query
-    /// catalog. Served by `GET /v1/readings`.
+    /// Every field a read can be asked for, projected from core's query
+    /// catalog. Served by `GET /v1/reads`.
     pub fields: FieldCatalog,
     /// Every name a write can address, projected from core's command, register
-    /// and setting catalogs. Served by `GET /v1/writings`.
-    pub writings: WritingsCatalog,
+    /// and setting catalogs. Served by `GET /v1/writes`.
+    pub writes: WritesCatalog,
 }
 
 /// Build the application over its [`Ports`], serve it on `listener`, and hand
@@ -100,16 +100,16 @@ pub struct Ports {
 ///
 /// Six capabilities, each the smallest one its handlers need. `submit` may
 /// append an intent and nothing else — it cannot dispatch one, settle one, or
-/// touch a reading. There is deliberately no `WritingDrain` here: draining is
-/// `sismatic-intent-relay`'s, and a handler that could claim a writing could
-/// reorder a device's queue. And still no [`WriteStore`], so the readings
+/// touch a read. There is deliberately no `WriteDrain` here: draining is
+/// `sismatic-intent-relay`'s, and a handler that could claim a write could
+/// reorder a device's queue. And still no [`WriteStore`], so the reads
 /// routes remain unable to write no matter what they ask for.
 ///
 /// [`Ports::group_state`] is the newest and the narrowest: it can *read* what a
 /// device group was told and cannot record it. Recording happens inside
 /// `submit`, atomically with the admission it describes, which is why there is
 /// no write half to hand over — a handler able to set an expectation directly
-/// could claim a device group had been asked for something no writing was ever
+/// could claim a device group had been asked for something no write was ever
 /// queued for.
 ///
 /// That is the same narrowing the read side already relied on, extended rather
@@ -130,7 +130,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
         log,
         group_state,
         fields,
-        writings,
+        writes,
     } = ports;
 
     // Adopt the caller's `Arc` instead of wrapping it: `Data::new` would give
@@ -139,8 +139,8 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     let store: web::Data<dyn ReadStore> = web::Data::from(store);
     let catalog: web::Data<dyn DeviceCatalog> = web::Data::from(catalog);
     let status: web::Data<dyn DeviceStatus> = web::Data::from(status);
-    let submit: web::Data<dyn WritingSubmit> = web::Data::from(submit);
-    let log: web::Data<dyn WritingLog> = web::Data::from(log);
+    let submit: web::Data<dyn WriteSubmit> = web::Data::from(submit);
+    let log: web::Data<dyn WriteLog> = web::Data::from(log);
     let group_state: web::Data<dyn GroupState> = web::Data::from(group_state);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
     // the composition root has no reason to keep a handle to it. The two
@@ -148,7 +148,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     // the root built and handed over, not objects it shares.
     let stamp = web::Data::new(stamp);
     let fields = web::Data::new(fields);
-    let writings = web::Data::new(writings);
+    let writes = web::Data::new(writes);
 
     // Built once and cloned per worker, for the same reason the store handle is:
     // the docs are identical on every worker, and assembling them inside the
@@ -169,7 +169,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             .app_data(group_state.clone())
             .app_data(stamp.clone())
             .app_data(fields.clone())
-            .app_data(writings.clone())
+            .app_data(writes.clone())
             .app_data(docs.clone())
             .service(
                 // A `resource` rather than `App::route`, which is otherwise the
@@ -181,10 +181,10 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                 // misconfigured probe what to change.
                 web::resource("/health_check").route(web::get().to(health_check)),
             )
-            // The readings routes. Three resources cover every queryable field
+            // The reads routes. Three resources cover every queryable field
             // of every device, because `{field}` is a path parameter carried
             // through to the store rather than a symbol compiled in — see
-            // `handlers::readings` for why this is not a generated route per
+            // `handlers::reads` for why this is not a generated route per
             // field.
             //
             // Registered longest-path-first. actix matches in registration
@@ -202,7 +202,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                     // same constant. Two literals could disagree, and the way
                     // they would disagree is a refusal pointing at a second 404.
                     .service(
-                        web::scope(READINGS)
+                        web::scope(READS)
                             // TODO .wrap(YourAuthMiddleware::default())
                             //
                             // The scope root: which fields the routes below
@@ -243,16 +243,16 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             ),
                     )
                     .service(
-                        web::scope(WRITINGS)
-                            // The scope root, as under `readings` above: which
+                        web::scope(WRITES)
+                            // The scope root, as under `reads` above: which
                             // names a write may address. Worth contrasting with
                             // the `/{id}` resource at the bottom of this scope,
                             // which is the registration whose order *is* load-
                             // bearing: `/{id}` matches one segment and this
-                            // matches none, so a writing id can never be read as
+                            // matches none, so a write id can never be read as
                             // this route and this route can never shadow a
-                            // writing id.
-                            .service(web::resource("").route(web::get().to(writings_catalog)))
+                            // write id.
+                            .service(web::resource("").route(web::get().to(writes_catalog)))
                             // The write routes. Same longest-path-first discipline, and
                             // here it earns its keep: `/recording/start` must be
                             // registered before `/recording`, or the shorter resource
@@ -287,7 +287,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             )
                             .service(
                                 web::resource("/devices/{id}/history")
-                                    .route(web::get().to(list_writings)),
+                                    .route(web::get().to(list_writes)),
                             )
                             .service(
                                 web::resource("/groups/{id}/recording/start")
@@ -315,18 +315,18 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             )
                             .service(
                                 web::resource("/groups/{id}/history")
-                                    .route(web::get().to(list_group_writings)),
+                                    .route(web::get().to(list_group_writes)),
                             )
                             // Last in the scope, and this is the registration
                             // whose order carries weight. `/{id}` is a single
                             // path parameter on the scope root, so it would
                             // match `devices` or `groups` if it were tried
                             // first — every route above it would become
-                            // `GET /v1/writings/{id}` with the id `devices`.
+                            // `GET /v1/writes/{id}` with the id `devices`.
                             // A path parameter stops at the `/`, so a longer
                             // path cannot reach it, and one segment is exactly
-                            // what a writing id is.
-                            .service(web::resource("/{id}").route(web::get().to(read_writing))),
+                            // what a write id is.
+                            .service(web::resource("/{id}").route(web::get().to(read_write))),
                     )
                     .service(
                         web::scope(INVENTORY)
@@ -350,7 +350,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             // asset and it is named here, so there is no `{_:.*}` resource that
             // has to be kept out of the way of everything registered above.
             // Ordering is therefore not load-bearing for these three the way it
-            // is for the readings routes — the note there stands on its own.
+            // is for the reads routes — the note there stands on its own.
             .service(web::resource(OPENAPI_JSON_PATH).route(web::get().to(openapi_json)))
             .service(web::resource(SCALAR_UI_PATH).route(web::get().to(scalar_ui)))
             .service(web::resource(SCALAR_JS_PATH).route(web::get().to(scalar_js)))

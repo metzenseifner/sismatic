@@ -54,7 +54,7 @@ impl DeviceStatus for RegistryStatus {
 ///
 /// Wildcard-free, so a fifth [`Connectivity`] state is a build error here until
 /// someone decides what a client should be told about it — the same drift
-/// sentinel `sismatic_sync::dto` uses for readings. [`ConnectionStatus`] has one
+/// sentinel `sismatic_sync::dto` uses for reads. [`ConnectionStatus`] has one
 /// variant this cannot produce, `Unknown`, which is reserved for the id the
 /// registry does not hold at all.
 const fn to_dto(connectivity: Connectivity) -> ConnectionStatus {
@@ -121,7 +121,7 @@ mod tests {
         device
             .run(&sismatic_core::protocol::instructions::query::Query::SshPort.instruction())
             .await
-            .expect("the writing");
+            .expect("the write");
 
         assert_eq!(status.status("atrium").await, ConnectionStatus::Warm);
     }

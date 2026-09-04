@@ -1,6 +1,6 @@
 //! The two impure values a write handler needs, behind one injected function.
 //!
-//! A submission carries a fresh [`WritingId`] and the instant it arrived.
+//! A submission carries a fresh [`WriteId`] and the instant it arrived.
 //! Calling `Uuid::new_v4()` and `Utc::now()` inside a handler would work and
 //! would cost two things worth more than the twelve lines of wiring here.
 //!
@@ -20,21 +20,21 @@
 //! Curried deliberately. The root supplies the effect once, and every handler
 //! thereafter is a pure function of its extractors.
 
-use sismatic_api_types::{Timestamp, WritingId};
+use sismatic_api_types::{Timestamp, WriteId};
 
 /// A minted `(id, instant)` pair, grouped because a submission needs both and
 /// they are produced together — and because two separate injections would let a
 /// test wire a deterministic clock and a real id generator, which is a state
 /// nothing wants.
-pub struct Stamp(Box<dyn Fn() -> (WritingId, Timestamp) + Send + Sync>);
+pub struct Stamp(Box<dyn Fn() -> (WriteId, Timestamp) + Send + Sync>);
 
 impl Stamp {
-    pub fn new(f: impl Fn() -> (WritingId, Timestamp) + Send + Sync + 'static) -> Self {
+    pub fn new(f: impl Fn() -> (WriteId, Timestamp) + Send + Sync + 'static) -> Self {
         Stamp(Box::new(f))
     }
 
     /// One `(id, instant)`. Called once per accepted submission.
-    pub fn next(&self) -> (WritingId, Timestamp) {
+    pub fn next(&self) -> (WriteId, Timestamp) {
         (self.0)()
     }
 }

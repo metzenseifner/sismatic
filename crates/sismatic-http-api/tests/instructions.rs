@@ -18,22 +18,22 @@
 //!
 //! # The one route this could have broken
 //!
-//! `GET /v1/writings` sits on a scope whose root already had a route:
-//! `GET /v1/writings/{id}`, which resolves a writing id. The two cannot collide
+//! `GET /v1/writes` sits on a scope whose root already had a route:
+//! `GET /v1/writes/{id}`, which resolves a write id. The two cannot collide
 //! — one matches an empty tail and the other exactly one segment — but "cannot"
 //! is worth a test rather than an argument, because the failure would be a
-//! writing lookup quietly answering with a catalog.
+//! write lookup quietly answering with a catalog.
 
 use std::sync::Arc;
 
-use sismatic_api_types::{FieldCatalog, Intent, Timestamp, WritingsCatalog};
+use sismatic_api_types::{FieldCatalog, Intent, Timestamp, WritesCatalog};
 use sismatic_store::DynReadStore;
-use sismatic_store::outbox::{Submission, WritingSubmit};
+use sismatic_store::outbox::{Submission, WriteSubmit};
 use sismatic_store_memory::MemoryStore;
 
 mod harness;
 
-/// The catalogs are static, so no suite here needs a reading in the store.
+/// The catalogs are static, so no suite here needs a read in the store.
 fn empty_store() -> DynReadStore {
     Arc::new(MemoryStore::default())
 }
@@ -53,16 +53,16 @@ fn spawn() -> String {
     let (address, _) = harness::spawn_with_instructions(
         empty_store(),
         harness::field_catalog(),
-        harness::writings_catalog(),
+        harness::writes_catalog(),
     );
     address
 }
 
 #[tokio::test]
-async fn the_readings_root_lists_every_field_that_can_be_asked_for() {
+async fn the_reads_root_lists_every_field_that_can_be_asked_for() {
     let address = spawn();
 
-    let (status, body) = get(&address, "/v1/readings").await;
+    let (status, body) = get(&address, "/v1/reads").await;
 
     assert_eq!(status, 200);
     // Compared whole rather than by key, because the shape is the contract: a
@@ -96,9 +96,9 @@ async fn the_field_list_is_served_in_the_order_it_was_given() {
         ],
     };
     let (address, _) =
-        harness::spawn_with_instructions(empty_store(), fields, harness::writings_catalog());
+        harness::spawn_with_instructions(empty_store(), fields, harness::writes_catalog());
 
-    let (_, body) = get(&address, "/v1/readings").await;
+    let (_, body) = get(&address, "/v1/reads").await;
 
     let names: Vec<&str> = body["fields"]
         .as_array()
@@ -120,7 +120,7 @@ async fn the_field_list_is_served_in_the_order_it_was_given() {
 async fn a_fields_synonyms_are_published_beside_its_canonical_name() {
     let address = spawn();
 
-    let (_, body) = get(&address, "/v1/readings").await;
+    let (_, body) = get(&address, "/v1/reads").await;
 
     let stream = &body["fields"][1];
     assert_eq!(stream["name"], "STREAM_1_NAME");
@@ -137,10 +137,10 @@ async fn a_fields_synonyms_are_published_beside_its_canonical_name() {
 }
 
 #[tokio::test]
-async fn the_writings_root_lists_the_three_kinds_of_write_apart() {
+async fn the_writes_root_lists_the_three_kinds_of_write_apart() {
     let address = spawn();
 
-    let (status, body) = get(&address, "/v1/writings").await;
+    let (status, body) = get(&address, "/v1/writes").await;
 
     assert_eq!(status, 200);
     // Three keys, not one flat list: `TITLE` is refused by the settings route
@@ -166,16 +166,16 @@ async fn the_writings_root_lists_the_three_kinds_of_write_apart() {
     );
 }
 
-/// The collision that cannot happen, pinned anyway: `/v1/writings` and
-/// `/v1/writings/{id}` share a scope root, and the failure — a writing lookup
-/// answering with a catalog, or the catalog answering `404 no writing
-/// 'writings'` — would be silent in both directions.
+/// The collision that cannot happen, pinned anyway: `/v1/writes` and
+/// `/v1/writes/{id}` share a scope root, and the failure — a write lookup
+/// answering with a catalog, or the catalog answering `404 no write
+/// 'writes'` — would be silent in both directions.
 #[tokio::test]
-async fn the_writings_catalog_does_not_shadow_a_writing_id() {
+async fn the_writes_catalog_does_not_shadow_a_write_id() {
     let (address, outbox) = harness::spawn_with_instructions(
         empty_store(),
         harness::field_catalog(),
-        harness::writings_catalog(),
+        harness::writes_catalog(),
     );
     // Through the port rather than over HTTP: this suite is about routing, and
     // seeding through a route would make it depend on the routing it checks.
@@ -196,17 +196,17 @@ async fn the_writings_catalog_does_not_shadow_a_writing_id() {
         .await
         .expect("seeding the outbox");
 
-    let (status, writing) = get(&address, "/v1/writings/cmd-1").await;
+    let (status, write) = get(&address, "/v1/writes/cmd-1").await;
     assert_eq!(status, 200);
-    assert_eq!(writing["id"], "cmd-1");
+    assert_eq!(write["id"], "cmd-1");
 
     // ...and the other direction: the catalog is not reached by anything that
     // looks like an id.
-    let (status, body) = get(&address, "/v1/writings/no-such-writing").await;
+    let (status, body) = get(&address, "/v1/writes/no-such-write").await;
     assert_eq!(status, 404, "got {body}");
     assert!(
         body["fields"].is_null() && body["settings"].is_null(),
-        "an unknown writing id was answered with a catalog: {body}"
+        "an unknown write id was answered with a catalog: {body}"
     );
 }
 
@@ -217,15 +217,15 @@ async fn empty_catalogs_are_empty_lists_not_errors() {
     let (address, _) = harness::spawn_with_instructions(
         empty_store(),
         FieldCatalog::default(),
-        WritingsCatalog::default(),
+        WritesCatalog::default(),
     );
 
     assert_eq!(
-        get(&address, "/v1/readings").await,
+        get(&address, "/v1/reads").await,
         (200, serde_json::json!({"fields": []}))
     );
     assert_eq!(
-        get(&address, "/v1/writings").await,
+        get(&address, "/v1/writes").await,
         (
             200,
             serde_json::json!({"commands": [], "metadata": [], "settings": []})
@@ -241,7 +241,7 @@ async fn empty_catalogs_are_empty_lists_not_errors() {
 async fn the_roots_are_exact_paths() {
     let address = spawn();
 
-    for path in ["/v1/readings/", "/v1/writings/"] {
+    for path in ["/v1/reads/", "/v1/writes/"] {
         let status = reqwest::get(format!("{address}{path}"))
             .await
             .expect("requesting a slashed root")
@@ -259,7 +259,7 @@ async fn the_roots_are_read_only() {
     let address = spawn();
 
     let response = reqwest::Client::new()
-        .post(format!("{address}/v1/writings"))
+        .post(format!("{address}/v1/writes"))
         .send()
         .await
         .expect("posting to the catalog");

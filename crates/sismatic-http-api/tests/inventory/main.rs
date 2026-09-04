@@ -4,13 +4,13 @@
 //! One thing is worth pinning from out here above all others: the index answers
 //! from the *catalog* and not the store, which is what makes a `404` here mean
 //! "not in the devices file" rather than "nothing polled yet" — the distinction
-//! the readings routes deliberately cannot draw.
+//! the reads routes deliberately cannot draw.
 //!
 //! # What moved out of this suite
 //!
 //! The catalog also guards the write path: a submission to an id it does not
 //! hold is refused before anything is recorded. That guard is exercised through
-//! `/v1/writings/…` URLs, so it is tested in `tests/writings/` beside the other
+//! `/v1/writes/…` URLs, so it is tested in `tests/writes/` beside the other
 //! things those routes do — a suite is organized by the scope it addresses, not
 //! by which port happens to be load-bearing. What stays here is the `/groups`
 //! route's `barrier_timeout_secs` and `barrier`, because those are configuration
@@ -23,11 +23,11 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{ConnectionStatus, DeviceSummary, Reading, ReadingValue, Timestamp};
+use sismatic_api_types::{ConnectionStatus, DeviceSummary, Read, ReadValue, Timestamp};
 use sismatic_store::{DynReadStore, WriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryStore};
 
-// See `tests/readings/main.rs` for why this is a `#[path]` and not a plain
+// See `tests/reads/main.rs` for why this is a `#[path]` and not a plain
 // `mod harness;`.
 #[path = "../harness/mod.rs"]
 mod harness;
@@ -54,15 +54,15 @@ fn summary(id: &str, host: &str, eager: bool) -> DeviceSummary {
     }
 }
 
-/// A store holding one reading of `FIRMWARE` on [`DEVICE`], so the detail route
+/// A store holding one read of `FIRMWARE` on [`DEVICE`], so the detail route
 /// has something to join against.
 async fn seeded_store() -> DynReadStore {
     let store = MemoryStore::default();
     store
-        .upsert_latest(Reading {
+        .upsert_latest(Read {
             device: DEVICE.into(),
             field: "FIRMWARE".into(),
-            value: ReadingValue::Version("2.11".into()),
+            value: ReadValue::Version("2.11".into()),
             at: Timestamp("2026-07-23T14:03:11Z".into()),
         })
         .await

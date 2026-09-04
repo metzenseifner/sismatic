@@ -1,8 +1,8 @@
 //! The two exploratory routes: which names the rest of the API accepts.
 //!
 //! ```text
-//! GET /v1/readings      every field a reading can be asked for
-//! GET /v1/writings      every command, metadata register and setting a write
+//! GET /v1/reads      every field a read can be asked for
+//! GET /v1/writes      every command, metadata register and setting a write
 //!                       can name
 //! ```
 //!
@@ -15,7 +15,7 @@
 //! Every other route in these two scopes takes the name as a path parameter and
 //! passes it through — `{field}` is data here, not a symbol this crate was
 //! compiled against, which is what lets a name added to `sismatic-core`'s catalog
-//! be served with no code change in any crate (see [`crate::handlers::readings`]
+//! be served with no code change in any crate (see [`crate::handlers::reads`]
 //! for the whole argument). The price is stated there too, and it is what these
 //! routes pay off: a URL naming a field that does not exist is indistinguishable
 //! from one naming a field nothing has polled, so the API could not previously
@@ -44,23 +44,23 @@
 //! [`DeviceCatalog`]: sismatic_store::catalog::DeviceCatalog
 
 use actix_web::{HttpResponse, web};
-use sismatic_api_types::{FieldCatalog, WritingsCatalog};
+use sismatic_api_types::{FieldCatalog, WritesCatalog};
 
-/// `GET /v1/readings` — every field a reading can be asked for.
+/// `GET /v1/reads` — every field a read can be asked for.
 ///
 /// A field listed here is one this server knows how to *ask* a device for. It
 /// is not a promise that anything has: whether a field is polled, and how often,
 /// is the sync schedule's business, so a name can appear here and never appear
-/// under `GET /v1/readings/devices/{id}/fields`.
+/// under `GET /v1/reads/devices/{id}/fields`.
 #[utoipa::path(
     get,
     path = "",
-    context_path = "/v1/readings",
-    tag = "readings",
+    context_path = "/v1/reads",
+    tag = "reads",
     responses(
         (status = 200, description = "Every queryable field, in catalog order, each \
              with the other spellings accepted for it and a line saying what it is. \
-             The `name` is the canonical form, and the form a stored reading carries \
+             The `name` is the canonical form, and the form a stored read carries \
              whichever spelling was requested.", body = FieldCatalog),
     ),
 )]
@@ -72,30 +72,30 @@ pub async fn field_catalog(fields: web::Data<FieldCatalog>) -> HttpResponse {
     HttpResponse::Ok().json(&**fields)
 }
 
-/// `GET /v1/writings` — every command, metadata register, and setting a write can
+/// `GET /v1/writes` — every command, metadata register, and setting a write can
 /// name.
 ///
 /// Three lists, because the three are written through three different routes:
 /// `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
 /// `commands` are what the `recording/{verb}` routes send and are never spelled
-/// in a URL. See [`WritingCatalog`] for the rules that separate them.
+/// in a URL. See [`WritesCatalog`] for the rules that separate them.
 #[utoipa::path(
     get,
     path = "",
-    context_path = "/v1/writings",
-    tag = "writings",
+    context_path = "/v1/writes",
+    tag = "writes",
     responses(
         (status = 200, description = "What a write can name, in three lists. \
              `metadata` names go in the `{field}` of \
-             `PUT /v1/writings/devices/{id}/metadata/{field}` and are writable only \
+             `PUT /v1/writes/devices/{id}/metadata/{field}` and are writable only \
              while nothing is recording; `settings` names go in the `{field}` of \
-             `PUT /v1/writings/devices/{id}/settings/{field}` and are writable \
+             `PUT /v1/writes/devices/{id}/settings/{field}` and are writable \
              always. `commands` are the recording instructions behind \
-             `POST /v1/writings/devices/{id}/recording/start` and the two beside \
+             `POST /v1/writes/devices/{id}/recording/start` and the two beside \
              it — reported for completeness, not to be put in a URL.",
-         body = WritingsCatalog),
+         body = WritesCatalog),
     ),
 )]
-pub async fn writings_catalog(writings: web::Data<WritingsCatalog>) -> HttpResponse {
-    HttpResponse::Ok().json(&**writings)
+pub async fn writes_catalog(writes: web::Data<WritesCatalog>) -> HttpResponse {
+    HttpResponse::Ok().json(&**writes)
 }

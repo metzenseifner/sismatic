@@ -49,13 +49,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use sismatic_api_types::{Reading, Timestamp};
+use sismatic_api_types::{Read, Timestamp};
 use sismatic_core::devices::device::{Device, DeviceError};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::protocol::Value;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_store::DynWriteStore;
-use sismatic_store::outbox::DynWritingDrain;
+use sismatic_store::outbox::DynWriteDrain;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +82,7 @@ pub struct SyncConfig {
     /// read side alone. The port is optional rather than a second `spawn`
     /// because one poll of `RUNNING_STATE` serves both readers, and polling it
     /// twice would double the exchanges on the field polled most often.
-    pub reconciler: Option<DynWritingDrain>,
+    pub reconciler: Option<DynWriteDrain>,
 }
 
 /// Hand-written rather than derived because `reconciler` is a trait object, and
@@ -102,7 +102,7 @@ impl std::fmt::Debug for SyncConfig {
 /// One field's polling schedule: what to ask for, and how often to ask.
 ///
 /// `name` is a canonical query name as [`Query`] spells it (e.g.
-/// `"RUNNING_STATE"`) — the same string that lands in [`Reading::field`], which
+/// `"RUNNING_STATE"`) — the same string that lands in [`Read::field`], which
 /// is why it need not be mirrored as a typed enum here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSchedule {
@@ -168,7 +168,7 @@ pub fn spawn(registry: Arc<Registry>, write: DynWriteStore, cfg: SyncConfig) -> 
     // Announced once rather than per loop: whether a field reconciler exists is a
     // property of the deployment, not of a device.
     if cfg.reconciler.is_some() {
-        info!("observed recording states will be reported to the writing outbox");
+        info!("observed recording states will be reported to the write outbox");
     }
 
     for device in registry.devices() {
@@ -195,13 +195,13 @@ pub fn spawn(registry: Arc<Registry>, write: DynWriteStore, cfg: SyncConfig) -> 
     SyncHandle { tasks, cancel }
 }
 
-/// Poll one field on one device forever, persisting each reading, until
+/// Poll one field on one device forever, persisting each read, until
 /// cancelled.
 async fn poll_loop(
     device: Arc<Device>,
     field: String,
     write: DynWriteStore,
-    reconciler: Option<DynWritingDrain>,
+    reconciler: Option<DynWriteDrain>,
     interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -260,16 +260,16 @@ async fn poll_loop(
                }
 
                 if let Ok(value) = outcome {
-                    let reading = Reading {
+                    let read = Read {
                         device: device.id().to_string(),
                         field: field.clone(),
                         value: dto::to_dto(value),
                         at: Timestamp(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
                     };
-                    // Not part of `health`: a store that will not take a reading
+                    // Not part of `health`: a store that will not take a read
                     // says nothing about whether the device answered.
-                    if let Err(err) = write.upsert_latest(reading).await {
-                        warn!(device = device.id(), field, %err, "failed to persist reading");
+                    if let Err(err) = write.upsert_latest(read).await {
+                        warn!(device = device.id(), field, %err, "failed to persist read");
                     }
                 }
             }
@@ -295,7 +295,7 @@ fn is_running_state(field: &str) -> bool {
 /// hoped to agree.
 ///
 /// What a rename would otherwise cost: expectations filed under the old name,
-/// readings written under the new one, and every group reporting `unknown`
+/// reads written under the new one, and every group reporting `unknown`
 /// forever with nothing failing to say why.
 ///
 /// [`RECORDING_STATE_FIELD`]: sismatic_store::group::RECORDING_STATE_FIELD
@@ -312,7 +312,7 @@ fn the_stores_recording_field_is_the_name_this_driver_polls_it_under() {
 
 /// What one loop believes about its `(device, field)` pair right now. Two states,
 /// because an operator only ever asks one question of a poll loop: is this
-/// reading current, or stale?
+/// read current, or stale?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Health {
     Up,
@@ -322,7 +322,7 @@ enum Health {
 /// A poll result reduced to the three cases the health machine distinguishes.
 ///
 /// The distinction that matters is [`Gated`](Contact::Gated) versus
-/// [`Failed`](Contact::Failed): both mean "no reading", but only `Failed` is
+/// [`Failed`](Contact::Failed): both mean "no read", but only `Failed` is
 /// *news*. A gated poll is core reporting a fact some other loop's dial already
 /// established (and already reported), so treating the two alike is what would
 /// put the onset in the log once per field instead of once per device.
@@ -407,13 +407,13 @@ mod tests {
 
     // The wire `RecordingState`, not core's: `observe` takes what
     // `dto::state_to_dto` produces.
-    use sismatic_api_types::{DeviceId, Reading, RecordingState, WritingId, WritingRecord};
+    use sismatic_api_types::{DeviceId, Read, RecordingState, WriteId, WriteRecord};
     use sismatic_core::devices::config::DeviceConfig;
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::connector::{ConnectError, Connector};
     use sismatic_core::devices::transport::Transport;
     use sismatic_core::devices::transport::fake::FakeTransport;
-    use sismatic_store::outbox::{Claim, Outcome, WritingDrain};
+    use sismatic_store::outbox::{Claim, Outcome, WriteDrain};
     use sismatic_store::{WriteError, WriteStore};
 
     use super::*;
@@ -436,13 +436,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WriteStore for RecordingStore {
-        async fn upsert_latest(&self, reading: Reading) -> Result<(), WriteError> {
-            self.fields.lock().expect("lock").push(reading.field);
+        async fn upsert_latest(&self, read: Read) -> Result<(), WriteError> {
+            self.fields.lock().expect("lock").push(read.field);
             Ok(())
         }
     }
 
-    /// A [`WritingDrain`] that records what was observed and does nothing else.
+    /// A [`WriteDrain`] that records what was observed and does nothing else.
     /// A poll loop only ever calls `observe`; the other three methods belong to
     /// the relay, and stubbing them `Ok`-and-empty rather than `unimplemented!`
     /// means a loop that wrongly reached for one fails an assertion here rather
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl WritingDrain for RecordingReconciler {
+    impl WriteDrain for RecordingReconciler {
         async fn claim_next(
             &self,
             _device: DeviceId,
@@ -470,7 +470,7 @@ mod tests {
 
         async fn settle(
             &self,
-            _id: WritingId,
+            _id: WriteId,
             _outcome: Outcome,
             _at: Timestamp,
         ) -> Result<(), WriteError> {
@@ -486,7 +486,7 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight(&self, _device: DeviceId) -> Result<Vec<WritingRecord>, WriteError> {
+        async fn in_flight(&self, _device: DeviceId) -> Result<Vec<WriteRecord>, WriteError> {
             Ok(Vec::new())
         }
     }

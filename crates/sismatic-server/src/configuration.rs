@@ -67,12 +67,12 @@ pub fn get_configuration_with_env(
 
 /// How the intent relay drains the write outbox.
 ///
-/// `poll_ms` is a floor on how long an accepted writing waits before a device
+/// `poll_ms` is a floor on how long an accepted write waits before a device
 /// hears about it, so it trades idle wake-ups against apparent latency. 250 ms
 /// is below the threshold at which an operator pressing "start" perceives a
 /// delay, and costs four wake-ups per device per second.
 ///
-/// `max_attempts` counts total tries, not retries: `1` means a writing that
+/// `max_attempts` counts total tries, not retries: `1` means a write that
 /// fails once is failed for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentRelayConfig {
@@ -200,7 +200,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
 /// Decode `intent_relay.poll_ms`.
 ///
 /// `0` is *not* the "never" sentinel it is under `sync` — a relay that never
-/// looks at its queue accepts writings and performs none of them, which is a
+/// looks at its queue accepts writes and performs none of them, which is a
 /// deployment nobody means to write. It is read as "as fast as possible"
 /// instead, which is one millisecond: `tokio::time::interval` panics on a zero
 /// period, so the floor keeps a plausible-looking config from taking the
@@ -900,7 +900,7 @@ mod tests {
     }
 
     /// Unlike `sync`'s `interval_secs`, a zero here is not "never". A relay that
-    /// never drains would accept writings and perform none of them, and a zero
+    /// never drains would accept writes and perform none of them, and a zero
     /// period panics `tokio::time::interval` — so it is read as "as fast as
     /// possible" rather than taking the process down at startup.
     #[test]

@@ -109,7 +109,7 @@ Across the facades, a group id is accepted anywhere a device id is:
 - **Python**: `sis.command("room-5", "start")` returns a `dict` keyed by member
   id (a single device still returns its scalar value); `sis.groups()` lists
   group ids.
-- **Web**: `POST /v1/writings/groups/room-5/recording/start` records one writing
+- **Web**: `POST /v1/writes/groups/room-5/recording/start` records one write
   per member; `GET /v1/inventory/groups` lists group ids.
 
 # Warm versus Cold Connections

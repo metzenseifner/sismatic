@@ -8,8 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::reading::Reading;
-use crate::writing::Barrier;
+use crate::read::Read;
+use crate::write::Barrier;
 use crate::{DeviceId, GroupId};
 
 /// What the server's connection to a device looks like right now.
@@ -53,7 +53,7 @@ pub enum ConnectionStatus {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceSummary {
-    // See `Reading::device` for why the alias is spelled out for utoipa.
+    // See `Read::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub id: DeviceId,
     pub host: String,
@@ -63,15 +63,15 @@ pub struct DeviceSummary {
     pub status: ConnectionStatus,
 }
 
-/// A device plus the most recent reading of each field the store has seen — the
+/// A device plus the most recent read of each field the store has seen — the
 /// payload for a single-device detail view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceDetail {
     pub device: DeviceSummary,
-    /// Latest reading per field, most-recent value of each quantity.
-    pub latest: Vec<Reading>,
+    /// Latest read per field, most-recent value of each quantity.
+    pub latest: Vec<Read>,
 }
 
 /// The device index. Wrapped in an object so it can later carry paging/metadata
@@ -89,17 +89,17 @@ pub struct DeviceList {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GroupSummary {
-    // See `Reading::device` for why the alias is spelled out for utoipa.
+    // See `Read::device` for why the alias is spelled out for utoipa.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub id: GroupId,
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub members: Vec<DeviceId>,
-    /// How long a writing addressed to this group waits for every member to be
+    /// How long a write addressed to this group waits for every member to be
     /// ready before [`barrier`] decides, in seconds.
     ///
     /// Reported because it is the one configured number that changes what a
     /// caller should expect from a `202`: a group with a fifteen-second barrier
-    /// can leave a writing pending that long before anything reaches a device,
+    /// can leave a write pending that long before anything reaches a device,
     /// and a client showing a spinner needs to know which.
     ///
     /// [`barrier`]: GroupSummary::barrier

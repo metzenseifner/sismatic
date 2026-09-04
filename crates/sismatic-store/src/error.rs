@@ -54,7 +54,7 @@ impl std::error::Error for ReadError {}
 /// Produced only by `WriteStore::upsert_latest`, which `sismatic-sync` calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
-    /// The storage backend failed while persisting the reading (lost
+    /// The storage backend failed while persisting the read (lost
     /// connection, constraint violation, disk full, ...).
     Backend(String),
 }

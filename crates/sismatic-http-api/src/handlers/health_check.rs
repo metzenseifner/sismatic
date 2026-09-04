@@ -23,7 +23,7 @@ use actix_web::HttpResponse;
 /// outage as *this process is dead*, and the supervisor watching this endpoint
 /// would answer a dependency's failure by killing a process that is working
 /// perfectly — turning one fault into two. Which devices are reachable, and how
-/// stale their last readings are, are real questions and belong on real routes
+/// stale their last reads are, are real questions and belong on real routes
 /// over the store, where a caller can ask about a device rather than about the
 /// server.
 ///
