@@ -59,7 +59,7 @@ use crate::handlers::target::{INVENTORY, reject_group_bare};
     responses(
         (status = 200, description = "Every device in the devices file, ordered by \
              id, each with its live connection state. Empty means none are \
-             configured — unlike an empty readings list, which means none have \
+             configured — unlike an empty reads list, which means none have \
              answered.", body = DeviceList),
     ),
 )]
@@ -101,12 +101,12 @@ pub async fn list_devices(
     tag = "inventory",
     params(("id" = String, Path, description = "Device id, as written in the devices file.")),
     responses(
-        (status = 200, description = "The device, with one reading per field it has \
+        (status = 200, description = "The device, with one read per field it has \
              answered. `latest` is empty for a device that is configured but has \
              never been reached.", body = DeviceDetail),
         (status = 404, description = "No device has this id, or the id names a device \
              group — in which case the body carries `/v1/inventory/groups/{id}`. Unlike the \
-             readings routes' 404, this one is a claim about configuration.",
+             reads routes' 404, this one is a claim about configuration.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),

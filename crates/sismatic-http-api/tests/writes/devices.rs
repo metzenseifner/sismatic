@@ -1,12 +1,12 @@
-//! `/v1/commands/devices/{id}/…` — asking one device to do something, and
+//! `/v1/writes/devices/{id}/…` — asking one device to do something, and
 //! reading back what it was asked.
 //!
-//! Also the scope-root `/v1/commands/{id}`, which belongs to neither id-space:
-//! a command id is globally unique, so the route that fetches one needs no
+//! Also the scope-root `/v1/writes/{id}`, which belongs to neither id-space:
+//! a write id is globally unique, so the route that fetches one needs no
 //! device to address it. It is tested here because every id it is given is
 //! minted by a device-addressed submission above.
 
-use sismatic_api_types::{Intent, Phase};
+use sismatic_api_types::{DesiredRecordingState, Intent};
 
 use crate::{DEVICE, GROUP, SCOPE, get, post, put, recorded_intents, spawn_app};
 
@@ -18,28 +18,28 @@ fn url(path: &str) -> String {
 // ---- accepting a write -------------------------------------------------
 
 #[tokio::test]
-async fn a_start_is_accepted_and_names_the_command_it_recorded() {
+async fn a_start_is_accepted_and_names_the_write_it_recorded() {
     let (address, _outbox) = spawn_app();
 
     let (status, location, body) = post(&address, &url("/recording/start")).await;
 
     assert_eq!(status, 202, "got {body}");
-    // Always a list, even for a device that can only ever produce one command:
+    // Always a list, even for a device that can only ever produce one write:
     // one response shape rather than one per kind of id. See `Acceptance`.
     assert_eq!(body["batch"], serde_json::Value::Null);
-    assert_eq!(body["commands"][0]["id"], "cmd-1");
-    assert_eq!(body["commands"][0]["device"], DEVICE);
+    assert_eq!(body["writes"][0]["id"], "cmd-1");
+    assert_eq!(body["writes"][0]["device"], DEVICE);
     // The first recording, so epoch 1. Returned in the body so a caller writing
     // several metadata fields can check they all landed on one take.
-    assert_eq!(body["commands"][0]["epoch"], 1);
-    // The header and the body must name the same command; with a UUID a test
+    assert_eq!(body["writes"][0]["epoch"], 1);
+    // The header and the body must name the same write; with a UUID a test
     // could only check the header was *shaped* like one. It names the scope
-    // root, which is where `read_command` is mounted.
-    assert_eq!(location.as_deref(), Some("/v1/commands/cmd-1"));
+    // root, which is where `read_write` is mounted.
+    assert_eq!(location.as_deref(), Some("/v1/writes/cmd-1"));
 }
 
 #[tokio::test]
-async fn an_accepted_command_is_pending_and_no_device_was_contacted() {
+async fn an_accepted_write_is_pending_and_no_device_was_contacted() {
     let (address, _outbox) = spawn_app();
 
     post(&address, &url("/recording/start")).await;
@@ -117,7 +117,7 @@ async fn a_metadata_write_during_a_recording_is_a_409() {
 
     let (status, location, body) = put(&address, &url("/metadata/title"), "oops").await;
     assert_eq!(status, 409);
-    // A conflict is not a command, so there is nothing to poll for.
+    // A conflict is not a write, so there is nothing to poll for.
     assert_eq!(location, None);
     assert_eq!(body["code"], "conflict");
     // The typed field is how a caller tells "your edit was discarded" from "the
@@ -168,7 +168,7 @@ async fn each_lifecycle_verb_is_refused_by_the_state_that_contradicts_it() {
 }
 
 /// A refused submission must leave no trace. A 409 that still queued the
-/// command would dispatch the very write it just told the caller it refused.
+/// write would dispatch the very write it just told the caller it refused.
 #[tokio::test]
 async fn a_refused_write_records_nothing() {
     let (address, outbox) = spawn_app();
@@ -186,8 +186,9 @@ async fn a_refused_write_records_nothing() {
 // ---- an id the catalog does not hold -----------------------------------
 
 /// The failure the catalog exists to prevent. Without it the outbox admits the
-/// command against a fresh idle phase and answers `202`, and the caller learns
-/// its recording never started by polling a command that fails at dispatch.
+/// write against a desired state of `Idle` and answers `202`, and the caller
+/// learns its recording never started by polling a write that fails at
+/// dispatch.
 #[tokio::test]
 async fn a_write_to_an_unconfigured_device_is_refused_at_submission() {
     let (address, outbox) = spawn_app();
@@ -203,7 +204,7 @@ async fn a_write_to_an_unconfigured_device_is_refused_at_submission() {
         body["error"]
     );
 
-    // Nothing recorded: a refused submission must leave no command behind, or
+    // Nothing recorded: a refused submission must leave no write behind, or
     // the relay would dispatch the very write the caller was told was refused.
     assert!(recorded_intents(&outbox, "typo").await.is_empty());
 }
@@ -239,7 +240,7 @@ async fn every_device_route_in_this_scope_refuses_a_device_group_id() {
 
     for (method, tail) in [
         ("get", "/recording"),
-        ("get", "/commands"),
+        ("get", "/history"),
         ("post", "/recording/start"),
         ("post", "/recording/stop"),
         ("post", "/recording/pause"),
@@ -277,7 +278,7 @@ async fn every_device_route_in_this_scope_refuses_a_device_group_id() {
 // ---- idempotency -------------------------------------------------------
 
 #[tokio::test]
-async fn a_retry_under_one_key_returns_the_original_command() {
+async fn a_retry_under_one_key_returns_the_original_write() {
     let (address, outbox) = spawn_app();
     let client = reqwest::Client::new();
     let start = || {
@@ -288,7 +289,7 @@ async fn a_retry_under_one_key_returns_the_original_command() {
     };
 
     let first: serde_json::Value = start().await.expect("first").json().await.expect("body");
-    // Without deduplication this is a 409 `already_recording` for a command the
+    // Without deduplication this is a 409 `already_recording` for a write the
     // client believes never landed — the failure the header exists to prevent.
     let response = start().await.expect("retry");
     assert_eq!(response.status().as_u16(), 202);
@@ -302,50 +303,56 @@ async fn a_retry_under_one_key_returns_the_original_command() {
 }
 
 #[tokio::test]
-async fn two_writes_without_a_key_are_two_commands() {
+async fn two_writes_without_a_key_are_two_writes() {
     let (address, _outbox) = spawn_app();
 
     let (_, _, first) = put(&address, &url("/metadata/title"), "one").await;
     let (_, _, second) = put(&address, &url("/metadata/title"), "two").await;
 
-    assert_eq!(first["commands"][0]["id"], "cmd-1");
-    assert_eq!(second["commands"][0]["id"], "cmd-2");
+    assert_eq!(first["writes"][0]["id"], "cmd-1");
+    assert_eq!(second["writes"][0]["id"], "cmd-2");
 }
 
 // ---- reading the write side -------------------------------------------
 
 #[tokio::test]
-async fn the_phase_route_reports_what_the_write_side_accepted() {
+async fn the_recording_route_reports_what_the_write_side_accepted() {
     let (address, _outbox) = spawn_app();
 
     let (status, body) = get(&address, &url("/recording")).await;
     assert_eq!(status, 200);
     // An unknown device is idle at epoch 0: this port holds what was submitted
     // and no catalog of what exists.
-    assert_eq!(body, serde_json::json!({"phase": "idle", "epoch": 0}));
+    assert_eq!(
+        body,
+        serde_json::json!({"desired_recording_state": "idle", "epoch": 0})
+    );
 
     post(&address, &url("/recording/start")).await;
     let (_, body) = get(&address, &url("/recording")).await;
     // Moved by the *acceptance*, before any device was contacted. This is the
     // write side's belief, not the device's last word — that is
-    // `/v1/readings/devices/{id}/fields/RUNNING_STATE`.
-    assert_eq!(body, serde_json::json!({"phase": "recording", "epoch": 1}));
+    // `/v1/reads/devices/{id}/fields/RUNNING_STATE`.
+    assert_eq!(
+        body,
+        serde_json::json!({"desired_recording_state": "recording", "epoch": 1})
+    );
 }
 
 #[tokio::test]
-async fn the_command_list_is_newest_first_and_scoped_to_one_device() {
+async fn the_write_list_is_newest_first_and_scoped_to_one_device() {
     let (address, _outbox) = spawn_app();
 
     put(&address, &url("/metadata/title"), "one").await;
     put(&address, &url("/metadata/presenter"), "two").await;
     put(&address, "/devices/elsewhere/metadata/title", "other").await;
 
-    let (status, body) = get(&address, &url("/commands")).await;
+    let (status, body) = get(&address, &url("/history")).await;
     assert_eq!(status, 200);
 
-    let ids: Vec<&str> = body["commands"]
+    let ids: Vec<&str> = body["writes"]
         .as_array()
-        .expect("a commands array")
+        .expect("a writes array")
         .iter()
         .map(|c| c["id"].as_str().expect("an id"))
         .collect();
@@ -353,13 +360,13 @@ async fn the_command_list_is_newest_first_and_scoped_to_one_device() {
 }
 
 #[tokio::test]
-async fn an_unknown_command_is_a_404() {
+async fn an_unknown_write_is_a_404() {
     let (address, _outbox) = spawn_app();
 
     let (status, body) = get(&address, "/never-minted").await;
 
     assert_eq!(status, 404);
-    // Unlike the readings routes' 404, this one *is* a claim about existence:
+    // Unlike the reads routes' 404, this one *is* a claim about existence:
     // an id is only ever minted by an accepted submission.
     assert_eq!(body["code"], "not_found");
     // The failure shape every other route returns is unchanged by the write
@@ -376,13 +383,13 @@ async fn an_unknown_command_is_a_404() {
 }
 
 #[tokio::test]
-async fn an_unknown_device_has_an_empty_command_list() {
+async fn an_unknown_device_has_an_empty_write_list() {
     let (address, _outbox) = spawn_app();
 
-    let (status, body) = get(&address, "/devices/nobody/commands").await;
+    let (status, body) = get(&address, "/devices/nobody/history").await;
 
     assert_eq!(status, 200);
-    assert_eq!(body, serde_json::json!({"commands": []}));
+    assert_eq!(body, serde_json::json!({"writes": []}));
 }
 
 // ---- method and body discipline ---------------------------------------
@@ -394,7 +401,7 @@ async fn a_write_route_refuses_the_wrong_method() {
 
     // 405 rather than 404: the path exists and the method does not, which is
     // the answer that tells a misconfigured client what to change. Same
-    // reasoning as the readings routes' method guard.
+    // reasoning as the reads routes' method guard.
     let response = client
         .get(format!("{address}{SCOPE}{}", url("/recording/start")))
         .send()
@@ -423,19 +430,23 @@ async fn a_write_without_a_value_is_refused() {
         .expect("issuing the request");
 
     // The extractor refuses it, so no intent is built and nothing is recorded —
-    // a malformed body must not become a command that fails at a device later.
+    // a malformed body must not become a write that fails at a device later.
     assert_eq!(response.status().as_u16(), 400);
     assert!(recorded_intents(&outbox, DEVICE).await.is_empty());
 }
 
-/// Guards the phase the assertions above are written against — a suite that
-/// silently started from `Recording` would invert half of them.
+/// Guards the desired state the assertions above are written against — a suite
+/// that silently started from `Recording` would invert half of them.
 #[tokio::test]
 async fn a_fresh_outbox_starts_idle() {
     let (_address, outbox) = spawn_app();
-    use sismatic_store::outbox::CommandLog;
+    use sismatic_store::outbox::WriteLog;
     assert_eq!(
-        outbox.phase(DEVICE.to_owned()).await.expect("phase").phase,
-        Phase::Idle
+        outbox
+            .desired_recording_state(DEVICE.to_owned())
+            .await
+            .expect("recording state")
+            .desired_recording_state,
+        DesiredRecordingState::Idle
     );
 }

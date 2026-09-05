@@ -1,13 +1,13 @@
-//! Readings — the central artifact of the read (query) side.
+//! Reads — the central artifact of the read (query) side.
 //!
 //! In the CQRS layout (design note §3) `sismatic-sync` polls devices and writes
-//! rows; `sismatic-http-api` reads those rows and serves them as [`Reading`]s.
+//! rows; `sismatic-http-api` reads those rows and serves them as [`Read`]s.
 //! A dashboard only ever sees these, never a live device, which is what makes
 //! device load independent of how many frontends are watching.
 
 use serde::{Deserialize, Serialize};
 
-use crate::value::ReadingValue;
+use crate::value::ReadValue;
 use crate::{DeviceId, FieldName};
 
 /// An instant on the wire, as an RFC 3339 / ISO 8601 string, e.g.
@@ -53,15 +53,15 @@ impl From<String> for Timestamp {
     }
 }
 
-/// One stored reading: device `field` held value `value` as of `at`.
+/// One stored read: device `field` held value `value` as of `at`.
 ///
 /// This is the typed form of the ad-hoc `{ "device", "name", "value" }` object
 /// the current web backend emits by hand, plus the timestamp the store adds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Reading {
-    /// The device this reading came from.
+pub struct Read {
+    /// The device this read came from.
     // `DeviceId` and `FieldName` are aliases for `String` (see the crate root),
     // but a derive only sees the name it is written with: without this, utoipa
     // emits a `$ref` to a component it invents rather than the `type: string`
@@ -76,8 +76,8 @@ pub struct Reading {
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "RUNNING_STATE"))]
     pub field: FieldName,
     /// The decoded value.
-    pub value: ReadingValue,
-    /// When the reading was taken / stored.
+    pub value: ReadValue,
+    /// When the read was taken / stored.
     pub at: Timestamp,
 }
 
@@ -102,7 +102,7 @@ impl TimeSpan {
     }
 }
 
-/// Filters for a readings query, deserialized from the URL query string, e.g.
+/// Filters for a reads query, deserialized from the URL query string, e.g.
 /// `?field=RUNNING_STATE&start=...&end=...&limit=100`. Every field is optional:
 /// omit `field` for all fields, omit the bounds for "latest", omit `limit` for
 /// the server's default page size.
@@ -120,7 +120,7 @@ impl TimeSpan {
     derive(utoipa::ToSchema, utoipa::IntoParams),
     into_params(parameter_in = Query)
 )]
-pub struct ReadingQuery {
+pub struct ReadQuery {
     /// Restrict to one field, by canonical name. Redundant on a route that
     /// already names the field in its path, and rejected there if the two
     /// disagree.
@@ -147,11 +147,11 @@ pub struct ReadingQuery {
     pub limit: Option<u32>,
 }
 
-/// A page of readings, wrapped in an object (rather than a bare array) so the
+/// A page of reads, wrapped in an object (rather than a bare array) so the
 /// response can grow a `next`/`total` field later without breaking clients.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ReadingList {
-    pub readings: Vec<Reading>,
+pub struct ReadList {
+    pub reads: Vec<Read>,
 }

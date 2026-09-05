@@ -1,7 +1,8 @@
 // ---- Setting (writable device configuration) ------------------------------
 
-use winnow::Parser;
+use winnow::error::{ContextError, ErrMode};
 use winnow::token::{literal, take_while};
+use winnow::{ModalResult, Parser};
 
 use crate::protocol::control_chars::{CR, ESC};
 use crate::protocol::instructions::Instruction;
@@ -63,7 +64,7 @@ instruction_catalog! {
         // Whether a push is actually *live* is not here, and not because its
         // wire form is unknown: SIS offers no write for it. Enabling a stream
         // arms it; what puts it on air is a scheduled session, which this
-        // protocol does not reach. So live state is a reading, and lives in
+        // protocol does not reach. So live state is a read, and lives in
         // `Query` alone — the one RTMP field where the read and the write of a
         // name do not pair up, because the write does not exist.
     }
@@ -124,6 +125,10 @@ enum Form {
     /// echo anchor is built from the whole address — but it is why the value's
     /// own `*` ban lives in [`Shape::Token`] rather than in this frame: the
     /// separator is legal in the address and illegal in the value.
+    ///
+    /// The address written here is the *request* spelling. The device is free
+    /// to zero-pad the indices when it echoes — `E1` comes back as `E01` — so
+    /// [`addressed_echo`] matches each index by value rather than by text.
     Addressed(&'static str),
 }
 
@@ -312,8 +317,8 @@ impl Setting {
             Setting::RTMPStream1State => Form::Addressed("E1"),
             Setting::RTMPStream2State => Form::Addressed("E2"),
             Setting::RTMPStream3State => Form::Addressed("E3"),
-            Setting::RTMPStream1PublishURL => Form::Addressed("U1*1"),
             Setting::RTMPStream2PublishURL => Form::Addressed("U1*2"),
+            Setting::RTMPStream1PublishURL => Form::Addressed("U1*1"),
             Setting::RTMPStream3PublishURL => Form::Addressed("U1*3"),
             Setting::RTMPStream1BackupPublishURL => Form::Addressed("U2*1"),
             Setting::RTMPStream2BackupPublishURL => Form::Addressed("U2*2"),
@@ -411,17 +416,95 @@ impl Setting {
 /// The captured value is [`Value::Text`] even for a flag write, matching
 /// [`setting_echo`]: a write's result is the device's confirmation of what it
 /// stored, and it is the *read* side that gives a field its type.
+///
+/// # Why the address is matched numerically rather than literally
+///
+/// The device does not echo an index the way the request spelled it. An RTMP
+/// enable write of `ESC E1*1RTMP CR` comes back as `RtmpE01*1 CR LF` — the
+/// index zero-padded to two digits — attested against an SMP 351. A literal
+/// `RtmpE1*` anchor cannot match that, and a parser that cannot match does not
+/// fail: it asks for more bytes, so every RTMP enable write spent the full
+/// `exchange_timeout` waiting for a reply that had already arrived, then
+/// surfaced as a timeout on a write the device had in fact performed. That is
+/// the same failure the live-state reads hit from the other direction (see
+/// [`query::boolean_flag`](super::query)), and the reason the anchor now
+/// compares each index as a *number* instead of as text: `1`, `01` and `001`
+/// are the same address, and this parser accepts whichever spelling the
+/// firmware happens to use.
+///
+/// Numeric equality, not "digits here somewhere", is what keeps the anchor's
+/// original job intact — `E11` is not `E1` zero-padded, it is a different
+/// address, so an echo for one stream still does not satisfy another's parser.
+/// The literal head is unchanged and still title-cased, so the request's own
+/// bytes (upper-case verb, trailing) cannot satisfy the reply parser as
+/// [`search`](crate::protocol) slides across the buffer.
 fn addressed_echo(verb: &'static str, addr: &'static str) -> ParseFn {
-    let head = format!("{}{addr}*", echoed(verb));
+    let head = echoed(verb);
+    let parts = address_parts(addr);
     parser_of(
         move |i: &mut In| {
             literal(head.as_str()).parse_next(i)?;
+            for (n, part) in parts.iter().enumerate() {
+                // The separators *inside* a compound address (`U1*1`); the one
+                // between address and value is matched after the loop.
+                if n > 0 {
+                    literal("*").parse_next(i)?;
+                }
+                if !part.prefix.is_empty() {
+                    literal(part.prefix).parse_next(i)?;
+                }
+                if let Some(expected) = part.index {
+                    let digits: &str =
+                        take_while(1.., |c: char| c.is_ascii_digit()).parse_next(i)?;
+                    if digits.parse::<u32>() != Ok(expected) {
+                        return backtrack();
+                    }
+                }
+            }
+            literal("*").parse_next(i)?;
             let v: &str = take_while(0.., is_not_cr).parse_next(i)?;
             literal("\r\n").parse_next(i)?;
             Ok(v.to_string())
         },
         Value::Text,
     )
+}
+
+/// One `*`-separated component of an address: the letters that name the field,
+/// and the index that selects the instance.
+///
+/// `E1` splits as `("E", Some(1))` and the second component of `U1*1` as
+/// `("", Some(1))`. `index` is [`None`] for a component that carries no digits
+/// at all — nothing in the catalog is addressed that way today, but a component
+/// with no index is matched literally rather than silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddressPart {
+    prefix: &'static str,
+    index: Option<u32>,
+}
+
+/// Split an address into the parts [`addressed_echo`] matches, once per
+/// instruction rather than once per parse step — the parser is re-run on the
+/// whole accumulated buffer after every byte the transport reads.
+fn address_parts(addr: &'static str) -> Vec<AddressPart> {
+    addr.split('*')
+        .map(|part| {
+            // The index is the *trailing* digit run: `U1` is field `U`,
+            // instance 1, and there is no attested address where digits lead.
+            let digits_at = part.len() - part.bytes().rev().take_while(u8::is_ascii_digit).count();
+            AddressPart {
+                prefix: &part[..digits_at],
+                index: part[digits_at..].parse().ok(),
+            }
+        })
+        .collect()
+}
+
+/// The reply does not match this parser at this offset. Not a
+/// [`Cut`](ErrMode::Cut): a mismatched address means the bytes belong to some
+/// other line of the buffer, so `search` must keep sliding.
+fn backtrack<O>() -> ModalResult<O> {
+    Err(ErrMode::Backtrack(ContextError::new()))
 }
 
 fn setting_echo(verb: &'static str) -> ParseFn {
@@ -640,27 +723,111 @@ mod tests {
         assert_eq!(drive(&instr, "RtmpS1*1*1\r\n"), Step::NeedMore);
     }
 
+    /// The device zero-pads the index it echoes: an `E1*1` write is answered
+    /// `RtmpE01*1`. Attested against an SMP 351, and invisible before this test
+    /// existed — a reply the parser cannot match is not an error, it is
+    /// `NeedMore`, so the write burned an `exchange_timeout` and then reported a
+    /// timeout for a setting the device had already stored.
+    #[test]
+    fn an_rtmp_enable_echo_may_zero_pad_its_index() {
+        let instr = Setting::RTMPStream1State.instruction("1").unwrap();
+        assert_eq!(instr.payload, "\u{1b}E1*1RTMP\r");
+        for reply in ["RtmpE1*1\r\n", "RtmpE01*1\r\n", "RtmpE001*1\r\n"] {
+            assert_eq!(
+                drive(&instr, reply),
+                Step::Done(Value::Text("1".into())),
+                "{reply:?} is stream 1's enable echo"
+            );
+        }
+    }
+
+    /// Padding is per component, so a compound address may pad either index or
+    /// both — the parser matches numbers, not a padding convention.
+    #[test]
+    fn a_compound_rtmp_address_tolerates_padding_in_every_component() {
+        let instr = Setting::RTMPStream3PublishURL
+            .instruction("rtmp://live.example.org/app/key")
+            .unwrap();
+        for head in ["RtmpU1*3", "RtmpU01*3", "RtmpU1*03", "RtmpU01*03"] {
+            assert_eq!(
+                drive(
+                    &instr,
+                    &format!("{head}*rtmp://live.example.org/app/key\r\n")
+                ),
+                Step::Done(Value::Text("rtmp://live.example.org/app/key".into())),
+                "{head} addresses the primary target of stream 3"
+            );
+        }
+    }
+
+    /// What padding tolerance must *not* cost: `E11` is not a padded `E1`, it is
+    /// another address. Matching the index by value rather than by digits keeps
+    /// the anchor doing the job it was put there for — one stream's echo does
+    /// not satisfy another stream's parser — now that the text may differ.
+    #[test]
+    fn a_padded_echo_is_still_specific_to_its_address() {
+        let instr = Setting::RTMPStream1State.instruction("1").unwrap();
+        for foreign in ["RtmpE02*1\r\n", "RtmpE2*1\r\n", "RtmpE11*1\r\n"] {
+            assert_eq!(
+                drive(&instr, foreign),
+                Step::NeedMore,
+                "{foreign:?} is not stream 1's enable echo"
+            );
+        }
+        // ...and an address with no index where one is expected is not one
+        // either, however well the rest of the frame lines up.
+        assert_eq!(drive(&instr, "RtmpE*1\r\n"), Step::NeedMore);
+    }
+
+    /// The tolerance lives in the shared echo parser, not in an RTMP special
+    /// case, so a `STRC` write accepts a padded echo too. Pinned as *accepted*
+    /// rather than as attested: no SMP has been seen padding a `STRC` reply, and
+    /// the point is that one doing so would not cost a timeout.
+    #[test]
+    fn the_padding_tolerance_is_not_confined_to_rtmp() {
+        let instr = Setting::Stream2Name.instruction("Hall B").unwrap();
+        assert_eq!(
+            drive(&instr, "StrcN02*Hall B\r\n"),
+            Step::Done(Value::Text("Hall B".into()))
+        );
+    }
+
     /// Arming a push stream is a write; putting it on air is not reachable over
     /// SIS at all — that is a scheduled session's doing. So `RTMP_1_STATE` is a
-    /// setting and `RTMP_1_LIVE_STATE` is only ever a reading, and asking to
-    /// write the latter has to fail as an unknown *setting* rather than
+    /// setting and `RTMP_STREAM_1_LIVE_STATE` is only ever a read, and asking
+    /// to write the latter has to fail as an unknown *setting* rather than
     /// half-succeed as a write of the former.
+    ///
+    /// Every accepted spelling, not just the canonical one, and that is the
+    /// lesson of how this test previously failed to fire: it listed
+    /// `RTMP_1_STREAM_STATE`, which no catalog has ever answered to, so it
+    /// asserted that six non-existent names are not writable — true, vacuous,
+    /// and green — while `RTMP_STREAM_1_STATE` really did name a query *and* a
+    /// setting alias at the same time. Reading the names off the catalog instead
+    /// of retyping them is what keeps the assertion attached to reality.
     #[test]
-    fn a_live_state_is_not_writable() {
+    fn a_live_state_is_not_writable_under_any_of_its_spellings() {
+        use crate::protocol::instructions::query::Query;
         use std::str::FromStr;
 
-        for name in [
-            "RTMP_1_LIVE_STATE",
-            "RTMP_2_LIVE_STATE",
-            "RTMP_3_LIVE_STATE",
-            "RTMP_1_BACKUP_LIVE_STATE",
-            "RTMP_2_BACKUP_LIVE_STATE",
-            "RTMP_3_BACKUP_LIVE_STATE",
-        ] {
-            assert!(
-                Setting::from_str(name).is_err(),
-                "{name} is writable; SIS has no write for a live state"
-            );
+        let live_states = [
+            Query::RtmpStream1LiveState,
+            Query::RtmpStream2LiveState,
+            Query::RtmpStream3LiveState,
+            Query::RtmpBackupStream1LiveState,
+            Query::RtmpBackupStream2LiveState,
+            Query::RtmpBackupStream3LiveState,
+        ];
+        for query in live_states {
+            for name in query.accepted() {
+                assert!(
+                    Setting::from_str(name).is_err(),
+                    "{name} reads as {} but writes as {:?}; SIS has no write for \
+                     a live state, so one name must not reach both",
+                    query.name(),
+                    Setting::from_str(name).map(|s| s.name()),
+                );
+            }
         }
     }
 
@@ -728,8 +895,8 @@ mod tests {
     }
 
     /// Aliases have to pair up too, not just canonical names: a caller who
-    /// reads `GET .../fields/RTMP_LIVE_STATE_1` and then writes
-    /// `PUT .../settings/RTMP_LIVE_STATE_1` must reach the same field, and a
+    /// reads `GET .../fields/RTMP_STREAM_STATE_1` and then writes
+    /// `PUT .../settings/RTMP_STREAM_STATE_1` must reach the same field, and a
     /// spelling accepted on one side only is a 404 that looks like a typo.
     #[test]
     fn a_paired_field_accepts_the_same_spellings_on_both_sides() {

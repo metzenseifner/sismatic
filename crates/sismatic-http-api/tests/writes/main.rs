@@ -1,7 +1,7 @@
-//! tests/commands/ — the `/v1/commands` scope, black-box over a real socket.
+//! tests/writes/ — the `/v1/writes` scope, black-box over a real socket.
 //!
 //! Over the real [`MemoryOutbox`] rather than a double, for the reason
-//! `tests/readings/` gives for using the real `MemoryStore`: a double would have
+//! `tests/reads/` gives for using the real `MemoryStore`: a double would have
 //! to restate the admission table and the epoch rules, and a handler tested
 //! against a drifted double passes while the server is wrong.
 //!
@@ -13,17 +13,17 @@
 //! it atomically is `sismatic-store-memory`'s. What is left over — and only
 //! testable from out here — is that a `PUT` on the metadata path builds a
 //! `SetMetadata` and not a `SetSetting`, that a refusal becomes a `409` and not
-//! a `500`, and that the `202` names a command a caller can then fetch.
+//! a `500`, and that the `202` names a write a caller can then fetch.
 //!
 //! Nothing here reaches a device: there is no relay in this process, so every
-//! submitted command stays `pending` forever. That is the point — the `202`
+//! submitted write stays `pending` forever. That is the point — the `202`
 //! means recorded, and this suite is what pins that it means only that.
 //!
 //! # The two halves
 //!
-//! [`devices`] covers `/v1/commands/devices/…` and the scope-root
-//! `/v1/commands/{id}`; [`groups`] covers `/v1/commands/groups/…`. The split
-//! mirrors the id-space rather than the source file — `handlers::commands` holds
+//! [`devices`] covers `/v1/writes/devices/…` and the scope-root
+//! `/v1/writes/{id}`; [`groups`] covers `/v1/writes/groups/…`. The split
+//! mirrors the id-space rather than the source file — `handlers::writes` holds
 //! both — because a device id and a group id are what the two halves refuse
 //! from each other, and each half's refusal is its own test.
 //!
@@ -36,7 +36,7 @@ use sismatic_api_types::Intent;
 use sismatic_store::DynReadStore;
 use sismatic_store_memory::{MemoryOutbox, MemoryStore};
 
-// See `tests/readings/main.rs` for why this is a `#[path]` and not a plain
+// See `tests/reads/main.rs` for why this is a `#[path]` and not a plain
 // `mod harness;`.
 #[path = "../harness/mod.rs"]
 mod harness;
@@ -47,8 +47,8 @@ mod groups;
 /// The scope every path in this suite is built under.
 ///
 /// The write surface is addressed by *what it does* rather than by what it
-/// names, so both id-spaces and the single-command route live here together.
-const SCOPE: &str = "/v1/commands";
+/// names, so both id-spaces and the single-write route live here together.
+const SCOPE: &str = "/v1/writes";
 
 /// The device the [`devices`] half addresses — the harness catalog's, so the
 /// write routes recognise it.
@@ -122,15 +122,15 @@ fn url(base: &str, path: &str) -> String {
 
 /// Every intent the outbox holds for `device`, oldest first.
 ///
-/// Reads the port directly rather than the `commands` route: this is the
+/// Reads the port directly rather than the `history` route: this is the
 /// assertion about *what was recorded*, and routing it through a second handler
 /// would make a failure ambiguous between the two.
 async fn recorded_intents(outbox: &MemoryOutbox, device: &str) -> Vec<Intent> {
-    use sismatic_store::outbox::CommandLog;
-    let mut commands = outbox
-        .commands_for(device.to_owned())
+    use sismatic_store::outbox::WriteLog;
+    let mut writes = outbox
+        .writes_for(device.to_owned())
         .await
         .expect("reading the log");
-    commands.reverse(); // the port promises newest-first
-    commands.into_iter().map(|c| c.intent).collect()
+    writes.reverse(); // the port promises newest-first
+    writes.into_iter().map(|w| w.intent).collect()
 }

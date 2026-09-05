@@ -6,7 +6,7 @@
 //!   `sismatic-core` and persists what it reads through a [`DynWriteStore`];
 //! - the **HTTP side**, [`sismatic_http_api::run`], which answers questions
 //!   about what was persisted through a [`DynReadStore`], and records requests
-//!   to change a device through a `CommandSubmit`;
+//!   to change a device through a `WriteSubmit`;
 //! - the **relay side**, [`sismatic_intent_relay::spawn`], which drains those
 //!   recorded requests and applies them to devices.
 //!
@@ -15,7 +15,7 @@
 //! intent, and the relay — the only one of the three that may name one —
 //! performs it. This function is the only place that knows the store behind
 //! `DynReadStore` and `DynWriteStore` is one object, and the outbox behind the
-//! three command ports is another.
+//! three write ports is another.
 //!
 //! Alongside the write side it runs [`SisKeepalive`], core's keep-warm
 //! supervisor, which opens and holds a connection to every device the devices
@@ -31,15 +31,20 @@ use std::sync::Arc;
 
 use chrono::{SecondsFormat, Utc};
 use sismatic_api_types::{
-    Barrier as ApiBarrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp,
+    Barrier as ApiBarrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary,
+    InstructionSummary, Timestamp, WritesCatalog,
 };
 use sismatic_core::devices::config::{Barrier, DeviceConfig, GroupConfig, Resolved};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
+use sismatic_core::protocol::instructions::commands::Command;
+use sismatic_core::protocol::instructions::query::Query;
+use sismatic_core::protocol::instructions::register::Register;
+use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_http_api::{Ports, ServerHandle, Stamp};
 use sismatic_store::group::DynGroupState;
-use sismatic_store::outbox::{DynCommandDrain, DynCommandLog, DynCommandSubmit};
+use sismatic_store::outbox::{DynWriteDrain, DynWriteLog, DynWriteSubmit};
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox, MemoryStore};
@@ -74,10 +79,10 @@ pub async fn run(
     // the submission — so there is no write half to hand anyone, and nothing
     // outside `submit` can claim a device group was asked for something.
     let outbox = MemoryOutbox::with_max_attempts(cfg.intent_relay.max_attempts);
-    let submit: DynCommandSubmit = Arc::new(outbox.clone());
-    let log: DynCommandLog = Arc::new(outbox.clone());
+    let submit: DynWriteSubmit = Arc::new(outbox.clone());
+    let log: DynWriteLog = Arc::new(outbox.clone());
     let group_state: DynGroupState = Arc::new(outbox.clone());
-    let drain: DynCommandDrain = Arc::new(outbox);
+    let drain: DynWriteDrain = Arc::new(outbox);
 
     // Built from the resolved config *before* the registry consumes it: the
     // catalog is the public, secret-free projection of the same device set, and
@@ -114,6 +119,12 @@ pub async fn run(
             submit,
             log,
             group_state,
+            // The instruction catalog projected the same way the device set was
+            // a few lines up, and for the same reason: the read side may not
+            // name a `Query` any more than it may name a `DeviceConfig`, so what
+            // crosses the seam is a list of DTOs rather than a dependency edge.
+            fields: field_catalog(),
+            writes: writes_catalog(),
         },
         stamp(),
     )?;
@@ -155,9 +166,10 @@ pub async fn run(
             // Both reconciliation paths are wired, and they close different
             // gaps. The relay re-reads the state immediately before a metadata
             // write, which is the one intent the freeze protects. This hook
-            // keeps the phase honest for a device nobody is writing to, at the
-            // cost of nothing: `RUNNING_STATE` is already being polled, and
-            // one poll now serves the read side and the write side both.
+            // keeps the desired recording state honest for a device nobody is
+            // writing to, at the cost of nothing: `RUNNING_STATE` is already
+            // being polled, and one poll now serves the read side and the
+            // write side both.
             reconciler: Some(drain),
         },
     );
@@ -181,7 +193,7 @@ pub async fn run(
 
     // Order matters, and it is the reverse of startup. The HTTP server is
     // already down, so no new intent can arrive; draining the relay next lets
-    // every accepted command reach its device before the process exits.
+    // every accepted write reach its device before the process exits.
     // Draining sync first would only add poll traffic the relay then queues
     // behind.
     intent_relay.shutdown().await;
@@ -232,9 +244,72 @@ fn summarize_group(config: &GroupConfig) -> GroupSummary {
     }
 }
 
+/// Project one instruction enum's catalog onto the summaries the API serves.
+///
+/// A macro rather than a function, because the four catalogs share every method
+/// this needs — `ALL`, `name`, `accepted`, `description` — and share no *trait*
+/// that names them: `instruction_catalog!` generates them as inherent methods on
+/// four unrelated enums. The alternatives are a trait added to `core` purely so
+/// this one call site can be generic, or four near-identical functions; a macro
+/// over the four is the smaller of the three, and it inherits the property that
+/// matters from `ALL`, which is that nothing here can list a subset. A variant
+/// added to any of the four appears in the published catalog with no edit.
+///
+/// The canonical name is dropped from `aliases` — [`accepted`] yields it first,
+/// and a summary that repeated its own `name` in its synonym list would read as
+/// though the field had one more spelling than it does.
+///
+/// [`accepted`]: sismatic_core::protocol::instructions::query::Query::accepted
+macro_rules! summarize_catalog {
+    ($Enum:ty) => {
+        <$Enum>::ALL
+            .iter()
+            .map(|instruction| InstructionSummary {
+                name: instruction.name().to_owned(),
+                aliases: instruction.accepted()[1..]
+                    .iter()
+                    .map(|alias| (*alias).to_owned())
+                    .collect(),
+                description: instruction.description().to_owned(),
+            })
+            .collect()
+    };
+}
+
+/// Every field a read can be asked for, as `GET /v1/reads` serves it.
+///
+/// Catalog order rather than sorted by name, which is the opposite of what
+/// [`MemoryCatalog`](sismatic_store_memory::MemoryCatalog) does to the device
+/// set — and for a reason that does not apply here. The device list is sorted
+/// because its input order is an accident of a file, so a rendered index would
+/// otherwise diff against nothing stable. This list's order is a compile-time
+/// constant and so is already stable, and it is the order the catalog was
+/// *written* in: the three stream names sit together, the six RTMP live states
+/// sit together, and alphabetizing would interleave them with `SNMP_STATE`.
+fn field_catalog() -> FieldCatalog {
+    FieldCatalog {
+        fields: summarize_catalog!(Query),
+    }
+}
+
+/// Everything a write can name, as `GET /v1/writes` serves it.
+///
+/// Three catalogs, kept apart because the API keeps them apart: a metadata
+/// register is refused by the settings route and vice versa, which is what stops
+/// the recording freeze from being sidestepped (see
+/// `sismatic_intent_relay::translate`). Merging them here would advertise a
+/// single list of names, half of which each write route refuses.
+fn writes_catalog() -> WritesCatalog {
+    WritesCatalog {
+        commands: summarize_catalog!(Command),
+        metadata: summarize_catalog!(Register),
+        settings: summarize_catalog!(Setting),
+    }
+}
+
 /// The real id-and-instant source the write handlers are given.
 ///
-/// The one place in the process that decides what a fresh command id looks
+/// The one place in the process that decides what a fresh write id looks
 /// like. A v4 UUID because an id travels in a `Location` header and in a
 /// client's retry logic, so it has to be unguessable enough not to be typed by
 /// hand and unique without a coordinator.
@@ -280,4 +355,102 @@ async fn stop_http(
     let served = serving.await.expect("the http server task");
     info!("the http server stopped");
     served
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// One catalog's worth of the assertion below: same length, same order, same
+    /// names, and every published spelling resolves back to the instruction it
+    /// was projected from.
+    ///
+    /// The round trip is the half worth having. Length and order would pass for
+    /// a projection that published `description` where `name` belongs — a body
+    /// full of prose that no route accepts — whereas `from_str` is the very
+    /// lookup the relay and the sync driver perform, so a name that survives it
+    /// is a name the rest of the system will honour.
+    macro_rules! assert_covers {
+        ($Enum:ty, $published:expr) => {{
+            let published: &[InstructionSummary] = &$published;
+            assert_eq!(
+                published.len(),
+                <$Enum>::ALL.len(),
+                "the published catalog is not core's",
+            );
+
+            for (instruction, summary) in <$Enum>::ALL.iter().zip(published) {
+                assert_eq!(summary.name, instruction.name(), "out of catalog order");
+                assert_eq!(summary.description, instruction.description());
+
+                let aliases: Vec<&str> = summary.aliases.iter().map(String::as_str).collect();
+                assert_eq!(
+                    aliases,
+                    &instruction.accepted()[1..],
+                    "{} publishes the wrong synonyms",
+                    instruction.name(),
+                );
+
+                // Every spelling this server advertises is one it will accept
+                // back — a caller that pastes a name out of the catalog into a
+                // URL must not be told there is no such field.
+                for spelling in std::iter::once(&summary.name).chain(&summary.aliases) {
+                    assert_eq!(
+                        <$Enum>::from_str(spelling).map(|i| i.name()).ok(),
+                        Some(instruction.name()),
+                        "'{spelling}' is published but does not resolve to {}",
+                        instruction.name(),
+                    );
+                }
+            }
+        }};
+    }
+
+    /// The half of the exploratory routes that only this crate can check.
+    ///
+    /// `sismatic-http-api` pins that whatever `run` was handed is what the two
+    /// scope roots serve, and it cannot do more than that: it may not name a
+    /// `Query`, which is the whole point of the seam. This is the other side —
+    /// that what it is handed is core's catalog entire — and it is the assertion
+    /// a shipped API depends on, since a projection that quietly dropped the
+    /// RTMP fields would leave every test in both crates green while callers
+    /// were told those names do not exist.
+    #[test]
+    fn the_published_catalogs_cover_every_instruction_core_has() {
+        assert_covers!(Query, field_catalog().fields);
+
+        let writes = writes_catalog();
+        assert_covers!(Command, writes.commands);
+        assert_covers!(Register, writes.metadata);
+        assert_covers!(Setting, writes.settings);
+    }
+
+    /// The catalogs are worth publishing at all, which a vacuous
+    /// `0 == ALL.len()` would not notice.
+    #[test]
+    fn the_published_catalogs_are_not_empty() {
+        assert!(field_catalog().fields.len() > 20);
+        let writes = writes_catalog();
+        assert_eq!(writes.commands.len(), 3, "start, stop and pause");
+        assert!(!writes.metadata.is_empty());
+        assert!(!writes.settings.is_empty());
+    }
+
+    /// A caller reading `GET /v1/writes` has to be able to tell which list to
+    /// write a name through, and the two write routes refuse each other's names
+    /// — `sismatic_intent_relay::translate` turns a register submitted as a
+    /// setting into a failure rather than a write with no recording freeze. Two
+    /// lists that shared a name would advertise a choice that does not exist.
+    #[test]
+    fn no_name_is_published_as_both_a_register_and_a_setting() {
+        let writes = writes_catalog();
+        for register in &writes.metadata {
+            assert!(
+                Setting::from_str(&register.name).is_err(),
+                "'{}' is published under both metadata and settings",
+                register.name,
+            );
+        }
+    }
 }

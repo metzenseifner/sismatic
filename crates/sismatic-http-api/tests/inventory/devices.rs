@@ -35,7 +35,7 @@ async fn the_device_index_lists_the_configured_set_ordered_by_id() {
 }
 
 /// The whole point of answering from the catalog: an empty index means "none
-/// are configured", where an empty readings list means "none have answered".
+/// are configured", where an empty reads list means "none have answered".
 #[tokio::test]
 async fn an_empty_catalog_is_an_empty_index_not_an_error() {
     let address = spawn_with(MemoryCatalog::default());
@@ -95,10 +95,10 @@ async fn a_device_that_has_never_answered_still_has_a_detail_page() {
     assert_eq!(body["latest"], serde_json::json!([]));
 }
 
-/// The divergence between this scope and the readings scope, stated in one
+/// The divergence between this scope and the reads scope, stated in one
 /// test because it is the reason both exist.
 #[tokio::test]
-async fn an_unconfigured_device_is_a_404_here_and_an_empty_list_on_the_readings_route() {
+async fn an_unconfigured_device_is_a_404_here_and_an_empty_list_on_the_reads_route() {
     let address = spawn_with(harness::catalog());
 
     // The catalog knows the configured set, so it can say this id is not in it.
@@ -108,14 +108,14 @@ async fn an_unconfigured_device_is_a_404_here_and_an_empty_list_on_the_readings_
 
     // The store cannot: "no such device" and "never polled" are one answer from
     // there, so it answers the honest, weaker one. The divergence is deliberate.
-    let readings: serde_json::Value =
-        reqwest::get(format!("{address}/v1/readings/devices/nobody/fields"))
+    let reads: serde_json::Value =
+        reqwest::get(format!("{address}/v1/reads/devices/nobody/fields"))
             .await
             .expect("issuing the request")
             .json()
             .await
             .expect("parsing the response body");
-    assert_eq!(readings, serde_json::json!({"readings": []}));
+    assert_eq!(reads, serde_json::json!({"reads": []}));
 }
 
 /// A device group id is refused on the device half of this scope, with the

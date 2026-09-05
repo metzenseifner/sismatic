@@ -1,4 +1,4 @@
-//! `/v1/readings/groups/{id}/…` — a device group's readings, as a client meets
+//! `/v1/reads/groups/{id}/…` — a device group's reads, as a client meets
 //! them.
 //!
 //! The real [`MemoryOutbox`] sits behind both the write routes and the
@@ -10,36 +10,36 @@
 //! failure mode a double is worst at.
 //!
 //! So every expectation below is created the way a client creates one: by
-//! POSTing to a group write route, over in the `/v1/commands` scope.
+//! POSTing to a group write route, over in the `/v1/writes` scope.
 //!
 //! [`MemoryOutbox`]: sismatic_store_memory::MemoryOutbox
 
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{Reading, ReadingValue, RecordingState, Timestamp};
+use sismatic_api_types::{Read, ReadValue, RecordingState, Timestamp};
 use sismatic_store::WriteStore;
 use sismatic_store_memory::MemoryStore;
 
-use crate::{ANNEX, ATRIUM, GROUP, SCOPE, get_json, harness, reading_at, spawn_over};
+use crate::{ANNEX, ATRIUM, GROUP, SCOPE, get_json, harness, read_at, spawn_over};
 
-/// The instant every seeded reading carries. Fixed, because no assertion here is
+/// The instant every seeded read carries. Fixed, because no assertion here is
 /// about time passing.
 const AT: &str = "2026-08-17T00:00:00.000Z";
 
-/// A `RUNNING_STATE` reading for `device`.
-fn state(device: &str, value: RecordingState) -> Reading {
-    reading(device, "RUNNING_STATE", ReadingValue::State(value))
+/// A `RUNNING_STATE` read for `device`.
+fn state(device: &str, value: RecordingState) -> Read {
+    read(device, "RUNNING_STATE", ReadValue::State(value))
 }
 
-fn reading(device: &str, field: &str, value: ReadingValue) -> Reading {
-    reading_at(device, field, value, AT)
+fn read(device: &str, field: &str, value: ReadValue) -> Read {
+    read_at(device, field, value, AT)
 }
 
 /// Start the application over a two-member device group and a store pre-loaded
-/// with `readings`; return its base URL.
-async fn spawn(readings: impl IntoIterator<Item = Reading>) -> String {
-    spawn_over(readings, &[ATRIUM, ANNEX]).await
+/// with `reads`; return its base URL.
+async fn spawn(reads: impl IntoIterator<Item = Read>) -> String {
+    spawn_over(reads, &[ATRIUM, ANNEX]).await
 }
 
 async fn get(url: &str) -> reqwest::Response {
@@ -51,7 +51,7 @@ async fn get(url: &str) -> reqwest::Response {
 async fn start_the_device_group(address: &str) {
     let status = reqwest::Client::new()
         .post(format!(
-            "{address}/v1/commands/groups/{GROUP}/recording/start"
+            "{address}/v1/writes/groups/{GROUP}/recording/start"
         ))
         .send()
         .await
@@ -101,14 +101,14 @@ async fn a_field_route_lists_every_member_in_configured_order() {
             .collect::<Vec<_>>(),
         [ATRIUM, ANNEX]
     );
-    // Each member carries its own reading, whole — the same object the device
-    // readings route would have served.
-    assert_eq!(body["members"][0]["reading"]["device"], ATRIUM);
-    assert_eq!(body["members"][0]["reading"]["value"]["type"], "state");
-    assert_eq!(body["members"][0]["reading"]["value"]["value"], "started");
+    // Each member carries its own read, whole — the same object the device
+    // reads route would have served.
+    assert_eq!(body["members"][0]["read"]["device"], ATRIUM);
+    assert_eq!(body["members"][0]["read"]["value"]["type"], "state");
+    assert_eq!(body["members"][0]["read"]["value"]["value"], "started");
 }
 
-/// A member that has never reported is listed with a `null` reading rather than
+/// A member that has never reported is listed with a `null` read rather than
 /// dropped: which member went quiet is the answer, and a five-member device
 /// group with one silent member must not render as a four-member device group.
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn a_silent_member_is_listed_rather_than_omitted() {
     let body = get_json(&address, &format!("/groups/{GROUP}/fields/RUNNING_STATE")).await;
 
     assert_eq!(member_syncs(&body).len(), 2);
-    assert!(body["members"][1]["reading"].is_null());
+    assert!(body["members"][1]["read"].is_null());
     assert_eq!(body["members"][1]["device"], ANNEX);
     assert_eq!(body["members"][1]["sync"], "unknown");
 }
@@ -148,7 +148,7 @@ async fn the_field_name_is_normalized_as_on_the_device_routes() {
         let body = get_json(&address, &format!("/groups/{GROUP}/fields/{spelling}")).await;
         // The canonical spelling comes back whichever was asked for.
         assert_eq!(body["field"], "RUNNING_STATE", "for '{spelling}'");
-        assert_eq!(body["members"][0]["reading"]["value"]["value"], "started");
+        assert_eq!(body["members"][0]["read"]["value"]["value"], "started");
     }
 }
 
@@ -218,13 +218,13 @@ async fn a_device_group_that_uniformly_ignored_the_request_is_still_drift() {
 }
 
 /// The case the expectation cannot see, and the reason `uniform` is reported
-/// beside it: nobody ever commanded firmware, and the device group is still
-/// wrong.
+/// beside it: nothing was ever written to firmware, and the device group is
+/// still wrong.
 #[tokio::test]
-async fn members_that_disagree_about_an_uncommanded_field_are_not_uniform() {
+async fn members_that_disagree_about_an_unwritten_field_are_not_uniform() {
     let address = spawn([
-        reading(ATRIUM, "FIRMWARE", ReadingValue::Version("2.11".into())),
-        reading(ANNEX, "FIRMWARE", ReadingValue::Version("2.09".into())),
+        read(ATRIUM, "FIRMWARE", ReadValue::Version("2.11".into())),
+        read(ANNEX, "FIRMWARE", ReadValue::Version("2.09".into())),
     ])
     .await;
 
@@ -238,10 +238,10 @@ async fn members_that_disagree_about_an_uncommanded_field_are_not_uniform() {
     assert!(body["expected"].is_null());
 }
 
-/// A group that has never been commanded reports `unknown`, not `in_sync`:
+/// A group nothing was ever written to reports `unknown`, not `in_sync`:
 /// agreement with nothing is not agreement.
 #[tokio::test]
-async fn an_uncommanded_group_is_unknown_rather_than_in_sync() {
+async fn a_group_nothing_was_written_to_is_unknown_rather_than_in_sync() {
     let address = spawn([
         state(ATRIUM, RecordingState::Started),
         state(ANNEX, RecordingState::Started),
@@ -261,14 +261,12 @@ async fn an_uncommanded_group_is_unknown_rather_than_in_sync() {
 #[tokio::test]
 async fn a_group_metadata_write_is_checked_against_what_the_members_echoed() {
     let address = spawn([
-        reading(ATRIUM, "TITLE", ReadingValue::Text("Week 4".into())),
-        reading(ANNEX, "TITLE", ReadingValue::Text("Week 3".into())),
+        read(ATRIUM, "TITLE", ReadValue::Text("Week 4".into())),
+        read(ANNEX, "TITLE", ReadValue::Text("Week 3".into())),
     ])
     .await;
     let status = reqwest::Client::new()
-        .put(format!(
-            "{address}/v1/commands/groups/{GROUP}/metadata/title"
-        ))
+        .put(format!("{address}/v1/writes/groups/{GROUP}/metadata/title"))
         .json(&serde_json::json!({"value": "Week 4"}))
         .send()
         .await
@@ -299,7 +297,7 @@ async fn a_device_addressed_write_does_not_speak_for_the_room() {
     .await;
     let status = reqwest::Client::new()
         .post(format!(
-            "{address}/v1/commands/devices/{ATRIUM}/recording/start"
+            "{address}/v1/writes/devices/{ATRIUM}/recording/start"
         ))
         .send()
         .await
@@ -319,11 +317,11 @@ async fn a_device_addressed_write_does_not_speak_for_the_room() {
 #[tokio::test]
 async fn the_index_covers_every_field_any_member_reported_ordered_by_name() {
     let address = spawn([
-        reading(ATRIUM, "FIRMWARE", ReadingValue::Version("2.11".into())),
+        read(ATRIUM, "FIRMWARE", ReadValue::Version("2.11".into())),
         state(ATRIUM, RecordingState::Started),
         // Only `annex` has answered on this one; it still appears, with `atrium`
-        // carrying a null reading.
-        reading(ANNEX, "TIMEZONE", ReadingValue::Text("UTC".into())),
+        // carrying a null read.
+        read(ANNEX, "TIMEZONE", ReadValue::Text("UTC".into())),
     ])
     .await;
 
@@ -344,14 +342,14 @@ async fn the_index_covers_every_field_any_member_reported_ordered_by_name() {
         [ATRIUM, ANNEX],
         "every member is listed on every field, reported or not"
     );
-    assert!(timezone["members"][0]["reading"].is_null());
+    assert!(timezone["members"][0]["read"].is_null());
 }
 
 /// A field the device group was told to set but no member has answered on yet
 /// is what a write that reached nobody looks like — so it has to appear in the
 /// index even though the store holds nothing for it.
 #[tokio::test]
-async fn the_index_covers_a_commanded_field_no_member_has_reported() {
+async fn the_index_covers_a_written_field_no_member_has_reported() {
     let address = spawn([]).await;
     start_the_device_group(&address).await;
 
@@ -383,10 +381,10 @@ async fn history_is_one_series_per_member_oldest_first() {
         (ANNEX, "2026-08-17T00:01:00Z", RecordingState::Started),
     ] {
         store
-            .upsert_latest(Reading {
+            .upsert_latest(Read {
                 device: device.into(),
                 field: "RUNNING_STATE".into(),
-                value: ReadingValue::State(value),
+                value: ReadValue::State(value),
                 at: Timestamp(at.into()),
             })
             .await
@@ -438,10 +436,10 @@ async fn the_limit_bounds_each_members_series_rather_than_the_response() {
             .enumerate()
         {
             store
-                .upsert_latest(Reading {
+                .upsert_latest(Read {
                     device: device.into(),
                     field: "PORT_TIMEOUT".into(),
-                    value: ReadingValue::Number(n as u32),
+                    value: ReadValue::Number(n as u32),
                     at: Timestamp(at.into()),
                 })
                 .await
@@ -457,11 +455,11 @@ async fn the_limit_bounds_each_members_series_rather_than_the_response() {
     .await;
 
     for member in body["members"].as_array().expect("members") {
-        let readings = member["readings"].as_array().expect("readings");
-        assert_eq!(readings.len(), 1, "each member is limited on its own");
+        let reads = member["reads"].as_array().expect("reads");
+        assert_eq!(reads.len(), 1, "each member is limited on its own");
         // The most recent row, kept from the tail — so a limited plot is a plot
         // of the tail rather than of a truncated head.
-        assert_eq!(readings[0]["value"]["value"], 1);
+        assert_eq!(reads[0]["value"]["value"], 1);
     }
 }
 
@@ -483,7 +481,7 @@ async fn the_span_filters_each_members_series() {
     .await;
 
     for member in body["members"].as_array().expect("members") {
-        assert_eq!(member["readings"].as_array().expect("readings").len(), 0);
+        assert_eq!(member["reads"].as_array().expect("reads").len(), 0);
     }
 }
 
@@ -520,7 +518,7 @@ async fn a_query_field_that_agrees_with_the_path_is_accepted() {
 
 // ---- an id that names nothing, or the wrong thing -------------------------
 
-/// Unlike the device readings routes, these cannot answer without the catalog —
+/// Unlike the device reads routes, these cannot answer without the catalog —
 /// so an unknown id is a real claim about configuration rather than "nothing
 /// stored".
 #[tokio::test]
@@ -599,7 +597,7 @@ async fn every_device_route_in_this_scope_refuses_a_device_group_id() {
 }
 
 /// ...and the refusal is a claim about *groups* only. An id that names nothing
-/// keeps this route's own answer, so the device readings routes still say
+/// keeps this route's own answer, so the device reads routes still say
 /// "nothing stored" rather than inventing a claim about configuration.
 #[tokio::test]
 async fn an_unknown_id_is_unaffected_by_the_group_refusal() {
@@ -608,7 +606,7 @@ async fn an_unknown_id_is_unaffected_by_the_group_refusal() {
     // Still an empty list, not a 404: the store cannot tell an unknown device
     // from one that has not answered yet.
     let body = get_json(&address, "/devices/nobody/fields").await;
-    assert_eq!(body["readings"].as_array().expect("readings").len(), 0);
+    assert_eq!(body["reads"].as_array().expect("reads").len(), 0);
 }
 
 /// Serve `store` over the two-member device group on an ephemeral port.
@@ -639,7 +637,5 @@ fn field_names(body: &serde_json::Value) -> Vec<&str> {
 
 /// One member's series out of a history response.
 fn series(body: &serde_json::Value, member: usize) -> &Vec<serde_json::Value> {
-    body["members"][member]["readings"]
-        .as_array()
-        .expect("readings")
+    body["members"][member]["reads"].as_array().expect("reads")
 }

@@ -17,6 +17,25 @@ A `/v1/groups` space over the read and write sides both, a new store port
 holding what each device group was last told to be, and a comparison that turns
 the two into a drift verdict.
 
+> [!info] Written before two later renames
+> The URLs below are the ones this change introduced. Two later changes moved
+> them without altering anything argued here:
+>
+> 1. The read and write halves were nested under `/v1/readings` and
+>    `/v1/commands`, so `GET /v1/groups/{id}/fields` became
+>    `GET /v1/readings/groups/{id}/fields`.
+> 2. `/v1/commands` became `/v1/writings`, because it named the union of
+>    lifecycle commands, metadata writes and setting writes while sounding
+>    like only the first. Every type renamed with it — `CommandRecord` is
+>    `WritingRecord`, `CommandSubmit`/`CommandLog`/`CommandDrain` are
+>    `WritingSubmit`/`WritingLog`/`WritingDrain` — and the per-device list
+>    route `…/{id}/commands` became `…/{id}/history`, since it returns every
+>    writing rather than only the commands. Type names in this document have
+>    been updated; the URLs are left as they were written.
+>
+> `WritingsCatalog.commands` is the one place the old word survives, and there
+> it means what `sismatic-core` means by it: `Start`, `Stop`, `Pause`.
+
 ```text
 GET  /v1/groups/{id}/fields                    every field, every member
 GET  /v1/groups/{id}/fields/{field}            one field, every member
@@ -63,10 +82,10 @@ Sismatic is split along a CQRS seam. `sismatic-sync` polls devices through
 `sismatic-core` and writes `Reading` rows through a `WriteStore`.
 `sismatic-http-api` answers questions about those rows through a `ReadStore`.
 `sismatic-intent-relay` drains recorded intents and applies them to devices
-through a `CommandDrain`. The three meet at ports and nowhere else, and only
+through a `WritingDrain`. The three meet at ports and nowhere else, and only
 `sismatic-server` — the composition root — knows that the object behind
 `ReadStore` and `WriteStore` is one value, and that the object behind
-`CommandSubmit`, `CommandLog`, and `CommandDrain` is another.
+`WritingSubmit`, `WritingLog`, and `WritingDrain` is another.
 
 The load-bearing rule of the crate graph is that no front end has a compile
 path to `sismatic-core`. `sismatic-api-types` sits at the bottom of every client
@@ -172,7 +191,7 @@ per device: a device group where one member is already recording and one is idle
 has to be decided against both phases, and only a submission naming both can be.
 
 The `202` shape is identical across both spaces, and always was:
-`Acceptance { batch, commands }` is a list even for a single device, precisely
+`Acceptance { batch, writings }` is a list even for a single device, precisely
 so the response type does not depend on which kind of id was used. That is why
 the write side needed no new response DTO and the read side needed six.
 
@@ -200,14 +219,14 @@ async fn phase(&self, device: DeviceId) -> Result<RecordingPhase, ReadError> {
 
 A group id has no log, so it took the `map_or` default. The route answered
 `{"phase":"idle","epoch":0}` for a device group whose members were
-mid-recording, and `commands_for` answered `[]` for one whose members each held
+mid-recording, and `writings_for` answered `[]` for one whose members each held
 a queue. Both were confident answers about a device that does not exist, and no
 wording of the documentation made them safe.
 
 Fanning out would not have fixed them either: there is no single `Phase` to
 report for a set of members, and no total order over commands two submissions
 stamped at the same instant. The answers had to change shape, which is what
-`GroupPhase` and `GroupCommandList` are — so the device routes refuse, and the
+`GroupPhase` and `GroupWritingList` are — so the device routes refuse, and the
 group routes answer.
 
 The other nine operations *could* have stayed permissive; they are refused for
@@ -343,7 +362,7 @@ alternative — a separate `GroupStateWrite` port called by the HTTP layer after
 
 ```rust
 pub struct Submission {
-    pub ids: Vec<CommandId>,
+    pub ids: Vec<WritingId>,
     pub targets: Vec<DeviceId>,
     /// The group this request was addressed to, when it was addressed to one.
     pub group: Option<GroupId>,
@@ -629,8 +648,8 @@ pub struct GroupFieldState {
 
 pub struct GroupFieldStateList { pub group: GroupId, pub fields: Vec<GroupFieldState> }
 pub struct MemberHistory       { pub device: DeviceId, pub readings: Vec<Reading> }
-pub struct MemberCommands      { pub device: DeviceId, pub commands: Vec<CommandRecord> }
-pub struct GroupCommandList    { pub group: GroupId, pub members: Vec<MemberCommands> }
+pub struct MemberWritings      { pub device: DeviceId, pub writings: Vec<WritingRecord> }
+pub struct GroupWritingList    { pub group: GroupId, pub members: Vec<MemberWritings> }
 pub struct MemberPhase         { pub device: DeviceId, pub phase: Phase, pub epoch: u64 }
 
 pub struct GroupPhase {
@@ -928,7 +947,7 @@ optional derive crates.
 | --- | --- |
 | `src/group.rs` | New. `GroupState`, `DynGroupState`, `RECORDING_STATE_FIELD`, `expects`, `satisfies`, `matches_text`, `flag_of`, `state_name`, seven unit tests |
 | `src/lib.rs` | `pub mod group`, re-export of `DynGroupState` and `GroupState` |
-| `src/outbox.rs` | `Submission::group`; `GroupId` import; `CommandSubmit::submit` contract extended to state that "records nothing at all" includes the expectation |
+| `src/outbox.rs` | `Submission::group`; `GroupId` import; `WritingSubmit::submit` contract extended to state that "records nothing at all" includes the expectation |
 
 `state_name` duplicates the `snake_case` spelling that `SyncState`'s and
 `RecordingState`'s `Serialize` impls produce. The same duplication already
@@ -956,7 +975,7 @@ unchanged.
 | `src/routes.rs` | Module declaration and three re-exports |
 | `src/startup.rs` | `Ports` struct; `run` signature; `GroupState` registered as `app_data`; ten resources registered ahead of `/groups/{id}` |
 | `src/openapi.rs` | Ten paths, five component schemas, widened `readings` tag description |
-| `src/routes/commands.rs` | `submit` over a resolved target list; `submit_device` and `submit_group`; five group write handlers; `read_group_phase` and `list_group_commands`; `reject_group` on both status reads |
+| `src/routes/commands.rs` | `submit` over a resolved target list; `submit_device` and `submit_group`; five group write handlers; `read_group_phase` and `list_group_writings`; `reject_group` on both status reads |
 | `src/lib.rs` | Route table extended; `Ports` re-exported; paragraph on the read/write URL asymmetry |
 | `tests/groups.rs` | New. Thirty-three black-box tests |
 | `tests/harness/mod.rs` | `device_group(&[&str])` helper; `catalog()` expressed through it; `DynGroupState` wired; `run` call updated to `Ports` |
@@ -992,10 +1011,10 @@ The outbox is now four trait objects from one value:
 
 ```rust
 let outbox = MemoryOutbox::with_max_attempts(cfg.intent_relay.max_attempts);
-let submit: DynCommandSubmit = Arc::new(outbox.clone());
-let log: DynCommandLog = Arc::new(outbox.clone());
+let submit: DynWritingSubmit = Arc::new(outbox.clone());
+let log: DynWritingLog = Arc::new(outbox.clone());
 let group_state: DynGroupState = Arc::new(outbox.clone());
-let drain: DynCommandDrain = Arc::new(outbox);
+let drain: DynWritingDrain = Arc::new(outbox);
 ```
 
 Each handle admits only its own trait's methods. The HTTP surface can append,
@@ -1022,8 +1041,8 @@ pub struct Ports {
     pub store: DynReadStore,
     pub catalog: DynDeviceCatalog,
     pub status: DynDeviceStatus,
-    pub submit: DynCommandSubmit,
-    pub log: DynCommandLog,
+    pub submit: DynWritingSubmit,
+    pub log: DynWritingLog,
     pub group_state: DynGroupState,
 }
 
@@ -1362,11 +1381,11 @@ Eleven operations are affected. Each refusal carries the replacement URL:
 | `PUT /v1/devices/{id}/settings/{field}` | `PUT /v1/groups/{id}/settings/{field}` | `202`, fanned out |
 
 The five write verbs are a rename: the request body, the `202` body
-(`Acceptance { batch, commands }`), the batching rule, and the admission
+(`Acceptance { batch, writings }`), the batching rule, and the admission
 semantics are all unchanged. Only the path moves.
 
 The six reads are not a rename. Their response types are new — `GroupFieldState`,
-`GroupFieldStateList`, `GroupHistory`, `GroupPhase`, `GroupCommandList` — because
+`GroupFieldStateList`, `GroupHistory`, `GroupPhase`, `GroupWritingList` — because
 the previous answers were about a device rather than about a device group. A
 client following the table above has to read the new shapes; see
 [[#5. The wire contract]].
@@ -1381,7 +1400,7 @@ client following the table above has to read the new shapes; see
   `200` with an empty list and `GET /v1/devices/nobody/recording` is still
   `idle` at epoch `0`. `an_unknown_id_is_unaffected_by_the_group_refusal` pins
   it.
-- **`GET /v1/commands/{id}` is unaffected.** A command id is globally unique and
+- **`GET /v1/writings/{id}` is unaffected.** A command id is globally unique and
   names neither kind.
 - **`GET /v1/groups` and `GET /v1/groups/{id}`** — the inventory routes that
   existed before — are unchanged.

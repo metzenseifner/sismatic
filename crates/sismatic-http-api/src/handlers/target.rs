@@ -17,8 +17,8 @@
 //! because that was the only way to address a device group before the group
 //! space existed. Keeping it would leave two URLs doing one write and — worse —
 //! two routes that *cannot* answer correctly for a group at all:
-//! `GET /v1/commands/devices/{id}/recording` and
-//! `GET /v1/commands/devices/{id}/commands` read an outbox keyed by device, so a
+//! `GET /v1/writes/devices/{id}/recording` and
+//! `GET /v1/writes/devices/{id}/history` read an outbox keyed by device, so a
 //! group id there takes a default and reports `idle` at epoch `0` with an empty
 //! queue. That is a confident answer about a device which does not exist, and no
 //! amount of documentation makes it safe.
@@ -32,8 +32,8 @@
 //!
 //! The counterpart URL is not a fixed prefix, because the two spaces are nested
 //! inside a scope: the group route that answers for
-//! `/v1/readings/devices/{id}/fields` is under `/v1/readings`, and the one that
-//! answers for `/v1/commands/devices/{id}/recording` is under `/v1/commands`. A
+//! `/v1/reads/devices/{id}/fields` is under `/v1/reads`, and the one that
+//! answers for `/v1/writes/devices/{id}/recording` is under `/v1/writes`. A
 //! refusal built from the wrong prefix would send a caller to a second 404,
 //! which is worse than no hint at all — so the caller passes the scope it is
 //! mounted in, spelled with one of the constants below rather than a literal.
@@ -41,11 +41,11 @@
 //! # What `reject_group` deliberately does not do
 //!
 //! It is not an existence check. An id that names nothing at all passes it, and
-//! the route decides what to do — which is what preserves the readings routes'
+//! the route decides what to do — which is what preserves the reads routes'
 //! answer for an unknown device: `[]`, not `404`, because the store cannot tell
 //! "no such device" from "this one has not answered yet" and a `404` would
 //! report an unreachable device as an unconfigured one (see
-//! [`crate::handlers::readings`]).
+//! [`crate::handlers::reads`]).
 //!
 //! Only a *positive* group hit is a claim, and it is one the catalog is
 //! entitled to make: it holds the configured set, so "this id is a device
@@ -56,11 +56,11 @@ use sismatic_store::catalog::DeviceCatalog;
 
 use crate::handlers::error::ApiFailure;
 
-/// Stored readings, of a device or of a device group.
-pub const READINGS: &str = "readings";
+/// Stored reads, of a device or of a device group.
+pub const READS: &str = "reads";
 /// Asking a device or a device group to do something, and reading what was
 /// asked.
-pub const COMMANDS: &str = "commands";
+pub const WRITES: &str = "writes";
 /// What the server was configured with.
 pub const INVENTORY: &str = "inventory";
 
@@ -72,8 +72,8 @@ pub const INVENTORY: &str = "inventory";
 /// would silently produce a one-member "group" that is not a group. So the
 /// lookup is [`DeviceCatalog::group`].
 ///
-/// `scope` is the segment this route is mounted under — [`READINGS`] or
-/// [`COMMANDS`] — and `device_route` the tail of the `/devices` route inside it
+/// `scope` is the segment this route is mounted under — [`READS`] or
+/// [`WRITES`] — and `device_route` the tail of the `/devices` route inside it
 /// that answers the same question.
 pub(crate) async fn group_members(
     catalog: &dyn DeviceCatalog,

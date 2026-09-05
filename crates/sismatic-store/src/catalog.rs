@@ -14,16 +14,17 @@
 //!
 //! # Why the write side needs it
 //!
-//! Without a catalog, `POST /v1/commands/devices/typo/recording/start` is accepted: the
-//! outbox holds what was submitted and no list of what exists, so it admits the
-//! command against a fresh idle phase and answers `202`. The caller then learns
-//! its recording never started by polling a command that fails at dispatch,
-//! minutes later, with a message about an unknown device. A `404` at submission
-//! is the same information, delivered when it is still actionable.
+//! Without a catalog, `POST /v1/writes/devices/typo/recording/start` is
+//! accepted: the outbox holds what was submitted and no list of what exists,
+//! so it admits the write against a desired recording state of `Idle` and
+//! answers `202`. The caller then learns its recording never started by
+//! polling a write that fails at dispatch, minutes later, with a message
+//! about an unknown device. A `404` at submission is the same information,
+//! delivered when it is still actionable.
 //!
 //! That is a deliberate divergence from the read side, which answers an unknown
 //! device with an empty list rather than a `404`. The two differ because the
-//! failures differ: an empty reading list is *true* of a device that exists and
+//! failures differ: an empty read list is *true* of a device that exists and
 //! has not answered, whereas a `202` for a device that does not exist is a
 //! promise that cannot be kept.
 //!
@@ -70,7 +71,7 @@ pub trait DeviceCatalog: Send + Sync {
     /// One group by id, or `None` if no group has it.
     async fn group(&self, id: &str) -> Option<GroupSummary>;
 
-    /// Whether `id` names something a command can be addressed to.
+    /// Whether `id` names something a write can be addressed to.
     ///
     /// A provided method rather than a fourth thing an adapter implements, so
     /// "this id is addressable" cannot come to mean something different from
@@ -85,7 +86,7 @@ pub trait DeviceCatalog: Send + Sync {
     /// the order they were configured. `None` if `id` names neither.
     ///
     /// A device answers with a one-element list rather than `None` so a caller
-    /// fanning a command out does not have to ask which kind of id it holds —
+    /// fanning a write out does not have to ask which kind of id it holds —
     /// which is the shape the group write path needs.
     async fn members(&self, id: &str) -> Option<Vec<DeviceId>> {
         if self.device(id).await.is_some() {

@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use sismatic_api_types::{ApiError, ErrorCode, Phase};
+use sismatic_api_types::{ApiError, DesiredRecordingState, ErrorCode};
 
 use crate::outbox::SubmitError;
 
@@ -54,7 +54,7 @@ impl std::error::Error for ReadError {}
 /// Produced only by `WriteStore::upsert_latest`, which `sismatic-sync` calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
-    /// The storage backend failed while persisting the reading (lost
+    /// The storage backend failed while persisting the read (lost
     /// connection, constraint violation, disk full, ...).
     Backend(String),
 }
@@ -103,7 +103,7 @@ impl From<SubmitError> for ApiError {
             SubmitError::Rejected {
                 device,
                 rejection,
-                phase,
+                desired_recording_state,
             } => ApiError::rejected(
                 rejection,
                 // The prose stays, and stays complete, even though the
@@ -111,12 +111,12 @@ impl From<SubmitError> for ApiError {
                 // log, and a reader there has no other way to learn which
                 // device refused. The device because a group submission is
                 // refused as a whole by one member, and "which one" is the
-                // first thing an operator needs; the phase because it is what
+                // first thing an operator needs; the state because it is what
                 // the caller would have to change — "not_recording" alone does
                 // not say a start has to come first.
                 format!(
-                    "{rejection} (device '{device}', phase: {})",
-                    phase_name(phase)
+                    "{rejection} (device '{device}', desired_recording_state: {})",
+                    desired_state_name(desired_recording_state)
                 ),
             ),
             SubmitError::Malformed(msg) => ApiError::coded(
@@ -131,13 +131,17 @@ impl From<SubmitError> for ApiError {
     }
 }
 
-/// The wire spelling of a phase — the same `snake_case` its `Serialize` impl
-/// produces, so the message and the `GET .../recording` body agree on what to
-/// call a state.
-const fn phase_name(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Idle => "idle",
-        Phase::Recording => "recording",
-        Phase::Paused => "paused",
+/// The wire spelling of a desired recording state — the same `snake_case` its
+/// `Serialize` impl produces, so the message and the `GET .../recording` body
+/// agree on what to call a state.
+///
+/// Named apart from `group::state_name`, which does the same job for the
+/// *observed* [`RecordingState`](sismatic_api_types::RecordingState): the two
+/// vocabularies overlap on "paused" and must not be confused.
+const fn desired_state_name(desired: DesiredRecordingState) -> &'static str {
+    match desired {
+        DesiredRecordingState::Idle => "idle",
+        DesiredRecordingState::Recording => "recording",
+        DesiredRecordingState::Paused => "paused",
     }
 }

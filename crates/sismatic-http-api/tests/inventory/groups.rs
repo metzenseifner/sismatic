@@ -74,8 +74,8 @@ async fn a_device_id_on_the_group_route_says_which_route_to_use() {
 }
 
 /// The barrier policy reaches a client, because it is the one configured number
-/// that changes what a `202` from the commands scope means: a fifteen-second
-/// barrier can leave a command pending that long before anything reaches a
+/// that changes what a `202` from the writes scope means: a fifteen-second
+/// barrier can leave a write pending that long before anything reaches a
 /// device. This scope is the only one that reports it.
 #[tokio::test]
 async fn a_groups_barrier_policy_is_visible_on_the_inventory_route() {

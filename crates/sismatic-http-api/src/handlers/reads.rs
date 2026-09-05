@@ -1,4 +1,4 @@
-//! The readings routes — every queryable field of every device, through three
+//! The reads routes — every queryable field of every device, through three
 //! handlers.
 //!
 //! ```text
@@ -16,7 +16,7 @@
 //!
 //! The first is that it buys nothing. Adding a field to core's catalog already
 //! reaches this API without a code change: `'*'` expands to the new field, the
-//! sync driver starts a poll loop for it, the loop writes `Reading { field:
+//! sync driver starts a poll loop for it, the loop writes `Read { field:
 //! "NEW_FIELD", .. }`, and the route below serves it because the field name is
 //! *data* it passes through rather than a symbol it was compiled against. The
 //! drift a generated route table would prevent is drift this design cannot have.
@@ -29,9 +29,17 @@
 //! third crate, in exchange for a URL space that is already reachable.
 //!
 //! What the route space *cannot* do without the catalog is tell a misspelled
-//! field from an unpolled one: both are "no reading here", both are 404. That is
+//! field from an unpolled one: both are "no read here", both are 404. That is
 //! a real limitation and it is stated in [`ApiFailure::NotFound`]'s docs rather
 //! than papered over.
+//!
+//! It is not, however, a limitation a caller has to live with. `GET /v1/reads`
+//! publishes the catalog these three routes accept — see
+//! [`crate::handlers::instructions`] — so the answer arrives *before* the
+//! request that would have been a 404, which is the same information at the only
+//! moment it is actionable. The 404 stays ambiguous because it must: making it
+//! unambiguous per request would mean consulting the catalog on every read, to
+//! reword a failure the caller can already avoid.
 //!
 //! # Field names in a URL
 //!
@@ -53,23 +61,21 @@
 //! store cannot tell "no such device" from "this one has not answered yet".
 //! A *device group* id is different — the catalog holds the configured set, so
 //! "this id is a group" is a fact rather than an inference from absence — and it
-//! is refused with the `/v1/readings/groups` URL that answers instead. See
+//! is refused with the `/v1/reads/groups` URL that answers instead. See
 //! [`crate::handlers::target`] for why only the positive hit is a claim these
 //! routes are entitled to make.
 
 use actix_web::web;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes below —
 // the handlers never build one, they return `ApiFailure` and let it render.
-use sismatic_api_types::{
-    ApiError, FieldName, Reading, ReadingList, ReadingQuery, TimeSpan, Timestamp,
-};
+use sismatic_api_types::{ApiError, FieldName, Read, ReadList, ReadQuery, TimeSpan, Timestamp};
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 
 use crate::handlers::error::ApiFailure;
-use crate::handlers::target::{READINGS, reject_group};
+use crate::handlers::target::{READS, reject_group};
 
-/// The most readings one request can return.
+/// The most reads one request can return.
 ///
 /// A history request names a span, and a span can always be widened, so without
 /// a ceiling the response size is the client's to choose and a year-wide span
@@ -100,7 +106,7 @@ const END_OF_TIME: &str = "9999-12-31T23:59:59Z";
 /// route asks the same question of the same store, and two copies of "an
 /// omitted `start` means the beginning of history" are how the two routes would
 /// come to disagree about what an unfiltered request means.
-pub(crate) fn span_of(query: &ReadingQuery) -> TimeSpan {
+pub(crate) fn span_of(query: &ReadQuery) -> TimeSpan {
     TimeSpan {
         start: query
             .start
@@ -113,7 +119,7 @@ pub(crate) fn span_of(query: &ReadingQuery) -> TimeSpan {
     }
 }
 
-/// Cut `readings` down to the requested page, keeping its most recent rows.
+/// Cut `reads` down to the requested page, keeping its most recent rows.
 ///
 /// Truncates from the *front*: the store returns oldest first, and a caller
 /// asking for fewer rows than exist wants the recent ones. Chronological order
@@ -122,16 +128,16 @@ pub(crate) fn span_of(query: &ReadingQuery) -> TimeSpan {
 ///
 /// Shared with the group history route, where it is applied *per member* — see
 /// that handler for why the ceiling is a per-series one.
-pub(crate) fn truncate(readings: &mut Vec<Reading>, limit: Option<u32>) {
+pub(crate) fn truncate(reads: &mut Vec<Read>, limit: Option<u32>) {
     let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
-    if readings.len() > limit {
-        readings.drain(..readings.len() - limit);
+    if reads.len() > limit {
+        reads.drain(..reads.len() - limit);
     }
 }
 
 /// Reject a `?field=` that contradicts the field named in the path.
 ///
-/// [`ReadingQuery`] carries a `field` because it also describes a flat readings
+/// [`ReadQuery`] carries a `field` because it also describes a flat reads
 /// query where nothing else names one. On a route whose path already has one, a
 /// *disagreeing* `?field=` is a contradiction — rejected rather than ignored,
 /// since silently serving a different field than the one the caller spelled out
@@ -139,10 +145,7 @@ pub(crate) fn truncate(readings: &mut Vec<Reading>, limit: Option<u32>) {
 ///
 /// Shared by both history routes so neither can start tolerating what the other
 /// refuses.
-pub(crate) fn reject_conflicting_field(
-    query: &ReadingQuery,
-    field: &str,
-) -> Result<(), ApiFailure> {
+pub(crate) fn reject_conflicting_field(query: &ReadQuery, field: &str) -> Result<(), ApiFailure> {
     if let Some(asked) = &query.field {
         let asked = normalize_field(asked);
         if asked != field {
@@ -155,7 +158,7 @@ pub(crate) fn reject_conflicting_field(
     Ok(())
 }
 
-/// `GET /v1/readings/devices/{id}/fields` — every field's most recent value for
+/// `GET /v1/reads/devices/{id}/fields` — every field's most recent value for
 /// one device.
 ///
 /// An unknown device yields an empty list rather than a 404: the store cannot
@@ -166,15 +169,15 @@ pub(crate) fn reject_conflicting_field(
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields",
-    context_path = "/v1/readings",
-    tag = "readings",
+    context_path = "/v1/reads",
+    tag = "reads",
     params(("id" = String, Path, description = "Device id, as configured on the write side.")),
     responses(
         (status = 200, description = "Every field's latest value. An unknown device \
              yields an empty list rather than a 404 — see the handler's docs.",
-         body = ReadingList),
+         body = ReadList),
         (status = 404, description = "This id names a device group, not a device. \
-             The body carries the `/v1/readings/groups` URL that answers instead.",
+             The body carries the `/v1/reads/groups` URL that answers instead.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -183,24 +186,24 @@ pub async fn list_fields(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<String>,
-) -> Result<web::Json<ReadingList>, ApiFailure> {
+) -> Result<web::Json<ReadList>, ApiFailure> {
     let device = path.into_inner();
-    reject_group(&**catalog, &device, READINGS, "fields").await?;
-    let readings = store.latest_all(device).await?;
-    Ok(web::Json(ReadingList { readings }))
+    reject_group(&**catalog, &device, READS, "fields").await?;
+    let reads = store.latest_all(device).await?;
+    Ok(web::Json(ReadList { reads }))
 }
 
-/// `GET /v1/readings/devices/{id}/fields/{field}` — one field's most recent
+/// `GET /v1/reads/devices/{id}/fields/{field}` — one field's most recent
 /// value.
 ///
-/// A bare [`Reading`] rather than a one-element list: the response answers a
+/// A bare [`Read`] rather than a one-element list: the response answers a
 /// point question, and its `at` is the freshness of *this* value, which is the
 /// thing a caller checks before trusting it.
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}",
-    context_path = "/v1/readings",
-    tag = "readings",
+    context_path = "/v1/reads",
+    tag = "reads",
     params(
         ("id" = String, Path, description = "Device id, as configured on the write side."),
         ("field" = String, Path,
@@ -209,12 +212,12 @@ pub async fn list_fields(
          example = "RUNNING_STATE"),
     ),
     responses(
-        (status = 200, description = "The field's most recent value.", body = Reading),
+        (status = 200, description = "The field's most recent value.", body = Read),
         (status = 404, description = "Nothing is stored for this device and field, \
              or the id names a device group. The first is not a claim that either \
              does not exist — an unknown device, an unpolled field and a device that \
              has not answered yet are one answer from here — while the second is, and \
-             carries the `/v1/readings/groups` URL that answers instead.",
+             carries the `/v1/reads/groups` URL that answers instead.",
          body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -223,21 +226,19 @@ pub async fn read_field(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<(String, String)>,
-) -> Result<web::Json<Reading>, ApiFailure> {
+) -> Result<web::Json<Read>, ApiFailure> {
     let (device, field) = path.into_inner();
     let field = normalize_field(&field);
-    reject_group(&**catalog, &device, READINGS, &format!("fields/{field}")).await?;
+    reject_group(&**catalog, &device, READS, &format!("fields/{field}")).await?;
 
     store
         .latest(device.clone(), field.clone())
         .await?
         .map(web::Json)
-        .ok_or_else(|| {
-            ApiFailure::NotFound(format!("no reading of '{field}' for device '{device}'"))
-        })
+        .ok_or_else(|| ApiFailure::NotFound(format!("no read of '{field}' for device '{device}'")))
 }
 
-/// `GET /v1/readings/devices/{id}/fields/{field}/history?start=&end=&limit=` —
+/// `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&limit=` —
 /// one field over time, oldest first.
 ///
 /// Every parameter is optional: omit the bounds for all of recorded history,
@@ -247,23 +248,23 @@ pub async fn read_field(
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}/history",
-    context_path = "/v1/readings",
-    tag = "readings",
+    context_path = "/v1/reads",
+    tag = "reads",
     params(
         ("id" = String, Path, description = "Device id, as configured on the write side."),
         ("field" = String, Path,
          description = "Field name, normalized as on the latest-value route.",
          example = "RUNNING_STATE"),
-        // The four query parameters come from `ReadingQuery`'s `IntoParams`
+        // The four query parameters come from `ReadQuery`'s `IntoParams`
         // rather than being restated here, so this route documents the struct
         // the handler actually deserializes.
-        ReadingQuery,
+        ReadQuery,
     ),
     responses(
-        (status = 200, description = "The field's readings within the span, oldest \
+        (status = 200, description = "The field's reads within the span, oldest \
              first. Empty is a valid answer, not a 404. Over-long results are \
              truncated to their most recent rows.",
-         body = ReadingList),
+         body = ReadList),
         (status = 400, description = "A `?field=` that contradicts the field in the \
              path. Rejected rather than ignored, so a caller can never be served a \
              different field than the one it spelled out.",
@@ -277,8 +278,8 @@ pub async fn field_history(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<(String, String)>,
-    query: web::Query<ReadingQuery>,
-) -> Result<web::Json<ReadingList>, ApiFailure> {
+    query: web::Query<ReadQuery>,
+) -> Result<web::Json<ReadList>, ApiFailure> {
     let (device, field) = path.into_inner();
     let field = normalize_field(&field);
     let query = query.into_inner();
@@ -286,15 +287,15 @@ pub async fn field_history(
     reject_group(
         &**catalog,
         &device,
-        READINGS,
+        READS,
         &format!("fields/{field}/history"),
     )
     .await?;
 
-    let mut readings = store.between(device, field, span_of(&query)).await?;
-    truncate(&mut readings, query.limit);
+    let mut reads = store.between(device, field, span_of(&query)).await?;
+    truncate(&mut reads, query.limit);
 
-    Ok(web::Json(ReadingList { readings }))
+    Ok(web::Json(ReadList { reads }))
 }
 
 /// Fold a URL path segment onto the canonical field spelling: upper-case, with

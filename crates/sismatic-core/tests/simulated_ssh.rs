@@ -81,7 +81,7 @@ impl SimulatedSmp {
             username: USERNAME.into(),
             password: password.into(),
             connect_timeout: Duration::from_secs(5),
-            command_timeout: Duration::from_secs(5),
+            exchange_timeout: Duration::from_secs(5),
             eager: false,
             sis_keepalive: None,
             eager_retry: None,

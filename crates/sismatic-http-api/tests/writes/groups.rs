@@ -1,14 +1,14 @@
-//! `/v1/commands/groups/{id}/…` — asking a whole device group to do something,
+//! `/v1/writes/groups/{id}/…` — asking a whole device group to do something,
 //! and reading back what each member was asked.
 //!
 //! Two things make this half worth having rather than a synonym for the device
-//! half. One request expands into one command per member, under a rendezvous
+//! half. One request expands into one write per member, under a rendezvous
 //! when the verb needs unison; and the two status reads answer questions the
 //! device half *cannot* answer for a group at all — the outbox keys its logs by
 //! device, so a group id there used to report an idle device that does not
 //! exist.
 
-use sismatic_store::outbox::CommandLog;
+use sismatic_store::outbox::WriteLog;
 use sismatic_store_memory::MemoryOutbox;
 
 use crate::{ANNEX, ATRIUM, GROUP, SCOPE, get, post, put, spawn_over};
@@ -30,9 +30,9 @@ async fn start_the_device_group(address: &str) {
 
 /// The device ids an acceptance body lists, in order.
 fn devices(body: &serde_json::Value) -> Vec<&str> {
-    body["commands"]
+    body["writes"]
         .as_array()
-        .expect("commands")
+        .expect("writes")
         .iter()
         .map(|c| c["device"].as_str().expect("device"))
         .collect()
@@ -67,7 +67,7 @@ async fn every_write_verb_is_addressable_under_the_group_space() {
             "{method} {path} answered {status}: {body}"
         );
         if status == 202 {
-            // One command per member, in configured order — reached through a
+            // One write per member, in configured order — reached through a
             // URL that says what it is doing.
             assert_eq!(devices(&body), [ATRIUM, ANNEX], "for {method} {path}");
         }
@@ -75,10 +75,10 @@ async fn every_write_verb_is_addressable_under_the_group_space() {
 }
 
 /// The expansion in full: one request, one row per member, all under one batch,
-/// and no `Location` — a group produced several commands, and a header naming
+/// and no `Location` — a group produced several writes, and a header naming
 /// an arbitrary one of them would be worse than none.
 #[tokio::test]
-async fn a_group_start_expands_into_one_command_per_member() {
+async fn a_group_start_expands_into_one_write_per_member() {
     let (address, _outbox) = spawn();
 
     let (status, location, body) =
@@ -120,7 +120,7 @@ async fn a_group_start_is_batched_and_a_metadata_write_is_not() {
         titled["batch"].is_null(),
         "a write needs no rendezvous, got {titled}"
     );
-    assert_eq!(titled["commands"].as_array().expect("commands").len(), 2);
+    assert_eq!(titled["writes"].as_array().expect("writes").len(), 2);
 
     let (status, _, started) = post(&address, &format!("/groups/{GROUP}/recording/start")).await;
     assert_eq!(status, 202);
@@ -131,7 +131,7 @@ async fn a_group_start_is_batched_and_a_metadata_write_is_not() {
 }
 
 /// Every row of a group start carries the batch, so a caller polling one
-/// command can tell it is part of a rendezvous rather than a lone request.
+/// write can tell it is part of a rendezvous rather than a lone request.
 #[tokio::test]
 async fn every_row_of_a_group_start_carries_the_batch() {
     let (address, _outbox) = spawn();
@@ -139,9 +139,9 @@ async fn every_row_of_a_group_start_carries_the_batch() {
     let (_, _, body) = post(&address, &format!("/groups/{GROUP}/recording/start")).await;
     let batch = body["batch"].as_str().expect("a batch id").to_owned();
 
-    for command in body["commands"].as_array().expect("commands") {
-        let id = command["id"].as_str().expect("id");
-        // The scope root, where a command is fetched by its own id.
+    for write in body["writes"].as_array().expect("writes") {
+        let id = write["id"].as_str().expect("id");
+        // The scope root, where a write is fetched by its own id.
         let (status, record) = get(&address, &format!("/{id}")).await;
         assert_eq!(status, 200);
         assert_eq!(record["batch"], batch);
@@ -172,7 +172,7 @@ async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
     // `atrium` never learned about it — the group was refused as a whole.
     assert!(
         outbox
-            .commands_for(ATRIUM.to_owned())
+            .writes_for(ATRIUM.to_owned())
             .await
             .expect("reading the log")
             .is_empty(),
@@ -230,7 +230,7 @@ async fn an_unconfigured_group_is_a_404_on_every_group_route() {
         ("put", "/metadata/title"),
         ("put", "/settings/timezone"),
         ("get", "/recording"),
-        ("get", "/commands"),
+        ("get", "/history"),
     ] {
         let path = format!("/groups/typo{tail}");
         let status = match method {
@@ -245,10 +245,10 @@ async fn an_unconfigured_group_is_a_404_on_every_group_route() {
 // ---- the two status reads the device half answers wrongly -----------------
 
 /// The bug this route exists for. The outbox keys its logs by device, so
-/// `GET /v1/commands/devices/{group-id}/recording` used to report an idle device
+/// `GET /v1/writes/devices/{group-id}/recording` used to report an idle device
 /// that does not exist. It now refuses the id and names this route instead.
 #[tokio::test]
-async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_id() {
+async fn the_group_recording_route_reports_members_and_the_device_route_refuses_the_id() {
     let (address, _outbox) = spawn();
     start_the_device_group(&address).await;
 
@@ -268,13 +268,13 @@ async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_
     assert_eq!(status, 200, "got {body}");
     assert_eq!(body["group"], GROUP);
     assert_eq!(
-        body["phase"], "recording",
+        body["desired_recording_state"], "recording",
         "every member was admitted, so they agree"
     );
     let members = body["members"].as_array().expect("members");
     assert_eq!(members.len(), 2);
     assert_eq!(members[0]["device"], ATRIUM);
-    assert_eq!(members[0]["phase"], "recording");
+    assert_eq!(members[0]["desired_recording_state"], "recording");
     assert_eq!(
         members[0]["epoch"], 1,
         "each member opened its own first take"
@@ -282,10 +282,11 @@ async fn the_group_phase_route_reports_members_and_the_device_route_refuses_the_
     assert_eq!(members[1]["device"], ANNEX);
 }
 
-/// A device group has no phase of its own, so `null` when the members have
-/// diverged — which is what a start that reached only some of them looks like.
+/// A device group has no desired state of its own, so `null` when the members
+/// have diverged — which is what a start that reached only some of them looks
+/// like.
 #[tokio::test]
-async fn a_divided_group_reports_no_shared_phase() {
+async fn a_divided_group_reports_no_shared_desired_state() {
     let (address, _outbox) = spawn();
     // One member started on its own, through the device half.
     let (status, ..) = post(&address, &format!("/devices/{ATRIUM}/recording/start")).await;
@@ -294,22 +295,22 @@ async fn a_divided_group_reports_no_shared_phase() {
     let (_, body) = get(&address, &format!("/groups/{GROUP}/recording")).await;
 
     assert!(
-        body["phase"].is_null(),
-        "the members disagree, so there is no group phase: {body}"
+        body["desired_recording_state"].is_null(),
+        "the members disagree, so there is no group-wide desired state: {body}"
     );
-    assert_eq!(body["members"][0]["phase"], "recording");
-    assert_eq!(body["members"][1]["phase"], "idle");
+    assert_eq!(body["members"][0]["desired_recording_state"], "recording");
+    assert_eq!(body["members"][1]["desired_recording_state"], "idle");
 }
 
 #[tokio::test]
-async fn an_uncommanded_group_is_idle_on_every_member() {
+async fn a_group_nothing_was_written_to_is_idle_on_every_member() {
     let (address, _outbox) = spawn();
 
     let (_, body) = get(&address, &format!("/groups/{GROUP}/recording")).await;
 
-    assert_eq!(body["phase"], "idle");
+    assert_eq!(body["desired_recording_state"], "idle");
     for member in body["members"].as_array().expect("members") {
-        assert_eq!(member["phase"], "idle");
+        assert_eq!(member["desired_recording_state"], "idle");
         assert_eq!(member["epoch"], 0);
     }
 }
@@ -317,14 +318,14 @@ async fn an_uncommanded_group_is_idle_on_every_member() {
 /// The other route that used to answer wrongly: an empty list for a group whose
 /// members each have a queue. Refused now, and answered here.
 #[tokio::test]
-async fn the_group_command_list_is_partitioned_by_member() {
+async fn the_group_write_list_is_partitioned_by_member() {
     let (address, _outbox) = spawn();
     start_the_device_group(&address).await;
 
-    let (refused, _) = get(&address, &format!("/devices/{GROUP}/commands")).await;
+    let (refused, _) = get(&address, &format!("/devices/{GROUP}/history")).await;
     assert_eq!(refused, 404);
 
-    let (status, body) = get(&address, &format!("/groups/{GROUP}/commands")).await;
+    let (status, body) = get(&address, &format!("/groups/{GROUP}/history")).await;
     assert_eq!(status, 200, "got {body}");
 
     assert_eq!(body["group"], GROUP);
@@ -333,16 +334,16 @@ async fn the_group_command_list_is_partitioned_by_member() {
     assert_eq!(members[0]["device"], ATRIUM);
     assert_eq!(members[1]["device"], ANNEX);
     for member in members {
-        let commands = member["commands"].as_array().expect("commands");
-        assert_eq!(commands.len(), 1, "one row per member");
-        assert_eq!(commands[0]["intent"]["kind"], "start_recording");
+        let writes = member["writes"].as_array().expect("writes");
+        assert_eq!(writes.len(), 1, "one row per member");
+        assert_eq!(writes[0]["intent"]["kind"], "start_recording");
         // The batch is what ties one group-addressed request back together.
-        assert!(commands[0]["batch"].is_string());
+        assert!(writes[0]["batch"].is_string());
     }
     // Both rows share it.
     assert_eq!(
-        members[0]["commands"][0]["batch"],
-        members[1]["commands"][0]["batch"]
+        members[0]["writes"][0]["batch"],
+        members[1]["writes"][0]["batch"]
     );
 }
 
@@ -352,10 +353,10 @@ async fn a_member_that_has_been_asked_nothing_is_an_empty_list_not_an_omission()
     let (status, ..) = post(&address, &format!("/devices/{ATRIUM}/recording/start")).await;
     assert_eq!(status, 202);
 
-    let (_, body) = get(&address, &format!("/groups/{GROUP}/commands")).await;
+    let (_, body) = get(&address, &format!("/groups/{GROUP}/history")).await;
 
     assert_eq!(body["members"].as_array().expect("members").len(), 2);
-    assert_eq!(body["members"][0]["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(body["members"][0]["writes"].as_array().unwrap().len(), 1);
     assert_eq!(body["members"][1]["device"], ANNEX);
-    assert_eq!(body["members"][1]["commands"].as_array().unwrap().len(), 0);
+    assert_eq!(body["members"][1]["writes"].as_array().unwrap().len(), 0);
 }

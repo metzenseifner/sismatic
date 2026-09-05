@@ -157,7 +157,7 @@ mod tests {
     }
 
     /// A value the shape refuses never becomes a payload, and the reason
-    /// survives the trip through `TranslateError` so the command log says why.
+    /// survives the trip through `TranslateError` so the write log says why.
     #[test]
     fn a_bad_setting_value_is_refused_before_any_byte_is_sent() {
         let intent = Intent::SetSetting {

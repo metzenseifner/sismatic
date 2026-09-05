@@ -1,4 +1,4 @@
-//! `/v1/readings/devices/{id}/…` — one device's stored readings.
+//! `/v1/reads/devices/{id}/…` — one device's stored reads.
 //!
 //! The half of the scope that answers from the store alone. That is what makes
 //! an unknown device an empty list here rather than a `404`: the store cannot
@@ -7,22 +7,22 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{DeviceId, FieldName, Reading, ReadingValue, TimeSpan};
+use sismatic_api_types::{DeviceId, FieldName, Read, ReadValue, TimeSpan};
 use sismatic_store::{ReadError, ReadStore};
 
-use crate::{SCOPE, get, reading_at, spawn_app, spawn_over};
+use crate::{SCOPE, get, read_at, spawn_app, spawn_over};
 
 const DEVICE: &str = "atrium-101";
 
-/// A `Reading` for `DEVICE`/`field` with a `Number` value stamped at `at`.
-fn reading(device: &str, field: &str, value: u32, at: &str) -> Reading {
-    reading_at(device, field, ReadingValue::Number(value), at)
+/// A `Read` for `DEVICE`/`field` with a `Number` value stamped at `at`.
+fn read(device: &str, field: &str, value: u32, at: &str) -> Read {
+    read_at(device, field, ReadValue::Number(value), at)
 }
 
-/// Start the application over a store pre-loaded with `readings`, and a catalog
+/// Start the application over a store pre-loaded with `reads`, and a catalog
 /// holding [`DEVICE`] — so nothing here trips the configured-set check.
-async fn spawn_with(readings: impl IntoIterator<Item = Reading>) -> String {
-    spawn_over(readings, &[DEVICE]).await
+async fn spawn_with(reads: impl IntoIterator<Item = Read>) -> String {
+    spawn_over(reads, &[DEVICE]).await
 }
 
 /// A store whose every read fails, for the one test about a backend outage.
@@ -30,15 +30,11 @@ struct FailingStore;
 
 #[async_trait::async_trait]
 impl ReadStore for FailingStore {
-    async fn latest(
-        &self,
-        _dev: DeviceId,
-        _field: FieldName,
-    ) -> Result<Option<Reading>, ReadError> {
+    async fn latest(&self, _dev: DeviceId, _field: FieldName) -> Result<Option<Read>, ReadError> {
         Err(ReadError::backend("the disk caught fire"))
     }
 
-    async fn latest_all(&self, _dev: DeviceId) -> Result<Vec<Reading>, ReadError> {
+    async fn latest_all(&self, _dev: DeviceId) -> Result<Vec<Read>, ReadError> {
         Err(ReadError::backend("the disk caught fire"))
     }
 
@@ -47,14 +43,14 @@ impl ReadStore for FailingStore {
         _dev: DeviceId,
         _field: FieldName,
         _span: TimeSpan,
-    ) -> Result<Vec<Reading>, ReadError> {
+    ) -> Result<Vec<Read>, ReadError> {
         Err(ReadError::backend("the disk caught fire"))
     }
 }
 
 #[tokio::test]
-async fn one_field_comes_back_as_a_reading() {
-    let address = spawn_with([reading(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:03:11Z")]).await;
+async fn one_field_comes_back_as_a_read() {
+    let address = spawn_with([read(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:03:11Z")]).await;
 
     let (status, body) = get(format!("{address}{SCOPE}/devices/{DEVICE}/fields/SSH_PORT")).await;
 
@@ -75,21 +71,21 @@ async fn one_field_comes_back_as_a_reading() {
 #[tokio::test]
 async fn every_field_of_a_device_is_listed_sorted_by_name() {
     // The regression this whole change exists for: before the store was keyed by
-    // `(device, field)`, these three writes left one reading and the other two
+    // `(device, field)`, these three writes left one read and the other two
     // were unreachable through any route.
     let address = spawn_with([
-        reading(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:00:00Z"),
-        reading(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:01Z"),
-        reading(DEVICE, "TIMEZONE", 5, "2026-07-23T14:00:02Z"),
+        read(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:00:00Z"),
+        read(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:01Z"),
+        read(DEVICE, "TIMEZONE", 5, "2026-07-23T14:00:02Z"),
     ])
     .await;
 
     let (status, body) = get(format!("{address}{SCOPE}/devices/{DEVICE}/fields")).await;
 
     assert_eq!(status, 200);
-    let fields: Vec<&str> = body["readings"]
+    let fields: Vec<&str> = body["reads"]
         .as_array()
-        .expect("readings is an array")
+        .expect("reads is an array")
         .iter()
         .map(|r| r["field"].as_str().expect("field is a string"))
         .collect();
@@ -98,7 +94,7 @@ async fn every_field_of_a_device_is_listed_sorted_by_name() {
 
 #[tokio::test]
 async fn a_field_is_addressable_however_it_is_spelled_in_the_url() {
-    let address = spawn_with([reading(DEVICE, "RUNNING_STATE", 1, "2026-07-23T14:00:00Z")]).await;
+    let address = spawn_with([read(DEVICE, "RUNNING_STATE", 1, "2026-07-23T14:00:00Z")]).await;
 
     for spelling in [
         "RUNNING_STATE",
@@ -119,8 +115,8 @@ async fn a_field_is_addressable_however_it_is_spelled_in_the_url() {
 }
 
 #[tokio::test]
-async fn a_field_with_no_reading_is_404_with_the_shared_error_envelope() {
-    let address = spawn_with([reading(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:00Z")]).await;
+async fn a_field_with_no_read_is_404_with_the_shared_error_envelope() {
+    let address = spawn_with([read(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:00Z")]).await;
 
     let (status, body) = get(format!("{address}{SCOPE}/devices/{DEVICE}/fields/SSH_PORT")).await;
 
@@ -146,17 +142,17 @@ async fn an_unknown_device_lists_no_fields_rather_than_404() {
     let (status, body) = get(format!("{address}{SCOPE}/devices/nobody/fields")).await;
 
     assert_eq!(status, 200);
-    assert_eq!(body, serde_json::json!({ "readings": [] }));
+    assert_eq!(body, serde_json::json!({ "reads": [] }));
 }
 
 #[tokio::test]
 async fn history_returns_one_field_oldest_first() {
     let address = spawn_with([
-        reading(DEVICE, "SSH_PORT", 22, "2026-07-23T14:00:00Z"),
+        read(DEVICE, "SSH_PORT", 22, "2026-07-23T14:00:00Z"),
         // A second field polled in between must not appear in the series.
-        reading(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:30Z"),
-        reading(DEVICE, "SSH_PORT", 2222, "2026-07-23T14:01:00Z"),
-        reading(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:02:00Z"),
+        read(DEVICE, "FIRMWARE", 211, "2026-07-23T14:00:30Z"),
+        read(DEVICE, "SSH_PORT", 2222, "2026-07-23T14:01:00Z"),
+        read(DEVICE, "SSH_PORT", 22023, "2026-07-23T14:02:00Z"),
     ])
     .await;
 
@@ -172,11 +168,11 @@ async fn history_returns_one_field_oldest_first() {
 #[tokio::test]
 async fn history_is_scoped_to_the_requested_span() {
     let address = spawn_with([
-        reading(DEVICE, "T", 1, "2026-07-23T13:59:59Z"),
-        reading(DEVICE, "T", 2, "2026-07-23T14:00:00Z"),
-        reading(DEVICE, "T", 3, "2026-07-23T14:30:00Z"),
-        reading(DEVICE, "T", 4, "2026-07-23T15:00:00Z"),
-        reading(DEVICE, "T", 5, "2026-07-23T15:00:01Z"),
+        read(DEVICE, "T", 1, "2026-07-23T13:59:59Z"),
+        read(DEVICE, "T", 2, "2026-07-23T14:00:00Z"),
+        read(DEVICE, "T", 3, "2026-07-23T14:30:00Z"),
+        read(DEVICE, "T", 4, "2026-07-23T15:00:00Z"),
+        read(DEVICE, "T", 5, "2026-07-23T15:00:01Z"),
     ])
     .await;
 
@@ -187,15 +183,14 @@ async fn history_is_scoped_to_the_requested_span() {
     .await;
 
     assert_eq!(status, 200);
-    // Both bounds inclusive; the two straddling readings are out.
+    // Both bounds inclusive; the two straddling reads are out.
     assert_eq!(values(&body), [2, 3, 4]);
 }
 
 #[tokio::test]
 async fn a_limited_history_is_the_most_recent_rows_still_in_order() {
     let address =
-        spawn_with((0..5).map(|i| reading(DEVICE, "T", i, &format!("2026-07-23T14:0{i}:00Z"))))
-            .await;
+        spawn_with((0..5).map(|i| read(DEVICE, "T", i, &format!("2026-07-23T14:0{i}:00Z")))).await;
 
     let (status, body) = get(format!(
         "{address}{SCOPE}/devices/{DEVICE}/fields/T/history?limit=2"
@@ -212,7 +207,7 @@ async fn a_limited_history_is_the_most_recent_rows_still_in_order() {
 async fn an_empty_span_is_an_empty_list_not_a_404() {
     // "Nothing happened in that window" is an answer. A 404 would say the field
     // does not exist, and the same request over a wider span returns rows.
-    let address = spawn_with([reading(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
+    let address = spawn_with([read(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
 
     let (status, body) = get(format!(
         "{address}{SCOPE}/devices/{DEVICE}/fields/T/history\
@@ -221,12 +216,12 @@ async fn an_empty_span_is_an_empty_list_not_a_404() {
     .await;
 
     assert_eq!(status, 200);
-    assert_eq!(body, serde_json::json!({ "readings": [] }));
+    assert_eq!(body, serde_json::json!({ "reads": [] }));
 }
 
 #[tokio::test]
 async fn a_field_query_parameter_contradicting_the_path_is_rejected() {
-    let address = spawn_with([reading(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
+    let address = spawn_with([read(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
 
     let (status, body) = get(format!(
         "{address}{SCOPE}/devices/{DEVICE}/fields/T/history?field=FIRMWARE"
@@ -241,7 +236,7 @@ async fn a_field_query_parameter_contradicting_the_path_is_rejected() {
 
 #[tokio::test]
 async fn a_field_query_parameter_agreeing_with_the_path_is_accepted() {
-    let address = spawn_with([reading(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
+    let address = spawn_with([read(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
 
     // Redundant, but not a contradiction — and normalized the same way, so a
     // lowercase spelling of the same field still agrees.
@@ -255,7 +250,7 @@ async fn a_field_query_parameter_agreeing_with_the_path_is_accepted() {
 
 #[tokio::test]
 async fn a_store_failure_is_a_500_and_not_a_404() {
-    // The distinction a client needs: "there is no such reading" is about the
+    // The distinction a client needs: "there is no such read" is about the
     // request, "the backend is down" is about us, and answering 404 for the
     // second would tell a dashboard to stop asking.
     let address = spawn_app(Arc::new(FailingStore));
@@ -267,14 +262,14 @@ async fn a_store_failure_is_a_500_and_not_a_404() {
 }
 
 #[tokio::test]
-async fn the_readings_routes_are_gets() {
+async fn the_reads_routes_are_gets() {
     let address = spawn_with([]).await;
 
     let response = reqwest::Client::new()
         .post(format!("{address}{SCOPE}/devices/{DEVICE}/fields/FIRMWARE"))
         .send()
         .await
-        .expect("posting to a readings route");
+        .expect("posting to a reads route");
 
     // 405 and an `Allow` header, for the same reason the health check gives one:
     // it names the method that would have worked. A read side that answered 404
@@ -288,9 +283,9 @@ async fn the_readings_routes_are_gets() {
 
 /// The numeric values of a history response, in the order they were served.
 fn values(body: &serde_json::Value) -> Vec<u64> {
-    body["readings"]
+    body["reads"]
         .as_array()
-        .expect("readings is an array")
+        .expect("reads is an array")
         .iter()
         .map(|r| r["value"]["value"].as_u64().expect("a number"))
         .collect()

@@ -48,7 +48,7 @@ reqwest = { workspace = true, features = ["json"] }
 # `rt` (current-thread) is enough: actix runs its workers on their own threads,
 # and the test's runtime only has to poll the client and the server handle.
 tokio = { workspace = true, features = ["macros", "rt"] }
-# The readings tests run the handlers over the *real* in-memory adapter rather
+# The reads tests run the handlers over the *real* in-memory adapter rather
 # than a hand-written double. A double would have to restate the port's ordering
 # and filtering semantics, and a test of a handler over a double that drifted
 # from the adapter would pass while the server was wrong. A dev-dependency, so

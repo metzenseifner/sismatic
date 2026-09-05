@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::Rejection;
+use crate::write::Rejection;
 
 /// A machine-readable classification of a failed request, letting a client
 /// branch on the *kind* of error without string-matching the message. Mirrors
@@ -19,7 +19,7 @@ pub enum ErrorCode {
     BadInstruction,
     /// The device was reached but the exchange failed (HTTP 502).
     DeviceError,
-    /// A generic not-found (e.g. no readings for the given span).
+    /// A generic not-found (e.g. no reads for the given span).
     NotFound,
     /// The request contradicts the device's current write-side state, most
     /// often a metadata write during a recording (HTTP 409).

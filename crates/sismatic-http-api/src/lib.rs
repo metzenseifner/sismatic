@@ -20,7 +20,7 @@
 //!
 //! That also fixes what "the API is up" can possibly mean here. This crate can
 //! observe the store; it cannot observe a device. A route that wanted to report
-//! on a device's reachability would be reporting on the *freshness of a reading*,
+//! on a device's reachability would be reporting on the *freshness of a read*,
 //! which is a question about stored data — see [`health_check()`] for where that
 //! line is drawn.
 //!
@@ -29,7 +29,7 @@
 //! through to the store rather than a symbol this crate was compiled against.
 //! A field added to core's catalog is expanded by the `'*'` sync schedule,
 //! polled, and stored — and then served here with no code change in any crate.
-//! [`handlers::readings`] has the argument for why that is a better property than
+//! [`handlers::reads`] has the argument for why that is a better property than
 //! a route generated per field would be.
 //!
 //! The `/groups` half of each scope asks those same questions of a *device
@@ -37,14 +37,25 @@
 //! was last told to be, so a member that quietly did not start is visible
 //! without comparing five responses by hand.
 //!
+//! On the root of each of those two scopes sits the route that says which names
+//! the rest of the scope accepts: `/v1/reads` lists every queryable field and
+//! `/v1/writes` every command, metadata register and setting. They are the
+//! other side of the `{field}`-as-a-parameter design above — that choice is what
+//! lets a field reach this API with no code change, and what leaves a misspelled
+//! name indistinguishable from an unpolled one. Publishing the catalog answers
+//! that before the mistake rather than after it, and it is the only way for a
+//! caller to learn a synonym like `STREAM_NAME_1`, which no normalization rule
+//! derives. See [`handlers::instructions`], and [`startup::Ports`] for why the
+//! two lists arrive as values rather than as a seventh port.
+//!
 //! Devices and groups share one id namespace, but the two halves of a scope are
 //! not interchangeable: a group id under `/devices` is refused with the
 //! `/groups` URL that answers instead, and a device id under `/groups` likewise.
 //! The alternative — fanning a group id out from the device space — cannot be
 //! made correct for the two status routes, which read an outbox keyed by device
 //! and would report an idle device that does not exist. See
-//! [`handlers::target`] for the whole argument, [`handlers::group_readings`]
-//! for the group-shaped reads, and [`handlers::commands`] for the status routes
+//! [`handlers::target`] for the whole argument, [`handlers::group_reads`]
+//! for the group-shaped reads, and [`handlers::writes`] for the status routes
 //! themselves.
 //!
 //! The last two are the same routes described to a reader: an OpenAPI document
@@ -56,7 +67,7 @@
 //! # Capability, not connection
 //!
 //! [`run`] takes a [`DynReadStore`] — `Arc<dyn ReadStore>` — and never a
-//! [`WriteStore`], so no handler can write a reading no matter what it asks
+//! [`WriteStore`], so no handler can write a read no matter what it asks
 //! for. The store the composition root passes in is the very same object the
 //! sync driver writes through; what differs is the type each side sees it as.
 //! Narrowing at the boundary rather than reviewing call sites is what makes
@@ -64,8 +75,8 @@
 //! convention.
 //!
 //! The write routes extend that arrangement rather than relaxing it. They are
-//! handed `CommandSubmit` and `CommandLog` — append an intent, read what was
-//! appended — and never `CommandDrain`, which is what claims a command and
+//! handed `WriteSubmit` and `WriteLog` — append an intent, read what was
+//! appended — and never `WriteDrain`, which is what claims a write and
 //! settles it. Draining belongs to `sismatic-intent-relay`, and a handler able
 //! to claim could reorder a device's queue. So the capability this crate gained
 //! is exactly one verb, and it is one that *records a request* rather than
@@ -79,6 +90,13 @@
 //! projection. This crate learns *what* is configured and nothing about how to
 //! reach it: `DeviceSummary` has no credential field at all, so there is no
 //! secret here to leak rather than a secret that is carefully not printed.
+//!
+//! The two instruction catalogs on [`Ports`] are the same move once more, minus
+//! the trait. `Query::ALL` is as unnameable here as a `Registry` is, so the root
+//! projects it into DTOs and hands them over — but there is nothing to *ask* a
+//! table the compiler wrote, so it crosses the seam as a value rather than as a
+//! port. What is shared is the property that matters: the list arrives as data,
+//! not as a dependency edge.
 //!
 //! [`DeviceCatalog`]: sismatic_store::DeviceCatalog
 //!

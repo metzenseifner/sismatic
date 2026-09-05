@@ -8,15 +8,15 @@
 //! per-device FIFO order is a correctness requirement: a `SetMetadata` and the
 //! `StartRecording` that follows it have to reach the device in the order they
 //! were submitted, and two tasks on one device would race for the device's
-//! command lock in whatever order the scheduler chose.
+//! exchange lock in whatever order the scheduler chose.
 //!
 //! # Error discipline
 //!
 //! Unlike a poll loop, a relay loop reports every failure at `warn!`. The sync
 //! driver suppresses repeats because its log volume scales with the tick rate,
 //! a number chosen for data freshness. A relay's volume scales with how many
-//! commands an operator submitted, so every failure is a distinct event with a
-//! distinct command id and is worth a line.
+//! writes an operator submitted, so every failure is a distinct event with a
+//! distinct write id and is worth a line.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,13 +24,13 @@ use std::time::Duration;
 use std::collections::BTreeMap;
 
 use chrono::{SecondsFormat, Utc};
-use sismatic_api_types::{BatchId, CommandId, CommandRecord, Intent, ReadingValue, Timestamp};
+use sismatic_api_types::{BatchId, Intent, ReadValue, Timestamp, WriteId, WriteRecord};
 use sismatic_core::devices::device::Device;
 use sismatic_core::devices::group::DeviceGroup;
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_core::protocol::{RecordingState, Value};
-use sismatic_store::outbox::{Claim, CommandDrain, DynCommandDrain, Outcome};
+use sismatic_store::outbox::{Claim, DynWriteDrain, Outcome, WriteDrain};
 use sismatic_sync::dto;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -56,7 +56,7 @@ pub struct RelayHandle {
 
 impl RelayHandle {
     /// Signal every task to stop and wait for in-flight exchanges to finish.
-    /// Cooperative, as `SyncHandle::shutdown` is: a claimed command
+    /// Cooperative, as `SyncHandle::shutdown` is: a claimed write
     /// completes its SIS exchange rather than being abandoned half-settled.
     #[instrument(name = "intent_relay_shutdown", skip(self), fields(tasks = self.tasks.len()))]
     pub async fn shutdown(mut self) {
@@ -66,7 +66,7 @@ impl RelayHandle {
     }
 }
 
-pub fn spawn(registry: Arc<Registry>, drain: DynCommandDrain, cfg: RelayConfig) -> RelayHandle {
+pub fn spawn(registry: Arc<Registry>, drain: DynWriteDrain, cfg: RelayConfig) -> RelayHandle {
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
     for device in registry.devices() {
@@ -86,7 +86,7 @@ pub fn spawn(registry: Arc<Registry>, drain: DynCommandDrain, cfg: RelayConfig) 
 async fn relay_loop(
     device: Arc<Device>,
     registry: Arc<Registry>,
-    drain: DynCommandDrain,
+    drain: DynWriteDrain,
     poll: Duration,
     cancel: CancellationToken,
 ) {
@@ -111,7 +111,7 @@ async fn relay_loop(
 
 /// Claim whatever is next for this device, run it, settle it. Returns whether
 /// there was work, so the caller knows whether to look again immediately.
-async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn CommandDrain) -> bool {
+async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn WriteDrain) -> bool {
     let Ok(Some(claim)) = drain.claim_next(device.id().to_string(), now()).await else {
         return false;
     };
@@ -125,12 +125,13 @@ async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn CommandD
     true
 }
 
-/// One command against one device.
-async fn dispatch_alone(device: &Device, drain: &dyn CommandDrain, record: CommandRecord) {
-    // The one place a stale phase can still do damage: a recording started from
-    // the front panel between admission and now. Re-read the device before a
-    // metadata write, and only before a metadata write — every other intent is
-    // admissible in every phase or is itself a phase change.
+/// One write against one device.
+async fn dispatch_alone(device: &Device, drain: &dyn WriteDrain, record: WriteRecord) {
+    // The one place a stale desired recording state can still do damage: a
+    // recording started from the front panel between admission and now. Re-read
+    // the device before a metadata write, and only before a metadata write —
+    // every other intent is admissible in every desired state or is itself a
+    // change to one.
     if matches!(record.intent, Intent::SetMetadata { .. })
         && let Some(state) = observe_state(device, drain).await
         && state.is_recording()
@@ -168,9 +169,9 @@ async fn dispatch_alone(device: &Device, drain: &dyn CommandDrain, record: Comma
 /// claimed.
 async fn dispatch_batch(
     registry: &Registry,
-    drain: &dyn CommandDrain,
+    drain: &dyn WriteDrain,
     batch: &BatchId,
-    records: Vec<CommandRecord>,
+    records: Vec<WriteRecord>,
 ) {
     let Some(first) = records.first() else {
         return;
@@ -227,7 +228,7 @@ async fn dispatch_batch(
             // members that succeeded *did* run, and reporting them as failed
             // would tell an operator to restart a recorder that is already
             // recording.
-            warn!(%batch, %error, "a group command failed for at least one member");
+            warn!(%batch, %error, "a group write failed for at least one member");
             let failed: BTreeMap<&str, String> = error
                 .failures
                 .iter()
@@ -236,7 +237,7 @@ async fn dispatch_batch(
             settle_all(drain, &records, |record| {
                 match failed.get(record.device.as_str()) {
                     Some(reason) => Outcome::Failed(reason.clone()),
-                    None => Outcome::Succeeded(ReadingValue::Ack(format!(
+                    None => Outcome::Succeeded(ReadValue::Ack(format!(
                         "{} accepted as part of batch {batch}",
                         record.device
                     ))),
@@ -249,9 +250,9 @@ async fn dispatch_batch(
 
 /// Settle every row of a batch, deciding each one's outcome from the record.
 async fn settle_all(
-    drain: &dyn CommandDrain,
-    records: &[CommandRecord],
-    outcome_for: impl Fn(&CommandRecord) -> Outcome,
+    drain: &dyn WriteDrain,
+    records: &[WriteRecord],
+    outcome_for: impl Fn(&WriteRecord) -> Outcome,
 ) {
     for record in records {
         report(drain, record.id.clone(), outcome_for(record)).await;
@@ -260,26 +261,26 @@ async fn settle_all(
 
 /// Record one outcome, warning about the failure and about a failure to record
 /// it — two different problems that would otherwise share a line.
-async fn report(drain: &dyn CommandDrain, id: CommandId, outcome: Outcome) {
+async fn report(drain: &dyn WriteDrain, id: WriteId, outcome: Outcome) {
     if let Outcome::Failed(ref reason) = outcome {
-        warn!(command = %id, reason, "command failed");
+        warn!(write = %id, reason, "write failed");
     }
     if let Err(err) = drain.settle(id, outcome, now()).await {
-        warn!(%err, "could not record the outcome of a command");
+        warn!(%err, "could not record the outcome of a write");
     }
 }
 
-/// Decide what to do with commands a previous process left `InFlight`.
+/// Decide what to do with writes a previous process left `InFlight`.
 ///
 /// Delivery to a device is at-least-once: a process that dies after
-/// [`Device::run`] returns and before `settle` lands leaves a command claimed
+/// [`Device::run`] returns and before `settle` lands leaves a write claimed
 /// with the device already changed. This narrows that to at-most-once *effect*
 /// for the three intents where a repeat is not harmless.
 ///
 /// Metadata and setting writes are replayed, because writing the same value
 /// twice is the same as writing it once. A lifecycle command is *not* replayed
 /// blindly: the device is asked what it is doing, and the answer settles the
-/// command without a second attempt.
+/// write without a second attempt.
 ///
 /// A replay is spelled as [`Outcome::Failed`] rather than a requeue method of
 /// its own. That is not a lie about what happened — the attempt genuinely did
@@ -287,11 +288,11 @@ async fn report(drain: &dyn CommandDrain, id: CommandId, outcome: Outcome) {
 /// `attempts < max_attempts`; the adapter decides". So the adapter puts the
 /// record back at the *front* of the device's queue, which preserves FIFO, and
 /// spends one unit of the retry budget rather than looping across restarts
-/// forever. A command whose budget is exhausted lands in the dead-letter state
+/// forever. A write whose budget is exhausted lands in the dead-letter state
 /// instead, where an operator can see it.
-async fn recover(device: &Device, drain: &dyn CommandDrain) {
+async fn recover(device: &Device, drain: &dyn WriteDrain) {
     let Ok(stranded) = drain.in_flight(device.id().to_string()).await else {
-        warn!("could not read the commands left in flight by a previous process");
+        warn!("could not read the writes left in flight by a previous process");
         return;
     };
     if stranded.is_empty() {
@@ -299,7 +300,7 @@ async fn recover(device: &Device, drain: &dyn CommandDrain) {
     }
     warn!(
         stranded = stranded.len(),
-        "commands were left in flight by a previous process"
+        "writes were left in flight by a previous process"
     );
 
     // One exchange for the whole batch: every decision below reads the same
@@ -319,17 +320,17 @@ async fn recover(device: &Device, drain: &dyn CommandDrain) {
             (_, None) => Outcome::Failed(
                 "left in flight by a previous process and the device did not answer".into(),
             ),
-            // The effect the command asked for exists, so the command is done.
+            // The effect the write asked for exists, so the write is done.
             // `is_recording` is true of `Paused` as well as `Started`: a start
             // that landed and was then paused still landed.
             (Intent::StartRecording, Some(state)) if state.is_recording() => {
-                Outcome::Succeeded(ReadingValue::State(dto::state_to_dto(state)))
+                Outcome::Succeeded(ReadValue::State(dto::state_to_dto(state)))
             }
             (Intent::StopRecording, Some(state @ RecordingState::Stopped)) => {
-                Outcome::Succeeded(ReadingValue::State(dto::state_to_dto(state)))
+                Outcome::Succeeded(ReadValue::State(dto::state_to_dto(state)))
             }
             (Intent::PauseRecording, Some(state @ RecordingState::Paused)) => {
-                Outcome::Succeeded(ReadingValue::State(dto::state_to_dto(state)))
+                Outcome::Succeeded(ReadValue::State(dto::state_to_dto(state)))
             }
             (_, Some(_)) => Outcome::Failed(
                 "left in flight by a previous process; the device state does not show the \
@@ -338,13 +339,14 @@ async fn recover(device: &Device, drain: &dyn CommandDrain) {
             ),
         };
         if let Err(err) = drain.settle(record.id, outcome, now()).await {
-            warn!(%err, "could not settle a command left in flight");
+            warn!(%err, "could not settle a write left in flight");
         }
     }
 }
 
-/// Ask the device what it is doing and fold the answer into the phase.
-async fn observe_state(device: &Device, drain: &dyn CommandDrain) -> Option<RecordingState> {
+/// Ask the device what it is doing and fold the answer into the desired
+/// recording state.
+async fn observe_state(device: &Device, drain: &dyn WriteDrain) -> Option<RecordingState> {
     let value = device.run(&Query::RunningState.instruction()).await.ok()?;
     let state = value.as_state()?;
     let _ = drain

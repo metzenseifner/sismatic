@@ -53,7 +53,7 @@ TOML:
 [defaults]
 port = 22023
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true              # open connections up front instead of on first use
 sis_keepalive_secs = 120  # while warm, probe idle devices so connections stay warm
 eager_retry_secs = 30     # while cold, retry connecting to unreachable eager devices
@@ -70,7 +70,7 @@ host = "10.0.0.8"
 username = "admin"
 password = "extron"
 connect_secs = 10  # per-device override
-command_secs = 8
+exchange_secs = 8
 ```
 
 YAML:

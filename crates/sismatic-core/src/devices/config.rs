@@ -9,7 +9,7 @@
 //! [defaults]
 //! port = 22023       # optional, defaults to 22023
 //! connect_secs = 5   # optional, defaults to 5
-//! command_secs = 3   # optional, defaults to 3
+//! exchange_secs = 3   # optional, defaults to 3
 //! eager = true       # connect to every device at startup and keep it warm
 //! sis_keepalive_secs = 120  # re-issue `Q` this often while warm; 0 disables the SIS keepalive
 //! eager_retry_secs = 30     # while eager but cold, retry connecting this often; 0 disables retry
@@ -27,7 +27,7 @@
 //! username = "admin"
 //! password = "extron"
 //! connect_secs = 20
-//! command_secs = 10
+//! exchange_secs = 10
 //! ```
 //!
 //! An optional list of `[[group]]` tables names one or more of those devices so
@@ -39,7 +39,7 @@
 //! [[group]]
 //! id = "room-5"
 //! devices = ["atrium-101", "annex-far"]
-//! barrier_timeout_secs = 15   # default: the slowest member's connect + command
+//! barrier_timeout_secs = 15   # default: the slowest member's connect + exchange
 //! barrier = "fail"            # "fail" | "dispatch-ready"; default "fail"
 //! ```
 //!
@@ -57,7 +57,7 @@
 //! `json`, or `yaml` feature adds a ready-made loader (`from_toml_str` and
 //! friends, plus an extension-dispatching `load`). `id` and `host` are the only
 //! fields a device must state itself, and `username`/`password` must be resolvable
-//! from the device or the defaults; `port`, `connect_secs`, and `command_secs` fall
+//! from the device or the defaults; `port`, `connect_secs`, and `exchange_secs` fall
 //! back to built-in defaults (22023, 5, 3) when set in neither place.
 
 use std::collections::HashSet;
@@ -98,8 +98,8 @@ const DEFAULT_PORT: u16 = 22023;
 /// Connect timeout applied when neither the device nor `[defaults]` names one.
 const DEFAULT_CONNECT_SECS: u64 = 5;
 
-/// Per-command timeout applied when neither the device nor `[defaults]` names one.
-const DEFAULT_COMMAND_SECS: u64 = 3;
+/// Per-exchange timeout applied when neither the device nor `[defaults]` names one.
+const DEFAULT_EXCHANGE_SECS: u64 = 3;
 
 /// A device credential held as a [`SecretString`]: redacted in `Debug` output and
 /// zeroized on drop, so a password can't leak into logs or linger in memory.
@@ -164,7 +164,7 @@ pub struct DeviceConfig {
     pub username: String,
     pub password: Password,
     pub connect_timeout: Duration,
-    pub command_timeout: Duration,
+    pub exchange_timeout: Duration,
     /// Open this device's connection at startup and keep it warm, rather than
     /// waiting for the first command. The keep-warm loop is [`sis_keepalive`].
     ///
@@ -257,7 +257,7 @@ pub struct GroupConfig {
     /// How long a group command waits for every member to reach the head of its
     /// queue before [`barrier`] decides what to do.
     ///
-    /// Defaults to the slowest member's `connect_secs + command_secs`, rounded
+    /// Defaults to the slowest member's `connect_secs + exchange_secs`, rounded
     /// up to the second — the time one member could legitimately spend on the
     /// command *ahead* of the batched one before it can be at the head. A
     /// shorter default would fire the barrier on a device that is merely busy
@@ -427,7 +427,7 @@ pub fn resolve_config(raw: RawConfig) -> Result<Resolved, ConfigError> {
 }
 
 /// The barrier timeout a group gets when it names none: the slowest member's
-/// `connect_secs + command_secs`, rounded up to the second.
+/// `connect_secs + exchange_secs`, rounded up to the second.
 ///
 /// The *slowest*, not the average, because the barrier is filled by the last
 /// member to arrive — a timeout derived from a faster member would fire on the
@@ -442,7 +442,7 @@ fn default_barrier_timeout(devices: &[DeviceConfig], members: &[String]) -> Dura
     let slowest = members
         .iter()
         .filter_map(|id| devices.iter().find(|d| &d.id == id))
-        .map(|d| d.connect_timeout + d.command_timeout)
+        .map(|d| d.connect_timeout + d.exchange_timeout)
         .max()
         .unwrap_or_default();
 
@@ -470,10 +470,10 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         .connect_secs
         .or(defaults.connect_secs)
         .unwrap_or(DEFAULT_CONNECT_SECS);
-    let command_secs = device
-        .command_secs
-        .or(defaults.command_secs)
-        .unwrap_or(DEFAULT_COMMAND_SECS);
+    let exchange_secs = device
+        .exchange_secs
+        .or(defaults.exchange_secs)
+        .unwrap_or(DEFAULT_EXCHANGE_SECS);
 
     // `eager`, `sis_keepalive_secs`, and `eager_retry_secs` are optional everywhere: a
     // device that sets none behaves exactly as before (lazy connect, no keep-warm loop).
@@ -503,7 +503,7 @@ fn resolve(defaults: &Defaults, device: RawDevice) -> Result<DeviceConfig, Confi
         username,
         password,
         connect_timeout: Duration::from_secs(connect_secs),
-        command_timeout: Duration::from_secs(command_secs),
+        exchange_timeout: Duration::from_secs(exchange_secs),
         eager,
         sis_keepalive,
         eager_retry,
@@ -541,7 +541,7 @@ struct Defaults {
     username: Option<String>,
     password: Option<Password>,
     connect_secs: Option<u64>,
-    command_secs: Option<u64>,
+    exchange_secs: Option<u64>,
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
     eager_retry_secs: Option<u64>,
@@ -558,7 +558,7 @@ struct RawDevice {
     username: Option<String>,
     password: Option<Password>,
     connect_secs: Option<u64>,
-    command_secs: Option<u64>,
+    exchange_secs: Option<u64>,
     eager: Option<bool>,
     sis_keepalive_secs: Option<u64>,
     eager_retry_secs: Option<u64>,
@@ -611,7 +611,7 @@ mod tests {
 [defaults]
 port = 22023
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 
 [[device]]
 id = "atrium-101"
@@ -625,7 +625,7 @@ host = "10.9.40.12"
 username = "admin"
 password = "extron"
 connect_secs = 20
-command_secs = 10
+exchange_secs = 10
 "#;
 
     fn get<'a>(devices: &'a [DeviceConfig], id: &str) -> &'a DeviceConfig {
@@ -646,13 +646,13 @@ command_secs = 10
         assert_eq!(atrium.host, "10.0.0.7");
         assert_eq!(atrium.port, 22023);
         assert_eq!(atrium.connect_timeout, Duration::from_secs(5));
-        assert_eq!(atrium.command_timeout, Duration::from_secs(3));
+        assert_eq!(atrium.exchange_timeout, Duration::from_secs(3));
 
         // Far device overrides only the timeouts, still inherits the port.
         let annex = get(&devices, "annex-far");
         assert_eq!(annex.port, 22023);
         assert_eq!(annex.connect_timeout, Duration::from_secs(20));
-        assert_eq!(annex.command_timeout, Duration::from_secs(10));
+        assert_eq!(annex.exchange_timeout, Duration::from_secs(10));
     }
 
     #[test]
@@ -661,7 +661,7 @@ command_secs = 10
 [defaults]
 port = 22023
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 
 [[device]]
 id = "odd-port"
@@ -681,7 +681,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 
 [[device]]
 id = "bare"
@@ -700,7 +700,7 @@ host = "10.0.0.5"
 port = 22023
 username = "admin"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 
 [[device]]
 id = "no-pass"
@@ -735,7 +735,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 
 [[device]]
 id = "dup"
@@ -761,7 +761,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 hostname = "oops"
 "#;
         assert!(matches!(
@@ -785,14 +785,14 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 "#;
         assert_eq!(from_toml_str(text).unwrap().devices.len(), 1);
     }
 
     #[test]
     fn port_and_timeouts_fall_back_to_built_in_defaults() {
-        // Neither the device nor a `[defaults]` table names port/connect_secs/command_secs.
+        // Neither the device nor a `[defaults]` table names port/connect_secs/exchange_secs.
         let text = r#"
 [[device]]
 id = "sparse"
@@ -803,7 +803,7 @@ password = "extron"
         let device = &from_toml_str(text).unwrap().devices[0];
         assert_eq!(device.port, 22023);
         assert_eq!(device.connect_timeout, Duration::from_secs(5));
-        assert_eq!(device.command_timeout, Duration::from_secs(3));
+        assert_eq!(device.exchange_timeout, Duration::from_secs(3));
     }
 
     #[test]
@@ -824,7 +824,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true
 eager_retry_secs = 45
 
@@ -856,7 +856,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true
 eager_retry_secs = 0
 
@@ -930,7 +930,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true
 sis_keepalive_secs = 90
 
@@ -951,7 +951,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true
 sis_keepalive_secs = 0
 
@@ -972,7 +972,7 @@ port = 22023
 username = "admin"
 password = "extron"
 connect_secs = 5
-command_secs = 3
+exchange_secs = 3
 eager = true
 sis_keepalive_secs = 120
 
@@ -1081,13 +1081,13 @@ password = "extron"
 id = "quick"
 host = "10.0.0.7"
 connect_secs = 1
-command_secs = 1
+exchange_secs = 1
 
 [[device]]
 id = "slow"
 host = "10.0.0.8"
 connect_secs = 20
-command_secs = 5
+exchange_secs = 5
 
 [[group]]
 id = "room-5"
@@ -1195,7 +1195,7 @@ mod resolve_config_tests {
                 username: Some("admin".into()),
                 password: Some("extron".into()),
                 connect_secs: Some(5),
-                command_secs: Some(3),
+                exchange_secs: Some(3),
                 eager: None,
                 sis_keepalive_secs: None,
                 eager_retry_secs: None,
@@ -1208,7 +1208,7 @@ mod resolve_config_tests {
                 username: None,
                 password: None,
                 connect_secs: None,
-                command_secs: None,
+                exchange_secs: None,
                 eager: None,
                 sis_keepalive_secs: None,
                 eager_retry_secs: None,
@@ -1235,7 +1235,7 @@ mod resolve_config_tests {
                     username: Some("admin".into()),
                     password: Some("extron".into()),
                     connect_secs: Some(5),
-                    command_secs: Some(3),
+                    exchange_secs: Some(3),
                     eager: None,
                     sis_keepalive_secs: None,
                     eager_retry_secs: None,
@@ -1248,7 +1248,7 @@ mod resolve_config_tests {
                     username: Some("admin".into()),
                     password: Some("extron".into()),
                     connect_secs: Some(5),
-                    command_secs: Some(3),
+                    exchange_secs: Some(3),
                     eager: None,
                     sis_keepalive_secs: None,
                     eager_retry_secs: None,
@@ -1276,7 +1276,7 @@ mod json_tests {
         let text = r#"
         {
           "defaults": { "port": 22023, "username": "admin", "password": "extron",
-                        "connect_secs": 5, "command_secs": 3 },
+                        "connect_secs": 5, "exchange_secs": 3 },
           "device": [ { "id": "a", "host": "10.0.0.1" } ]
         }"#;
         let devices = from_json_str(text).unwrap().devices;
@@ -1300,7 +1300,7 @@ defaults:
   username: admin
   password: extron
   connect_secs: 5
-  command_secs: 3
+  exchange_secs: 3
 device:
   - id: a
     host: \"10.0.0.1\"

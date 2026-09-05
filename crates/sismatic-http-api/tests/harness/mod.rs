@@ -1,13 +1,14 @@
 //! Wiring shared by the black-box suites.
 //!
-//! [`run`](sismatic_http_api::run) takes six collaborators, and rarely more
+//! [`run`](sismatic_http_api::run) takes eight collaborators, and rarely more
 //! than one of them is what a given suite is actually about. This module
 //! supplies the rest so a test file states the part it cares about and nothing
 //! else — and so the next collaborator is one edit here rather than one per
-//! suite, which is what this already saved when the catalog arrived.
+//! suite, which is what this already saved when the catalog arrived, and again
+//! when the two instruction catalogs did.
 //!
 //! The outbox and the catalog are the real adapters rather than doubles, for
-//! the reason `tests/readings/` already gives for using the real
+//! the reason `tests/reads/` already gives for using the real
 //! `MemoryStore`: a double would have to restate the admission table and the
 //! epoch rules, and a test of a handler over a double that drifted from the
 //! adapter would pass while the server was wrong.
@@ -18,15 +19,18 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sismatic_api_types::{Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Timestamp};
+use sismatic_api_types::{
+    Barrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary, InstructionSummary,
+    Timestamp, WritesCatalog,
+};
 use sismatic_http_api::Stamp;
 use sismatic_store::group::DynGroupState;
-use sismatic_store::outbox::{DynCommandLog, DynCommandSubmit};
+use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit};
 use sismatic_store::status::DeviceStatus;
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox};
 
-/// The instant every submitted command is stamped with. Fixed, because no
+/// The instant every submitted write is stamped with. Fixed, because no
 /// assertion here is about time passing, and a real clock would put an
 /// unpredictable value in a body a test wants to compare whole.
 pub const AT: &str = "2026-08-17T00:00:00.000Z";
@@ -35,7 +39,7 @@ pub const AT: &str = "2026-08-17T00:00:00.000Z";
 ///
 /// The whole reason [`Stamp`] is injected. With a UUID a test can assert that
 /// *an* id came back and that the `Location` header contains *something*; with
-/// a counter it can assert the header names the command the body does, and that
+/// a counter it can assert the header names the write the body does, and that
 /// a second submission got a second id rather than reusing the first.
 pub fn counting_stamp() -> Stamp {
     let issued = AtomicUsize::new(0);
@@ -87,6 +91,49 @@ pub fn device_group(members: &[&str]) -> MemoryCatalog {
     )
 }
 
+/// One entry of a stated instruction catalog.
+pub fn instruction(name: &str, aliases: &[&str], description: &str) -> InstructionSummary {
+    InstructionSummary {
+        name: name.to_owned(),
+        aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+        description: description.to_owned(),
+    }
+}
+
+/// The field catalog the suites run against unless they state their own.
+///
+/// Stated rather than real, and this is the one place that is a *property*
+/// rather than a compromise: the real catalog is `sismatic-core`'s `Query::ALL`,
+/// which this crate may not name — the same seam that makes [`StatedStatus`] a
+/// double. So these suites pin that whatever the composition root hands over is
+/// what the route serves, and `sismatic-server`'s own tests pin that what it
+/// hands over is core's whole catalog. Neither crate can check both halves, and
+/// between them nothing is unchecked.
+///
+/// The entries are real names with a real alias, so a suite asserting a body
+/// reads like the API it is testing.
+pub fn field_catalog() -> FieldCatalog {
+    FieldCatalog {
+        fields: vec![
+            instruction("RUNNING_STATE", &[], "Current recording state."),
+            instruction("STREAM_1_NAME", &["STREAM_NAME_1"], "Name of stream 1."),
+        ],
+    }
+}
+
+/// The write-side catalog the suites run against unless they state their own.
+pub fn writes_catalog() -> WritesCatalog {
+    WritesCatalog {
+        commands: vec![instruction(
+            "STARTRECORDING",
+            &["START"],
+            "Start recording.",
+        )],
+        metadata: vec![instruction("TITLE", &[], "Recording title.")],
+        settings: vec![instruction("TIMEZONE", &[], "Configured timezone.")],
+    }
+}
+
 /// Serve `store` and a fresh outbox on `listener`, detached; hand the outbox
 /// back so a test can inspect the write side directly.
 ///
@@ -115,11 +162,37 @@ pub fn serve_with_status(
     catalog: MemoryCatalog,
     status: StatedStatus,
 ) -> MemoryOutbox {
+    serve_all(
+        listener,
+        store,
+        catalog,
+        status,
+        field_catalog(),
+        writes_catalog(),
+    )
+}
+
+/// The one funnel every entry point above reaches: everything stated, nothing
+/// defaulted.
+///
+/// Only `tests/instructions.rs` calls it directly — it is the suite that is
+/// about the two catalogs, so it is the only one that needs to state them. The
+/// rest reach it through a wrapper that fills in what they are not testing,
+/// which is what keeps a new collaborator to one edit here rather than one per
+/// suite.
+pub fn serve_all(
+    listener: TcpListener,
+    store: DynReadStore,
+    catalog: MemoryCatalog,
+    status: StatedStatus,
+    fields: FieldCatalog,
+    writes: WritesCatalog,
+) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
     let status: DynDeviceStatus = Arc::new(status);
-    let submit: DynCommandSubmit = Arc::new(outbox.clone());
-    let log: DynCommandLog = Arc::new(outbox.clone());
+    let submit: DynWriteSubmit = Arc::new(outbox.clone());
+    let log: DynWriteLog = Arc::new(outbox.clone());
     // The same object again, as the read-only view of what each device group
     // was told — the real adapter rather than a double, for the reason at the
     // top of this file: a double would have to restate when an expectation is
@@ -136,6 +209,8 @@ pub fn serve_with_status(
             submit,
             log,
             group_state,
+            fields,
+            writes,
         },
         counting_stamp(),
     )
@@ -173,6 +248,29 @@ pub fn spawn_with_status(
         .port();
     let outbox = serve_with_status(listener, store, catalog, status);
     (format!("http://127.0.0.1:{port}"), outbox, port)
+}
+
+/// [`spawn`] over stated instruction catalogs, for the suite that is about what
+/// the two scope roots publish.
+pub fn spawn_with_instructions(
+    store: DynReadStore,
+    fields: FieldCatalog,
+    writes: WritesCatalog,
+) -> (String, MemoryOutbox) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("reading the bound address")
+        .port();
+    let outbox = serve_all(
+        listener,
+        store,
+        catalog(),
+        StatedStatus::default(),
+        fields,
+        writes,
+    );
+    (format!("http://127.0.0.1:{port}"), outbox)
 }
 
 /// A [`DeviceStatus`] that reports whatever it was told to.
