@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/metzenseifner/sismatic/compare/v0.4.0...v0.4.1) - 2026-09-05
+
+### Added
+
+- adds support for zero-padded rtmp stream state responses
+- *(core)* Tracing span in controller over instruction exchanges to enssure each TX/RX is associated with ID and readable instruction name
+- *(core)* SisError guards parsers (especially plain_text) from device error codes e.g. E13
+
+### Fixed
+
+- *(core)* rtmp stream state uses plain boolean reply.
+
+### Other
+
+- rename readings>reads, writings>writes
+- command disambiguity by renaming category of commands to writings corresponding to readings.
+
 ## [0.4.0](https://github.com/metzenseifner/sismatic/compare/v0.3.1...v0.4.0) - 2026-08-26
 
 ### Added
