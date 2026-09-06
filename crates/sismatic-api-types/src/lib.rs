@@ -21,7 +21,8 @@
 //! # Layout
 //!
 //! - [`value`] — the decoded value model ([`ReadValue`], [`RecordingState`], …)
-//! - [`mod@read`] — [`Read`], [`Timestamp`], and the history-query DTOs
+//! - [`mod@read`] — [`Read`], [`Timestamp`], the history-query DTOs, and the
+//!   fleet-wide [`FleetReads`] page
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
 //! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
 //!   member-wise response shapes
@@ -79,7 +80,9 @@ pub use group::{
     MemberWrites, SyncState,
 };
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
-pub use read::{Read, ReadList, ReadQuery, TimeSpan, Timestamp};
+pub use read::{
+    DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
+};
 pub use value::{Alarm, MacAddr, ReadValue, RecordingState};
 pub use write::{
     Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,

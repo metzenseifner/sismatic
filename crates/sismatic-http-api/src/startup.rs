@@ -30,7 +30,7 @@ use sismatic_store::{DynReadStore, ReadStore};
 
 use crate::handlers::target::{INVENTORY, READS, WRITES};
 use crate::handlers::{
-    field_catalog, field_history, group_field_history, list_devices, list_fields,
+    field_catalog, field_history, group_field_history, list_devices, list_fields, list_fleet,
     list_group_fields, list_group_writes, list_groups, list_writes, pause_group_recording,
     pause_recording, read_desired_recording_state, read_device, read_field, read_group,
     read_group_desired_recording_state, read_group_field, read_write, set_group_metadata,
@@ -225,6 +225,11 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                                 web::resource("/devices/{id}/fields")
                                     .route(web::get().to(list_fields)),
                             )
+                            // The fleet index, last of the device routes
+                            // because it is the shortest — it is a bare
+                            // `/devices` with everything above it one segment
+                            // longer, so nothing can be tried against it first.
+                            .service(web::resource("/devices").route(web::get().to(list_fleet)))
                             // The group routes, read and write, in the same
                             // longest-path-first order and ahead of the bare
                             // `/groups/{id}` for the same reason `/devices/{id}` comes
