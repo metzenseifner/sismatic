@@ -154,3 +154,7 @@ component whose job is re-testing a device that is down — so the re-dial caden
 stays exactly `eager_retry_secs`, and `cold_backoff_secs` only holds off everyone
 else in between. For a lazy device there is no such task, so the window closing
 is what lets the next instruction re-test the device.
+
+# Additional Help
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/metzenseifner/sismatic)
