@@ -3169,7 +3169,7 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sismatic-api-types"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3189,7 +3189,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-http-api"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "actix-web",
  "async-trait",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-intent-relay"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "sismatic-api-types",
@@ -3242,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-python-sdk"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "pyo3",
  "pyo3-log",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-store"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "sismatic-api-types",
@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-store-memory"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3301,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "sismatic-sync"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "chrono",
