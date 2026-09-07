@@ -17,7 +17,7 @@ use crate::units;
 /// Default devices config path relative to the configuration file.
 const DEFAULT_DEVICES_CONFIG_PATH: &str = "devices.toml";
 const DEFAULT_INTERVAL_SECS: u64 = 30;
-const DEFAULT_FIELDS: &[&str] = &["RUNNING_STATE"];
+const DEFAULT_FIELDS: &[&str] = &["*"];
 /// The `sync.fields` entry standing for every field core can query. Canonical
 /// query names are `UPPER_SNAKE`, so this can never collide with one.
 const ALL_FIELDS: &str = "*";
@@ -760,6 +760,28 @@ mod tests {
         )
     }
 
+    /// The field list a config that names none should resolve to: `DEFAULT_FIELDS`
+    /// is the wildcard, so that is core's whole catalog at one interval, in
+    /// catalog order.
+    ///
+    /// Spelled from [`Query::ALL`] rather than enumerated, so a query added to
+    /// core is not a test edit here — the catalog has one source of truth and the
+    /// tests read it. It is deliberately *not* run through [`resolve_fields`]:
+    /// that is the code under test, and a test that calls it would agree with it
+    /// however wrong it got. What is restated here is only the claim "everything,
+    /// at one interval", which changing `DEFAULT_FIELDS` should cost a line to
+    /// update. How the wildcard expands, orders, and yields to overrides is the
+    /// subject of the wildcard tests below, not of this helper.
+    fn built_in_fields(interval: Option<Duration>) -> Vec<FieldConfig> {
+        Query::ALL
+            .iter()
+            .map(|q| FieldConfig {
+                name: q.name().to_owned(),
+                interval,
+            })
+            .collect()
+    }
+
     /// `(name, secs)` pairs — `None` being *never* — the shape assertions about
     /// a schedule read best in.
     fn schedule(cfg: &ServerConfig) -> Vec<(&str, Option<u64>)> {
@@ -1084,10 +1106,7 @@ mod tests {
                 },
                 sync: SyncConfig {
                     default_interval: Some(Duration::from_secs(DEFAULT_INTERVAL_SECS)),
-                    fields: vec![FieldConfig {
-                        name: "RUNNING_STATE".to_owned(),
-                        interval: Some(Duration::from_secs(DEFAULT_INTERVAL_SECS)),
-                    }],
+                    fields: built_in_fields(Some(Duration::from_secs(DEFAULT_INTERVAL_SECS))),
                 },
                 store: StoreConfig {
                     retain: Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS)),
@@ -1109,7 +1128,10 @@ mod tests {
         let cfg = resolve("", "sync:\n  interval_secs: 1\n");
         assert_eq!(cfg.sync.default_interval, Some(Duration::from_secs(1)));
         // ...and the built-in field list picks up the interval that was named.
-        assert_eq!(schedule(&cfg), [("RUNNING_STATE", Some(1))]);
+        assert_eq!(
+            cfg.sync.fields,
+            built_in_fields(Some(Duration::from_secs(1)))
+        );
     }
 
     // ---- the intent relay section ----------------------------------------
