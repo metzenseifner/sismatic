@@ -4,14 +4,19 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use config::ConfigError;
 use serde::Deserialize;
 use serde::de::{self, MapAccess, value::MapAccessDeserializer};
+use sismatic_api_types::config::{
+    ConfigDocument, ConfigPatch, FieldSettings, HttpSettings, RelayPatch, RelaySettings,
+    StorePatch, StoreSettings, SyncPatch, SyncSettings,
+};
 use sismatic_core::protocol::instructions::query::Query;
 
-use crate::lifecycle::Retention;
+use crate::lifecycle::{FOREVER, Retention};
 use crate::units;
 
 /// Default devices config path relative to the configuration file.
@@ -228,7 +233,9 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
         devices_config_path,
         intent_relay: IntentRelayConfig {
             poll: handle_poll(intent_relay.poll_ms.unwrap_or(DEFAULT_INTENT_RELAY_POLL_MS)),
-            max_attempts: intent_relay.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS),
+            max_attempts: effective_attempts(
+                intent_relay.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS),
+            ),
         },
         sync: SyncConfig {
             default_interval,
@@ -287,6 +294,18 @@ fn handle_poll(ms: u64) -> Duration {
     Duration::from_millis(ms.max(1))
 }
 
+/// Decode `intent_relay.max_attempts`, which has no sentinel and one floor.
+///
+/// `0` reads as `1`, because "try it zero times" is not a thing a caller can
+/// mean and the outbox reads it that way regardless — see
+/// `MemoryOutbox::with_max_attempts`. Resolved *here* rather than left to the
+/// adapter so that the figure the config reports is the figure in force:
+/// `GET /v1/config` answers from this, and a document saying `0` beside an
+/// outbox doing `1` is a config that lies about the running system.
+fn effective_attempts(attempts: u32) -> u32 {
+    attempts.max(1)
+}
+
 /// Decode the `interval_secs` sentinel: `0` is *never*, anything else is a
 /// delay. The one place in the server that knows `0` is special — mirrors
 /// core's `sis_keepalive_secs` / `eager_retry_secs`.
@@ -304,6 +323,27 @@ fn handle_interval(secs: u64) -> Option<Duration> {
 /// claim. Doing it in one pass would make the result depend on where in the list
 /// the `"*"` happens to sit.
 fn resolve_fields(raw: Vec<RawField>, default_interval: Option<Duration>) -> Vec<FieldConfig> {
+    // Pass 0: every name in the spelling the rest of the system uses. `core`
+    // accepts a field case-insensitively, reads `-` as `_`, and carries genuine
+    // synonyms — `STREAM_NAME_1` for `STREAM_1_NAME` — so without this the
+    // duplicate-suppression below compares two spellings of one field and finds
+    // them different, and a config naming both polls one register twice on every
+    // device. It is also what makes the schedule `GET /v1/config` reports the
+    // one `GET /v1/reads` publishes.
+    //
+    // A name that resolves to nothing is left exactly as written: this function
+    // is infallible and has no way to report, and the poll loop that refuses to
+    // start for it says so naming the text the operator actually typed. The
+    // *API* path does report it — see `patched_sync` — because there is someone
+    // waiting for that answer.
+    let raw: Vec<RawField> = raw
+        .into_iter()
+        .map(|field| RawField {
+            name: canonical_name(&field.name),
+            interval_secs: field.interval_secs,
+        })
+        .collect();
+
     // Pass 1: every explicitly-named field, last mentioned wins.
     let mut explicit: Vec<(&str, Option<Duration>)> = Vec::new();
     // collect all explicitly-named fields
@@ -357,6 +397,19 @@ fn resolve_fields(raw: Vec<RawField>, default_interval: Option<Duration>) -> Vec
         }
     }
     fields
+}
+
+/// The canonical spelling of a field name, or the name unchanged if it is not
+/// one core can query.
+///
+/// The wildcard is not a field and is left alone, which is what keeps
+/// [`RawField::is_wildcard`] working on the way out of [`resolve_fields`]'s
+/// first pass.
+fn canonical_name(name: &str) -> String {
+    if name == ALL_FIELDS {
+        return name.to_owned();
+    }
+    Query::from_str(name).map_or_else(|_| name.to_owned(), |query| query.name().to_owned())
 }
 
 /// The config file exactly as written: every field optional, so a config may
@@ -717,6 +770,341 @@ pub struct StoreConfig {
 pub struct HttpConfig {
     pub host: String,
     pub port: u16,
+}
+
+// ---- the live surface ----------------------------------------------------
+//
+// Everything above resolves a config *once*, from a document. What follows is
+// the same question asked again while the process runs: what is it running
+// under, and what would it be running under if this patch were applied. Both
+// are pure functions of their arguments, as `resolve_config` is — the channels
+// and the store handles that make an answer take effect live in `dynamic`, and
+// nothing here can perform anything.
+//
+// They live in this module rather than beside those channels because of what
+// they have to reuse. A patched schedule is folded by `resolve_fields`, the very
+// function the file goes through, so `'*'` expands the same way and a per-field
+// override beats an inherited interval the same way. A patched duration is read
+// by the same `Deserialize` impls, so `retain: "30d"` over HTTP is the text
+// `retain: 30d` in the file, error messages included. The alternative is a
+// second resolver that agrees with this one by inspection.
+
+/// Where the running config came from, so it can be read again.
+///
+/// The composition root holds one of these for the life of the process, and
+/// `POST /v1/config/reload` is [`load`](Self::load) called a second time. That
+/// is the whole of the reload story, and the reason it is a *type* rather than a
+/// path passed around: a reload that read the file but forgot the environment,
+/// or the flags, would resolve to something the process never started with and
+/// would look for all the world like a working reload.
+#[derive(Debug, Clone)]
+pub struct ConfigSource {
+    /// The document to read, as the three-layer fallback in `main` settled it.
+    pub path: PathBuf,
+    /// The layer neither the file nor the environment can express: what the
+    /// operator typed. Kept because a reload has to fold it in again — a
+    /// deployment started with `--port 9999` would otherwise see the file's port
+    /// as a change on every reload, and be refused forever.
+    pub overrides: Overrides,
+}
+
+impl ConfigSource {
+    /// Read the file, merge the environment over it, and fold the flags in
+    /// above both.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the `config` crate makes of a missing or malformed document,
+    /// including the unknown-key errors `deny_unknown_fields` produces.
+    pub fn load(&self) -> Result<ServerConfig, ConfigError> {
+        self.load_with_env(env_source())
+    }
+
+    /// [`load`](Self::load) against an explicit environment, for the reason
+    /// [`get_configuration_with_env`] exists: `std::env::set_var` is `unsafe`
+    /// and shared by every test on the process.
+    ///
+    /// # Errors
+    ///
+    /// As [`load`](Self::load).
+    pub fn load_with_env(&self, env: EnvSource) -> Result<ServerConfig, ConfigError> {
+        Ok(get_configuration_with_env(&self.path, env)?.with_overrides(self.overrides.clone()))
+    }
+}
+
+/// Why a patch was not applied.
+///
+/// Two cases, and they are two different people's problems — which is why the
+/// caller gets a status apiece rather than one string. See
+/// [`sismatic_http_api::ConfigRefusal`], the port's spelling of the same
+/// distinction, plus the third case only a reload can produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchError {
+    /// A value that could not be read, named with the key it was written under.
+    Malformed(String),
+    /// A setting that cannot change while the process runs.
+    Fixed(String),
+}
+
+impl fmt::Display for PatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PatchError::Malformed(msg) | PatchError::Fixed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for PatchError {}
+
+/// A resolved config as the API serves it.
+///
+/// Every value rendered in the vocabulary the config file uses, which is what
+/// makes the result a valid patch: `retain` comes back as `30days` and goes back
+/// in as `30days`, and [`patched`] reads it with the same `Deserialize` impl the
+/// file goes through. `settings_round_trip` pins that.
+#[must_use]
+pub fn document(cfg: &ServerConfig) -> ConfigDocument {
+    ConfigDocument {
+        sync: SyncSettings {
+            interval_secs: secs(cfg.sync.default_interval),
+            fields: cfg
+                .sync
+                .fields
+                .iter()
+                .map(|field| FieldSettings {
+                    name: field.name.clone(),
+                    // Always `Some` in a document: an absent interval means
+                    // *inherit* on the way back in, and a document that left it
+                    // out would re-inherit rather than restate. Never is `0`.
+                    interval_secs: Some(secs(field.interval)),
+                })
+                .collect(),
+        },
+        store: StoreSettings {
+            retain: render_retention(&cfg.store.retain),
+            cleanup_interval: cfg.store.cleanup.map_or_else(
+                || NEVER.to_owned(),
+                |every| humantime::format_duration(every).to_string(),
+            ),
+            max_memory: cfg
+                .store
+                .max_memory
+                .map_or_else(|| UNLIMITED.to_owned(), units::format_bytes),
+        },
+        intent_relay: RelaySettings {
+            // Saturating rather than wrapping, and unreachable either way: a
+            // poll delay is a `u64` of milliseconds on the way in, so the only
+            // way past `u64::MAX` here is a value that could not have been
+            // configured.
+            poll_ms: u64::try_from(cfg.intent_relay.poll.as_millis()).unwrap_or(u64::MAX),
+            max_attempts: cfg.intent_relay.max_attempts,
+        },
+        http: HttpSettings {
+            host: cfg.http.host.clone(),
+            port: cfg.http.port,
+        },
+        devices_config_path: cfg.devices_config_path.display().to_string(),
+    }
+}
+
+/// The whole of the document's "off" convention in one function: `0` seconds is
+/// *never*, and never is `0` seconds.
+fn secs(interval: Option<Duration>) -> u64 {
+    interval.map_or(0, |every| every.as_secs())
+}
+
+/// Render a retention as text that reads back as itself.
+///
+/// Deliberately not [`Retention`]'s [`Display`](fmt::Display), which writes a
+/// fixed floor as `since 2026-01-01T00:00:00.000Z` — prose for a startup log,
+/// and not something the parser accepts. This is the wire, where the only
+/// property that matters is that what comes out goes back in.
+fn render_retention(retain: &Retention) -> String {
+    match retain {
+        Retention::Forever => FOREVER.to_owned(),
+        Retention::Age(age) => humantime::format_duration(*age).to_string(),
+        Retention::Since(floor) => floor.0.clone(),
+    }
+}
+
+/// Fold `patch` onto `current` and return what the settings would become.
+///
+/// Pure and total: it reads no file, touches no channel and starts nothing. That
+/// is what makes the request atomic — [`dynamic`](crate::dynamic) calls this
+/// first and publishes only if it returns `Ok`, so a patch with one bad duration
+/// among five good ones changes none of the five.
+///
+/// # Errors
+///
+/// [`PatchError::Malformed`] for a value that cannot be read, naming the key and
+/// the spellings that would have worked; [`PatchError::Fixed`] for a setting
+/// that cannot change while the process runs, named with what it is and what was
+/// asked for.
+pub fn patched(current: &ServerConfig, patch: &ConfigPatch) -> Result<ServerConfig, PatchError> {
+    // The fixed settings first, so a patch that names one is refused before
+    // anything else in it is read. Naming one at the value it already has is not
+    // a change — which is what lets a whole document be sent back unaltered, and
+    // what lets a reloaded file that only moved a poll interval through.
+    if let Some(http) = &patch.http
+        && (http.host != current.http.host || http.port != current.http.port)
+    {
+        return Err(PatchError::Fixed(format!(
+            "http is fixed until this process restarts: it is bound to {}:{} and \
+             cannot be moved to {}:{} without rebinding the listener, which would \
+             drop every connection in flight",
+            current.http.host, current.http.port, http.host, http.port
+        )));
+    }
+
+    let devices_config_path = current.devices_config_path.display().to_string();
+    if let Some(named) = &patch.devices_config_path
+        && *named != devices_config_path
+    {
+        return Err(PatchError::Fixed(format!(
+            "devices_config_path is fixed until this process restarts: the device \
+             registry — and its open SSH sessions — was built from \
+             '{devices_config_path}', and pointing it at '{named}' means building \
+             another one"
+        )));
+    }
+
+    Ok(ServerConfig {
+        devices_config_path: current.devices_config_path.clone(),
+        intent_relay: patched_relay(&current.intent_relay, patch.intent_relay.as_ref()),
+        sync: patched_sync(&current.sync, patch.sync.as_ref())?,
+        store: patched_store(&current.store, patch.store.as_ref())?,
+        http: current.http.clone(),
+    })
+}
+
+/// The relay half of [`patched`]. Infallible — both keys are already numbers by
+/// the time serde has parsed the body, so there is nothing here to read wrong.
+fn patched_relay(current: &IntentRelayConfig, patch: Option<&RelayPatch>) -> IntentRelayConfig {
+    let Some(patch) = patch else {
+        return current.clone();
+    };
+    IntentRelayConfig {
+        poll: patch.poll_ms.map_or(current.poll, handle_poll),
+        max_attempts: patch
+            .max_attempts
+            .map_or(current.max_attempts, effective_attempts),
+    }
+}
+
+/// The sync half of [`patched`]: the three ways a schedule patch composes.
+///
+/// See [`SyncPatch`] for the rules and why the middle one is worth having. What
+/// is worth noting *here* is that all three end at [`resolve_fields`], so a
+/// patched schedule and a parsed one are folded by one function — wildcard,
+/// duplicate handling, inheritance and all.
+fn patched_sync(current: &SyncConfig, patch: Option<&SyncPatch>) -> Result<SyncConfig, PatchError> {
+    // A section naming neither key is a section that says nothing, and it is
+    // what `{"sync":{}}` is. Kept distinct from an absent section only so the
+    // clone below is the one obvious answer to both.
+    let Some(patch) = patch.filter(|p| p.interval_secs.is_some() || p.fields.is_some()) else {
+        return Ok(current.clone());
+    };
+
+    let default_interval = patch
+        .interval_secs
+        .map_or(current.default_interval, handle_interval);
+
+    let raw = match &patch.fields {
+        // The schedule as stated. An entry naming no interval inherits, exactly
+        // as in the file.
+        Some(fields) => fields
+            .iter()
+            .map(|field| {
+                known(&field.name)?;
+                Ok(RawField {
+                    name: field.name.clone(),
+                    interval_secs: field.interval_secs,
+                })
+            })
+            .collect::<Result<Vec<_>, PatchError>>()?,
+        // `interval_secs` alone: every field currently scheduled, re-timed to it.
+        // `RawField::named` is the inheriting spelling, so the new default
+        // reaches all of them.
+        None => current
+            .fields
+            .iter()
+            .map(|field| RawField::named(&field.name))
+            .collect(),
+    };
+
+    Ok(SyncConfig {
+        default_interval,
+        fields: resolve_fields(raw, default_interval),
+    })
+}
+
+/// Refuse a field name that is not one core can query.
+///
+/// The one validation the file does not do, and the asymmetry is deliberate: a
+/// misspelled field in a config file is caught at the next startup by a poll
+/// loop that logs "unknown query field" and does not start, which is a line in a
+/// log nobody is reading — but it is also the only answer available, since
+/// [`resolve_config`] is infallible and a server that refused to start over one
+/// typo would be worse. A misspelled field in a *request* has someone waiting
+/// for the answer, so the answer is a refusal rather than a `200` and a schedule
+/// with a hole in it.
+///
+/// The name itself is not rewritten here. [`resolve_fields`] canonicalizes every
+/// spelling on both paths, so an accepted synonym comes back as the name
+/// `GET /v1/reads` publishes without this function having a second opinion.
+fn known(name: &str) -> Result<(), PatchError> {
+    if name == ALL_FIELDS || Query::from_str(name).is_ok() {
+        return Ok(());
+    }
+    Err(PatchError::Malformed(format!(
+        "sync.fields: '{name}' is not a field this server can query; \
+         GET /v1/reads lists every name that is, and '*' stands for all of them"
+    )))
+}
+
+/// The store half of [`patched`]. Every value goes through the very
+/// `Deserialize` impl the config file goes through — see [`setting`].
+fn patched_store(
+    current: &StoreConfig,
+    patch: Option<&StorePatch>,
+) -> Result<StoreConfig, PatchError> {
+    let Some(patch) = patch else {
+        return Ok(current.clone());
+    };
+
+    Ok(StoreConfig {
+        retain: match &patch.retain {
+            Some(text) => setting::<Retention>(text, "store.retain")?,
+            None => current.retain.clone(),
+        },
+        cleanup: match &patch.cleanup_interval {
+            Some(text) => handle_cleanup(setting::<RawDuration>(text, "store.cleanup_interval")?.0),
+            None => current.cleanup,
+        },
+        max_memory: match &patch.max_memory {
+            Some(text) => handle_budget(setting::<RawBytes>(text, "store.max_memory")?.0),
+            None => current.max_memory,
+        },
+    })
+}
+
+/// Read one setting out of the text a request wrote it as, using the type's own
+/// `Deserialize`.
+///
+/// The seam that keeps the two ways into this server saying the same thing.
+/// `retain: 30d` in a file and `"retain": "30d"` in a `PATCH` body are the same
+/// characters reaching the same visitor, so a spelling accepted in one is
+/// accepted in the other, `forever` and `never` and `unlimited` included — and
+/// the message a bad one produces is the message the config file would have
+/// produced, which is the one already written to be read by an operator.
+///
+/// A `StrDeserializer` rather than a `serde_json::Value`: the visitors dispatch
+/// on the input's shape, and everything here arrives as a string. The numeric
+/// arms they carry for the environment's sake are unreachable from this path and
+/// unnecessary — `"3600"` is a string that `units::duration` parses as seconds.
+fn setting<T: serde::de::DeserializeOwned>(text: &str, key: &str) -> Result<T, PatchError> {
+    let deserializer = de::value::StrDeserializer::<de::value::Error>::new(text);
+    T::deserialize(deserializer).map_err(|err| PatchError::Malformed(format!("{key}: {err}")))
 }
 
 #[cfg(test)]
@@ -1770,6 +2158,428 @@ mod tests {
         assert!(
             err.to_string().contains("devices_config_pth"),
             "expected the unknown key in the error, got: {err}"
+        );
+    }
+
+    // ---- the live surface -------------------------------------------------
+
+    /// Fold `json` onto the config `text` resolves to — the shape every patch
+    /// assertion below reads in, and the one that keeps them stating a request
+    /// the way a caller would send it rather than a struct literal.
+    fn patch(text: &str, json: &str) -> Result<ServerConfig, PatchError> {
+        let current = resolve("/etc/sismatic", text);
+        let patch: ConfigPatch = serde_json::from_str(json).expect("a well-formed patch");
+        patched(&current, &patch)
+    }
+
+    fn applied(text: &str, json: &str) -> ServerConfig {
+        patch(text, json).expect("the patch should have applied")
+    }
+
+    /// The round trip the whole scope rests on: what `GET /v1/config` returns is
+    /// a patch, and applying it changes nothing.
+    ///
+    /// Stated over the *resolved config* rather than over the JSON, because that
+    /// is the property that matters — a document that deserialized as a patch
+    /// and then moved a setting would be worse than one that failed to
+    /// deserialize at all. It is also the path a reload takes in production:
+    /// `dynamic::LiveSettings::reload` folds the file on as
+    /// `document(&loaded).as_patch()`, so a rendering that did not read back as
+    /// itself would make every reload a change.
+    #[test]
+    fn a_document_applied_to_its_own_config_changes_nothing() {
+        // Every form each setting has, since the rendering is per-form: a
+        // rolling window and a fixed floor and `forever`, a disabled field and
+        // an enabled one, a byte budget that is a whole unit and one that is
+        // not.
+        for text in [
+            "{}",
+            "sync:\n  interval_secs: 300\n  fields:\n    - '*'\n    - name: RUNNING_STATE\n      interval_secs: 5\n    - name: MAC_ADDRESS\n      interval_secs: 0\n",
+            "store:\n  retain: forever\n  cleanup_interval: never\n  max_memory: unlimited\n",
+            "store:\n  retain: '2026-01-01T00:00:00Z'\n  cleanup_interval: 500ms\n  max_memory: 1234567\n",
+            "store:\n  retain: 1w 3d 12h\n  max_memory: 2GiB\n",
+            "intent_relay:\n  poll_ms: 1\n  max_attempts: 1\n",
+            "sync:\n  interval_secs: 0\n  fields: [FIRMWARE]\n",
+        ] {
+            let current = resolve("/etc/sismatic", text);
+            let round_tripped = patched(&current, &document(&current).as_patch())
+                .unwrap_or_else(|err| panic!("the document was refused: {err}\nfor: {text}"));
+
+            assert_eq!(round_tripped, current, "for: {text}");
+        }
+    }
+
+    /// ...and the same document over the wire, since a value that survives the
+    /// types and not `serde_json` is a value that survives nothing.
+    #[test]
+    fn a_document_survives_the_wire_on_the_way_back_in() {
+        let current = resolve(
+            "/etc/sismatic",
+            "store:\n  retain: 30d\n  max_memory: 512MiB\n",
+        );
+
+        let json = serde_json::to_string(&document(&current)).expect("serializing");
+        let patch: ConfigPatch = serde_json::from_str(&json).expect("the document is a patch");
+
+        assert_eq!(patched(&current, &patch).expect("applying"), current);
+    }
+
+    #[test]
+    fn an_empty_patch_changes_nothing() {
+        let current = resolve("/etc/sismatic", "sync:\n  interval_secs: 5\n");
+        assert_eq!(patched(&current, &ConfigPatch::default()).unwrap(), current);
+    }
+
+    /// A patch touches what it names and nothing else — the property that makes
+    /// a read-modify-write cycle safe to script.
+    #[test]
+    fn a_patch_leaves_every_setting_it_does_not_name() {
+        let text = "sync:\n  interval_secs: 5\n  fields: [FIRMWARE]\nstore:\n  retain: 30d\n";
+        let before = resolve("/etc/sismatic", text);
+
+        let after = applied(text, r#"{"intent_relay":{"poll_ms":50}}"#);
+
+        assert_eq!(after.intent_relay.poll, Duration::from_millis(50));
+        assert_eq!(after.sync, before.sync);
+        assert_eq!(after.store, before.store);
+        assert_eq!(after.http, before.http);
+    }
+
+    // ---- the schedule, and its three ways of composing ---------------------
+
+    #[test]
+    fn a_stated_field_list_replaces_the_schedule() {
+        let after = applied(
+            "sync:\n  interval_secs: 30\n  fields: [FIRMWARE]\n",
+            r#"{"sync":{"fields":[{"name":"RUNNING_STATE","interval_secs":5}]}}"#,
+        );
+
+        assert_eq!(schedule(&after), [("RUNNING_STATE", Some(5))]);
+    }
+
+    #[test]
+    fn a_stated_field_without_an_interval_inherits() {
+        // The file's rule, over the wire: `interval_secs` absent means inherit,
+        // and what it inherits is the default this same patch names.
+        let after = applied(
+            "sync:\n  interval_secs: 30\n  fields: [FIRMWARE]\n",
+            r#"{"sync":{"interval_secs":60,"fields":[{"name":"FIRMWARE"}]}}"#,
+        );
+
+        assert_eq!(schedule(&after), [("FIRMWARE", Some(60))]);
+    }
+
+    #[test]
+    fn an_interval_alone_re_times_every_field_that_is_scheduled() {
+        // The middle case, and the reason `interval_secs` is worth having on its
+        // own: "poll everything every sixty seconds" is one key rather than a
+        // restatement of the whole list.
+        let after = applied(
+            "sync:\n  interval_secs: 30\n  fields:\n    - RUNNING_STATE\n    - name: FIRMWARE\n      interval_secs: 3600\n",
+            r#"{"sync":{"interval_secs":60}}"#,
+        );
+
+        assert_eq!(
+            schedule(&after),
+            [("RUNNING_STATE", Some(60)), ("FIRMWARE", Some(60))],
+            "an interval named alone re-times the pinned fields too"
+        );
+    }
+
+    #[test]
+    fn a_sync_section_naming_neither_key_changes_nothing() {
+        let text = "sync:\n  interval_secs: 30\n  fields: [FIRMWARE]\n";
+        let before = resolve("/etc/sismatic", text);
+        assert_eq!(applied(text, r#"{"sync":{}}"#).sync, before.sync);
+    }
+
+    #[test]
+    fn a_zero_interval_switches_a_field_off_over_the_wire_too() {
+        let after = applied(
+            "sync:\n  fields: [FIRMWARE]\n",
+            r#"{"sync":{"fields":[{"name":"FIRMWARE","interval_secs":0}]}}"#,
+        );
+
+        assert_eq!(schedule(&after), [("FIRMWARE", None)]);
+    }
+
+    #[test]
+    fn the_wildcard_works_over_the_wire_exactly_as_it_does_in_the_file() {
+        // The whole reason a patched schedule goes through `resolve_fields`: one
+        // expansion, one set of precedence rules, two ways in.
+        let after = applied(
+            "sync:\n  fields: [FIRMWARE]\n",
+            r#"{"sync":{"interval_secs":300,"fields":[{"name":"*"},{"name":"RUNNING_STATE","interval_secs":5}]}}"#,
+        );
+
+        assert_eq!(after.sync.fields.len(), Query::ALL.len());
+        assert_eq!(interval_of(&after, "RUNNING_STATE"), Some(Some(5)));
+        assert_eq!(interval_of(&after, "FIRMWARE"), Some(Some(300)));
+    }
+
+    #[test]
+    fn a_field_may_be_named_by_a_synonym_and_comes_back_canonical() {
+        // `core` accepts these spellings, so refusing them here would make the
+        // API stricter than the thing it configures. What comes back is the name
+        // `GET /v1/reads` publishes, which is what keeps one field from
+        // occupying two entries of one schedule.
+        let after = applied(
+            "sync:\n  fields: [FIRMWARE]\n",
+            r#"{"sync":{"fields":[{"name":"running-state","interval_secs":5},{"name":"RUNNING_STATE","interval_secs":7}]}}"#,
+        );
+
+        assert_eq!(
+            schedule(&after),
+            [("RUNNING_STATE", Some(7))],
+            "two spellings of one field are one field, and the last wins"
+        );
+    }
+
+    #[test]
+    fn a_field_that_is_not_in_the_catalog_is_refused() {
+        // The one validation the config file does not do. Over the wire there is
+        // someone waiting for the answer, so a typo is a refusal rather than a
+        // `200` and a schedule with a hole in it.
+        let err = patch(
+            "{}",
+            r#"{"sync":{"fields":[{"name":"FIRMWAR","interval_secs":5}]}}"#,
+        )
+        .expect_err("an unknown field should be refused");
+
+        assert!(
+            matches!(err, PatchError::Malformed(ref msg)
+                if msg.contains("FIRMWAR") && msg.contains("/v1/reads")),
+            "the refusal should name the text and where the names are listed, got: {err}"
+        );
+    }
+
+    // ---- the store section over the wire -----------------------------------
+
+    #[test]
+    fn the_store_reads_the_same_spellings_the_file_does() {
+        let after = applied(
+            "{}",
+            r#"{"store":{"retain":"30d","cleanup_interval":"1h","max_memory":"512MiB"}}"#,
+        );
+
+        assert_eq!(
+            after.store,
+            StoreConfig {
+                retain: Retention::Age(Duration::from_secs(30 * 86_400)),
+                cleanup: Some(Duration::from_secs(3_600)),
+                max_memory: Some(512 * 1024 * 1024),
+            }
+        );
+    }
+
+    #[test]
+    fn the_words_that_switch_a_bound_off_work_over_the_wire() {
+        let after = applied(
+            "{}",
+            r#"{"store":{"retain":"forever","cleanup_interval":"never","max_memory":"unlimited"}}"#,
+        );
+
+        assert_eq!(after.store.retain, Retention::Forever);
+        assert_eq!(after.store.cleanup, None);
+        assert_eq!(after.store.max_memory, None);
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_read_names_its_key_and_its_text() {
+        // The message is the config file's own — the same visitor produced it —
+        // so an operator gets the spellings that would have worked rather than a
+        // serde type error.
+        let err = patch("{}", r#"{"store":{"retain":"5 fortnights"}}"#)
+            .expect_err("an unreadable duration should be refused");
+
+        assert!(
+            matches!(err, PatchError::Malformed(ref msg)
+                if msg.contains("store.retain") && msg.contains("fortnights")),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_ambiguous_zero_retention_is_refused_over_the_wire_too() {
+        // `[store]`'s one break with the document's `0`-means-off rule, and it
+        // has to hold on both paths: read as "off" it keeps everything, read
+        // literally it keeps nothing, and the two are opposite.
+        let err = patch("{}", r#"{"store":{"retain":"0"}}"#)
+            .expect_err("a zero window should be refused");
+
+        assert!(err.to_string().contains("forever"), "got: {err}");
+    }
+
+    // ---- the relay section -------------------------------------------------
+
+    #[test]
+    fn the_relay_reads_both_of_its_keys() {
+        let after = applied("{}", r#"{"intent_relay":{"poll_ms":75,"max_attempts":7}}"#);
+
+        assert_eq!(after.intent_relay.poll, Duration::from_millis(75));
+        assert_eq!(after.intent_relay.max_attempts, 7);
+    }
+
+    #[test]
+    fn the_relays_two_floors_hold_on_both_paths() {
+        // A zero poll is "as fast as possible" rather than *never*, because a
+        // zero period panics the ticker; a zero retry budget is one try, because
+        // the outbox reads it that way and a document reporting `0` beside an
+        // outbox doing `1` would be a config that lies.
+        let after = applied("{}", r#"{"intent_relay":{"poll_ms":0,"max_attempts":0}}"#);
+        assert_eq!(after.intent_relay.poll, Duration::from_millis(1));
+        assert_eq!(after.intent_relay.max_attempts, 1);
+
+        // ...and the file resolves the same way, which is what makes them one
+        // rule rather than two that agree today.
+        let from_file = resolve("", "intent_relay:\n  max_attempts: 0\n");
+        assert_eq!(from_file.intent_relay.max_attempts, 1);
+    }
+
+    // ---- what cannot change while the process runs -------------------------
+
+    #[test]
+    fn naming_a_fixed_setting_at_its_current_value_is_not_a_change() {
+        // The rule that makes the whole document a valid patch, and the one a
+        // GitOps deployment depends on: sending back what was read is a no-op
+        // rather than a refusal.
+        let text = "http:\n  host: 0.0.0.0\n  port: 9999\ndevices_config_path: pool.toml\n";
+        let before = resolve("/etc/sismatic", text);
+
+        let after = applied(
+            text,
+            r#"{"http":{"host":"0.0.0.0","port":9999},
+                "devices_config_path":"/etc/sismatic/pool.toml"}"#,
+        );
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn moving_the_listen_socket_is_refused_and_says_why() {
+        let err = patch(
+            "http:\n  port: 8080\n",
+            r#"{"http":{"host":"127.0.0.1","port":9090}}"#,
+        )
+        .expect_err("the port should not be movable");
+
+        assert!(
+            matches!(err, PatchError::Fixed(ref msg)
+                if msg.contains("8080") && msg.contains("9090") && msg.contains("restart")),
+            "the refusal should name both values and the remedy, got: {err}"
+        );
+    }
+
+    #[test]
+    fn repointing_the_devices_file_is_refused() {
+        let err = patch("{}", r#"{"devices_config_path":"/srv/other.toml"}"#)
+            .expect_err("the devices file should not be repointable");
+
+        assert!(
+            matches!(err, PatchError::Fixed(ref msg) if msg.contains("/srv/other.toml")),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_refused_patch_applies_none_of_itself() {
+        // Atomicity, stated on the one thing that can observe it: `patched` is
+        // pure, so the proof is that the good half of a bad patch never reaches
+        // a returned config at all.
+        let err = patch(
+            "{}",
+            r#"{"sync":{"interval_secs":60},"store":{"retain":"5 fortnights"}}"#,
+        )
+        .expect_err("a bad value should refuse the whole patch");
+
+        assert!(matches!(err, PatchError::Malformed(_)), "got: {err}");
+    }
+
+    // ---- the document ------------------------------------------------------
+
+    #[test]
+    fn a_document_states_every_setting_in_the_files_vocabulary() {
+        let cfg = resolve(
+            "/etc/sismatic",
+            "sync:\n  interval_secs: 30\n  fields:\n    - name: RUNNING_STATE\n      interval_secs: 5\n    - name: FIRMWARE\n      interval_secs: 0\nstore:\n  retain: 1d\n  cleanup_interval: 5min\n  max_memory: 256MiB\n",
+        );
+
+        let doc = document(&cfg);
+
+        assert_eq!(doc.sync.interval_secs, 30);
+        assert_eq!(
+            doc.sync.fields,
+            vec![
+                FieldSettings {
+                    name: "RUNNING_STATE".to_owned(),
+                    interval_secs: Some(5),
+                },
+                // Never is `0` and never is *stated*: an absent interval would
+                // mean "inherit" on the way back in, which is the opposite.
+                FieldSettings {
+                    name: "FIRMWARE".to_owned(),
+                    interval_secs: Some(0),
+                },
+            ]
+        );
+        assert_eq!(doc.store.retain, "1day");
+        assert_eq!(doc.store.cleanup_interval, "5m");
+        assert_eq!(doc.store.max_memory, "256MiB");
+        assert_eq!(doc.intent_relay.poll_ms, 250);
+        assert_eq!(doc.devices_config_path, "/etc/sismatic/devices.toml");
+    }
+
+    #[test]
+    fn a_disabled_bound_is_reported_as_the_word_that_disables_it() {
+        let cfg = resolve(
+            "",
+            "store:\n  retain: forever\n  cleanup_interval: never\n  max_memory: unlimited\n",
+        );
+
+        let doc = document(&cfg);
+
+        assert_eq!(doc.store.retain, "forever");
+        assert_eq!(doc.store.cleanup_interval, "never");
+        assert_eq!(doc.store.max_memory, "unlimited");
+    }
+
+    #[test]
+    fn a_fixed_retention_floor_is_reported_as_an_instant_the_parser_accepts() {
+        // Not `Retention`'s `Display`, which writes `since <instant>` — prose for
+        // a log, and text this parser refuses. The wire needs the form that goes
+        // back in.
+        let cfg = resolve("", "store:\n  retain: 2026-01-01\n");
+
+        assert_eq!(document(&cfg).store.retain, "2026-01-01T00:00:00.000Z");
+    }
+
+    // ---- reading the source again ------------------------------------------
+
+    #[test]
+    fn a_source_folds_the_command_line_back_in_on_every_load() {
+        // The reason `ConfigSource` keeps the overrides: a deployment started
+        // with `--port 9999` must not see the file's port as a change every time
+        // it reloads, which would refuse the reload forever.
+        let source = ConfigSource {
+            path: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/server_configuration.yaml"
+            )),
+            overrides: Overrides {
+                port: Some(9999),
+                ..Overrides::default()
+            },
+        };
+
+        let cfg = source.load().expect("the shipped config loads");
+
+        assert_eq!(cfg.http.port, 9999);
+        // ...and a reload of the same file is therefore a no-op, which is what
+        // `dynamic::LiveSettings::reload` performs.
+        let reloaded = source.load().expect("the shipped config loads again");
+        assert_eq!(
+            patched(&cfg, &document(&reloaded).as_patch()).expect("the reload should apply"),
+            cfg
         );
     }
 }

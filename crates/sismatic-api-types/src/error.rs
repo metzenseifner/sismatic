@@ -17,17 +17,31 @@ pub enum ErrorCode {
     UnknownDevice,
     /// The instruction name is not in the catalog (HTTP 400).
     BadInstruction,
+    /// The request was understood as a shape and refused as a value (HTTP 400):
+    /// a duration that does not parse, a size with an unknown unit, a schedule
+    /// naming a field that does not exist.
+    ///
+    /// Distinct from [`BadInstruction`](Self::BadInstruction), which is the one
+    /// narrower case that predates it and stays as it is because clients branch
+    /// on it: an unknown *name* in a URL. This one classifies a bad *value* in a
+    /// body, and it arrived with `/v1/config`, where a single request carries
+    /// half a dozen values that can each be wrong on their own terms.
+    BadRequest,
     /// The device was reached but the exchange failed (HTTP 502).
     DeviceError,
     /// A generic not-found (e.g. no reads for the given span).
     NotFound,
-    /// The request contradicts the device's current write-side state, most
-    /// often a metadata write during a recording (HTTP 409).
+    /// The request contradicts state the server cannot change on its behalf
+    /// (HTTP 409) — most often a metadata write during a recording, and
+    /// otherwise a `PATCH /v1/config` naming a setting that is fixed until the
+    /// process restarts.
     ///
     /// One code for all four [`Rejection`]s rather than one each, because they
     /// share a status and differ only in which precondition refused. *Which*
     /// one is carried by [`ApiError::rejection`] as a typed field beside this
-    /// code — see that struct for why the two are separate fields.
+    /// code — see that struct for why the two are separate fields. A config
+    /// refusal carries no rejection: the four are admission rules of the write
+    /// path, and "this cannot change while the process runs" is not one of them.
     Conflict,
     /// An unexpected server-side failure (HTTP 500).
     Internal,

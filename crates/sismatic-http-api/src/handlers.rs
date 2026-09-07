@@ -9,6 +9,7 @@
 // attribute on a handler expands to a sibling item in the handler's own module,
 // and `crate::openapi` has to name it. Re-exporting the function is not enough —
 // the generated item is not the function.
+pub mod config;
 pub mod devices;
 pub mod error;
 pub mod fleet_group_reads;
@@ -19,6 +20,8 @@ pub mod instructions;
 pub mod reads;
 pub mod target;
 pub mod writes;
+
+pub use config::{patch_config, read_config, reload_config};
 
 pub use devices::{list_devices, list_groups, read_device, read_group};
 

@@ -28,12 +28,14 @@ use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit, WriteLog, WriteSubmit}
 use sismatic_store::status::{DeviceStatus, DynDeviceStatus};
 use sismatic_store::{DynReadStore, ReadStore};
 
-use crate::handlers::target::{INVENTORY, READS, WRITES};
+use crate::config::{DynLiveConfig, LiveConfig};
+use crate::handlers::target::{CONFIG, INVENTORY, READS, WRITES};
 use crate::handlers::{
     field_catalog, field_history, group_field_history, list_devices, list_fields, list_fleet,
     list_fleet_groups, list_group_fields, list_group_writes, list_groups, list_writes,
-    pause_group_recording, pause_recording, read_desired_recording_state, read_device, read_field,
-    read_group, read_group_desired_recording_state, read_group_field, read_write,
+    patch_config, pause_group_recording, pause_recording, read_config,
+    read_desired_recording_state, read_device, read_field, read_group,
+    read_group_desired_recording_state, read_group_field, read_write, reload_config,
     set_group_metadata, set_group_setting, set_metadata, set_setting, start_group_recording,
     start_recording, stop_group_recording, stop_recording, writes_catalog,
 };
@@ -45,8 +47,8 @@ use crate::stamp::Stamp;
 
 /// The collaborators the application is assembled over.
 ///
-/// A struct rather than eight positional arguments, and the reason is not only
-/// that eight of them is where a caller starts passing the catalog where the
+/// A struct rather than nine positional arguments, and the reason is not only
+/// that nine of them is where a caller starts passing the catalog where the
 /// status port goes. Four of these are trait objects the composition root
 /// builds from *one* value — the outbox is `submit`, `log` and `group_state` at
 /// once — so at the call site they are six `Arc::new(x.clone())`s of two
@@ -81,6 +83,13 @@ pub struct Ports {
     /// Reading what each device group was last told to be. Read-only by
     /// construction — see [`run`].
     pub group_state: DynGroupState,
+    /// The server's own settings, read and changed while it runs.
+    ///
+    /// The one port here that is not the store's, and the one whose adapter can
+    /// only be the composition root: what is behind it holds the resolved
+    /// config, the channels the poll loops read their schedule from, and the
+    /// file the whole document came from. See [`crate::config`].
+    pub config: DynLiveConfig,
     /// Every field a read can be asked for, projected from core's query
     /// catalog. Served by `GET /v1/reads`.
     pub fields: FieldCatalog,
@@ -98,12 +107,19 @@ pub struct Ports {
 ///
 /// # What the argument list narrows
 ///
-/// Six capabilities, each the smallest one its handlers need. `submit` may
+/// Seven capabilities, each the smallest one its handlers need. `submit` may
 /// append an intent and nothing else — it cannot dispatch one, settle one, or
 /// touch a read. There is deliberately no `WriteDrain` here: draining is
 /// `sismatic-intent-relay`'s, and a handler that could claim a write could
 /// reorder a device's queue. And still no [`WriteStore`], so the reads
 /// routes remain unable to write no matter what they ask for.
+///
+/// [`Ports::config`] is the one that is not narrower than what is behind it,
+/// and the one whose docs say why: reading the settings and changing them are
+/// both the config scope's, no other holder wants half, and a second trait over
+/// one struct would be ceremony. What it *is* narrowed against is the shape of a
+/// change — a patch, never a whole document — so "leave this alone" stays
+/// sayable. See [`crate::config`].
 ///
 /// [`Ports::group_state`] is the newest and the narrowest: it can *read* what a
 /// device group was told and cannot record it. Recording happens inside
@@ -129,6 +145,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
         submit,
         log,
         group_state,
+        config,
         fields,
         writes,
     } = ports;
@@ -142,6 +159,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     let submit: web::Data<dyn WriteSubmit> = web::Data::from(submit);
     let log: web::Data<dyn WriteLog> = web::Data::from(log);
     let group_state: web::Data<dyn GroupState> = web::Data::from(group_state);
+    let config: web::Data<dyn LiveConfig> = web::Data::from(config);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
     // the composition root has no reason to keep a handle to it. The two
     // instruction catalogs arrive owned for the same reason — they are values
@@ -167,6 +185,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             .app_data(submit.clone())
             .app_data(log.clone())
             .app_data(group_state.clone())
+            .app_data(config.clone())
             .app_data(stamp.clone())
             .app_data(fields.clone())
             .app_data(writes.clone())
@@ -352,6 +371,31 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             .service(web::resource("/devices").route(web::get().to(list_devices)))
                             .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
                             .service(web::resource("/groups").route(web::get().to(list_groups))),
+                    )
+                    .service(
+                        web::scope(CONFIG)
+                            // The one scope with no path parameter anywhere in
+                            // it, which is why it is two resources rather than
+                            // a dozen: there is one config, and every route
+                            // here addresses the whole of it.
+                            //
+                            // `/reload` first out of the same
+                            // longest-path-first habit as the scopes above,
+                            // though here it settles nothing — an empty
+                            // resource path matches the scope itself and
+                            // nothing under it, so neither can shadow the
+                            // other whichever order they are registered in.
+                            .service(web::resource("/reload").route(web::post().to(reload_config)))
+                            .service(
+                                // Two methods on one resource, which is what
+                                // makes the wrong verb a 405 with an `Allow`
+                                // header rather than a 404 — the answer that
+                                // tells a caller reaching for `PUT` what to
+                                // send instead.
+                                web::resource("")
+                                    .route(web::get().to(read_config))
+                                    .route(web::patch().to(patch_config)),
+                            ),
                     ),
             )
             // The docs, registered last and unversioned. Outside the scope

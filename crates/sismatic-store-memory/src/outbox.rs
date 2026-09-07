@@ -77,6 +77,7 @@
 //! stays up. Neither limit is part of the port.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -205,7 +206,19 @@ struct State {
 pub struct MemoryOutbox {
     state: Arc<Mutex<State>>,
     records: Arc<DashMap<WriteId, WriteRecord>>,
-    max_attempts: u32,
+    /// Shared rather than copied per clone, because it is settable while the
+    /// outbox is in use — see [`set_max_attempts`](MemoryOutbox::set_max_attempts)
+    /// — and every clone is a handle on one outbox rather than an outbox of its
+    /// own. A plain `u32` here would leave each of the four handles the
+    /// composition root builds enforcing whatever the figure was when it was
+    /// cloned.
+    ///
+    /// Atomic rather than under [`state`](Self::state)'s mutex, though it is only
+    /// ever read while that lock is held. What it guards is one `u32` with no
+    /// invariant tying it to anything else in there: a retry judged against the
+    /// figure from a microsecond ago is a retry judged correctly, since the
+    /// operator who moved it did not mean "and re-adjudicate the queue".
+    max_attempts: Arc<AtomicU32>,
     backoff: Duration,
 }
 
@@ -227,9 +240,33 @@ impl MemoryOutbox {
         Self {
             state: Arc::default(),
             records: Arc::default(),
-            max_attempts: max_attempts.max(1),
+            max_attempts: Arc::new(AtomicU32::new(max_attempts.max(1))),
             backoff: Self::DEFAULT_BACKOFF,
         }
+    }
+
+    /// Change the retry budget of every write admitted from here on.
+    ///
+    /// "From here on" is the whole of the semantics, and it is what makes this
+    /// safe to call at any moment: the figure is read when a failure is settled,
+    /// not stamped onto a record when it is submitted, so a write already in the
+    /// queue is judged by whatever the budget is *when it fails*. Raising it
+    /// therefore gives a queue of exhausted-looking writes nothing back — they
+    /// are already `Failed` and settled — and lowering it can retire a write
+    /// mid-queue that had attempts left a moment ago. Both are what an operator
+    /// changing this number is asking for; neither reaches back into a record
+    /// that was already settled.
+    ///
+    /// `0` reads as `1`, exactly as [`with_max_attempts`](Self::with_max_attempts)
+    /// reads it, since "try it zero times" is not a thing a caller can mean.
+    pub fn set_max_attempts(&self, max_attempts: u32) {
+        self.max_attempts
+            .store(max_attempts.max(1), Ordering::Relaxed);
+    }
+
+    /// The retry budget in force right now.
+    fn max_attempts(&self) -> u32 {
+        self.max_attempts.load(Ordering::Relaxed)
     }
 
     /// Override the retry delay. Separate from the constructor because the
@@ -663,7 +700,7 @@ impl WriteDrain for MemoryOutbox {
             Outcome::Succeeded(value) => {
                 record.status = WriteStatus::Succeeded { value };
             }
-            Outcome::Failed(_) if record.attempts < self.max_attempts => {
+            Outcome::Failed(_) if record.attempts < self.max_attempts() => {
                 record.status = WriteStatus::Pending;
                 // Back onto the *front* of the queue: a retry must not be
                 // overtaken by writes submitted after it.
@@ -1174,6 +1211,72 @@ mod tests {
             WriteStatus::Failed {
                 reason: "down".to_owned()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_retry_budget_can_be_changed_under_a_queued_write() {
+        // "From here on" stated precisely: the budget is read when a failure is
+        // settled, not stamped onto a record when it is submitted. So a write
+        // that had two tries left a moment ago is retired by a budget lowered
+        // under it — which is what an operator lowering it is asking for, and
+        // the only reading that does not require reaching back into records that
+        // are already settled.
+        let outbox = outbox();
+        submit(&outbox, "cmd", title("a")).await.unwrap();
+        dispatch(&outbox, Outcome::Failed("down".into())).await;
+        assert_eq!(
+            outbox
+                .write("cmd".to_owned())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            WriteStatus::Pending,
+            "one failure out of three is a retry"
+        );
+
+        outbox.set_max_attempts(1);
+        dispatch(&outbox, Outcome::Failed("down".into())).await;
+
+        assert_eq!(
+            outbox
+                .write("cmd".to_owned())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            WriteStatus::Failed {
+                reason: "down".to_owned()
+            },
+            "the second failure should be terminal under the lowered budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_clone_of_an_outbox_enforces_one_retry_budget() {
+        // The reason the figure is shared rather than copied per clone: the
+        // composition root builds four handles out of one outbox, and a budget
+        // that lived in each of them would leave the relay settling failures
+        // against whatever it was cloned with.
+        let outbox = outbox();
+        let handle = outbox.clone();
+        submit(&outbox, "cmd", title("a")).await.unwrap();
+
+        handle.set_max_attempts(1);
+        dispatch(&outbox, Outcome::Failed("down".into())).await;
+
+        assert!(
+            matches!(
+                outbox
+                    .write("cmd".to_owned())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                WriteStatus::Failed { .. }
+            ),
+            "a budget set through one handle must hold on every other"
         );
     }
 

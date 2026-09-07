@@ -32,6 +32,7 @@ use sismatic_core::protocol::instructions::query::Query;
 use sismatic_core::protocol::{RecordingState, Value};
 use sismatic_store::outbox::{Claim, DynWriteDrain, Outcome, WriteDrain};
 use sismatic_sync::dto;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -46,7 +47,24 @@ use crate::translate;
 /// be added later without changing the port.
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
-    pub poll: Duration,
+    /// The delay, and where a new one arrives when the deployment changes it.
+    ///
+    /// A channel for the same reason `sismatic_sync::SyncConfig::fields` is one:
+    /// this is a number an operator moves while the process runs — it trades
+    /// idle wake-ups against how long an accepted write waits — and the
+    /// alternative to a channel is a restart that drops the fleet's SSH
+    /// sessions to change it. A deployment that never does passes [`fixed`].
+    pub poll: watch::Receiver<Duration>,
+}
+
+/// A drain rate that will never change: the one value, and no sender behind it.
+///
+/// The relay's counterpart of `sismatic_sync::fixed`, and the same reading of a
+/// closed channel — a loop that finds the sender gone stops listening and keeps
+/// the rate it has.
+#[must_use]
+pub fn fixed(poll: Duration) -> watch::Receiver<Duration> {
+    watch::channel(poll).1
 }
 
 pub struct RelayHandle {
@@ -74,7 +92,7 @@ pub fn spawn(registry: Arc<Registry>, drain: DynWriteDrain, cfg: RelayConfig) ->
             device,
             Arc::clone(&registry),
             drain.clone(),
-            cfg.poll,
+            cfg.poll.clone(),
             cancel.clone(),
         ));
     }
@@ -82,27 +100,58 @@ pub fn spawn(registry: Arc<Registry>, drain: DynWriteDrain, cfg: RelayConfig) ->
     RelayHandle { tasks, cancel }
 }
 
+/// Drain one device's queue on a schedule that may be re-set under it.
+///
+/// The ticker is rebuilt rather than adjusted, because a `tokio` interval's
+/// period is fixed at construction — and the outer loop is what makes that
+/// legible: one pass of it is one drain rate, and a new rate is a new pass. The
+/// rebuild costs one immediate tick, which is a drain against a queue that is
+/// usually empty.
+///
+/// Unlike the sync driver's, this loop watches its own channel rather than being
+/// restarted by a supervisor. The two differ because the *shape* of the change
+/// does: a relay task exists per device and always exists, so there is nothing
+/// to start or stop and nothing for a supervisor to own — only a number to read
+/// again. The sync driver has a set of loops whose membership changes, which is
+/// what needs somewhere to hold the `JoinSet`.
 #[instrument(name = "intent_relay", skip_all, fields(device = %device.id()))]
 async fn relay_loop(
     device: Arc<Device>,
     registry: Arc<Registry>,
     drain: DynWriteDrain,
-    poll: Duration,
+    mut poll: watch::Receiver<Duration>,
     cancel: CancellationToken,
 ) {
     recover(&device, drain.as_ref()).await;
 
-    let mut ticker = tokio::time::interval(poll);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Whether anyone can still publish a rate. A closed channel is a deployment
+    // whose rate was decided once, not a failure — see `fixed`.
+    let mut watching = true;
 
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = ticker.tick() => {
-                // Drain the whole queue rather than one per tick, so a burst of
-                // six metadata writes plus a start does not take seven ticks.
-                while !cancel.is_cancelled()
-                    && dispatch_one(&device, &registry, drain.as_ref()).await {}
+    'repace: loop {
+        let mut ticker = tokio::time::interval(*poll.borrow_and_update());
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break 'repace,
+                changed = poll.changed(), if watching => match changed {
+                    // Back to the top, where the ticker is built from whatever
+                    // was published. Re-pacing on a value that did not actually
+                    // move costs one drain of an empty queue, which is cheaper
+                    // than comparing and far cheaper than getting it wrong.
+                    Ok(()) => {
+                        info!(poll_ms = poll.borrow().as_millis(), "re-pacing the relay");
+                        continue 'repace;
+                    }
+                    Err(_) => watching = false,
+                },
+                _ = ticker.tick() => {
+                    // Drain the whole queue rather than one per tick, so a burst of
+                    // six metadata writes plus a start does not take seven ticks.
+                    while !cancel.is_cancelled()
+                        && dispatch_one(&device, &registry, drain.as_ref()).await {}
+                }
             }
         }
     }

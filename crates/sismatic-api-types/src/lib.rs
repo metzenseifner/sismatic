@@ -29,6 +29,7 @@
 //! - [`mod@write`] — write-side request bodies and instruction results
 //! - [`instruction`] — which names the routes above accept: [`FieldCatalog`],
 //!   [`WritesCatalog`]
+//! - [`config`] — the server's own settings: [`ConfigDocument`], [`ConfigPatch`]
 //! - [`error`] — the [`ApiError`] envelope and [`Health`]
 //!
 //! Enable the `ts` feature to derive `ts_rs::TS` on every DTO and emit
@@ -50,6 +51,7 @@
 //! );
 //! ```
 
+pub mod config;
 pub mod device;
 pub mod error;
 pub mod group;
@@ -70,6 +72,10 @@ pub type GroupId = String;
 /// instruction catalog.
 pub type FieldName = String;
 
+pub use config::{
+    ConfigDocument, ConfigPatch, FieldSettings, HttpSettings, RelayPatch, RelaySettings,
+    StorePatch, StoreSettings, SyncPatch, SyncSettings,
+};
 pub use device::{
     ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,
 };

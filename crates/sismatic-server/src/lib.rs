@@ -26,6 +26,7 @@
 //! are then read by nobody, and the first poll of every field races to open the
 //! same connection.
 pub mod configuration;
+pub mod dynamic;
 pub mod lifecycle;
 pub mod status;
 pub mod telemetry;
@@ -47,7 +48,7 @@ use sismatic_core::protocol::instructions::commands::Command;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_core::protocol::instructions::register::Register;
 use sismatic_core::protocol::instructions::setting::Setting;
-use sismatic_http_api::{Ports, ServerHandle, Stamp};
+use sismatic_http_api::{DynLiveConfig, Ports, ServerHandle, Stamp};
 use sismatic_store::group::DynGroupState;
 use sismatic_store::lifecycle::DynLifecycle;
 use sismatic_store::outbox::{DynWriteDrain, DynWriteLog, DynWriteSubmit};
@@ -58,14 +59,22 @@ use tokio::task::JoinHandle;
 use tracing::{info, instrument};
 use uuid::Uuid;
 
-use crate::configuration::ServerConfig;
+use crate::configuration::{ConfigSource, ServerConfig};
+use crate::dynamic::LiveSettings;
 use crate::status::RegistryStatus;
 
 /// Start the "sync" write-side and the read-side "http-api", and run until
 /// `shutdown` resolves — or until the server stops on its own — then stop the
 /// poll loops.
+///
+/// `cfg` is what to run under and `source` is where it came from. Both, because
+/// they answer different questions and only the caller has each: the resolved
+/// value is what starts the tasks, and the source is what
+/// `POST /v1/config/reload` reads again — see [`dynamic`] for the whole of how a
+/// change travels from a request to a running loop.
 pub async fn run(
     cfg: ServerConfig,
+    source: ConfigSource,
     devices: Resolved,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), std::io::Error> {
@@ -77,7 +86,7 @@ pub async fn run(
     let store = MemoryStore::with_budget(cfg.store.max_memory);
     let read: DynReadStore = Arc::new(store.clone());
     let lifecycle: DynLifecycle = Arc::new(store.clone());
-    let write: DynWriteStore = Arc::new(store);
+    let write: DynWriteStore = Arc::new(store.clone());
 
     // One object, four capabilities. Only this function knows they are the
     // same value — the same arrangement the three store ports above already
@@ -95,7 +104,17 @@ pub async fn run(
     let submit: DynWriteSubmit = Arc::new(outbox.clone());
     let log: DynWriteLog = Arc::new(outbox.clone());
     let group_state: DynGroupState = Arc::new(outbox.clone());
-    let drain: DynWriteDrain = Arc::new(outbox);
+    let drain: DynWriteDrain = Arc::new(outbox.clone());
+
+    // A sixth handle on the store and a fifth on the outbox, and the only two in
+    // this function that are not trait objects. They go to the settings adapter,
+    // which needs the two verbs no port carries — re-cap the store, re-budget
+    // the retries — for settings that no loop reads and that therefore cannot be
+    // published down a channel. Concrete rather than narrowed because there is
+    // no narrowing to do: this is the composition root reaching an adapter it
+    // built, not a handler being handed a capability. See `dynamic`.
+    let (settings, wiring) = LiveSettings::new(&cfg, source, store, outbox);
+    let settings: DynLiveConfig = Arc::new(settings);
 
     // Built from the resolved config *before* the registry consumes it: the
     // catalog is the public, secret-free projection of the same device set, and
@@ -132,6 +151,7 @@ pub async fn run(
             submit,
             log,
             group_state,
+            config: settings,
             // The instruction catalog projected the same way the device set was
             // a few lines up, and for the same reason: the read side may not
             // name a `Query` any more than it may name a `DeviceConfig`, so what
@@ -158,29 +178,25 @@ pub async fn run(
     let intent_relay = sismatic_intent_relay::spawn(
         Arc::clone(&registry),
         Arc::clone(&drain),
-        sismatic_intent_relay::RelayConfig {
-            poll: cfg.intent_relay.poll,
-        },
+        sismatic_intent_relay::RelayConfig { poll: wiring.drain },
     );
 
     // Started before the poll loops that fill the store, so a process restarting
     // into a long retention window enforces it on the first tick rather than
     // after the first interval of fresh writes.
-    let sweeper = lifecycle::spawn(lifecycle, cfg.store.retain, cfg.store.cleanup);
+    let sweeper = lifecycle::spawn(lifecycle, wiring.policy);
 
     let sync = sismatic_sync::spawn(
         registry,
         write,
         sismatic_sync::SyncConfig {
-            fields: cfg
-                .sync
-                .fields
-                .into_iter()
-                .map(|field| sismatic_sync::FieldSchedule {
-                    name: field.name,
-                    interval: field.interval,
-                })
-                .collect(),
+            // The schedule arrives on a channel rather than as the list `cfg`
+            // holds, and the list `cfg` holds is what was published on it a few
+            // lines up. Every task that can be re-configured is started from
+            // `wiring` for the same reason: what it reads at startup and what it
+            // reads after a `PATCH` are then one path, so a setting cannot work
+            // at startup and quietly not apply later.
+            fields: wiring.schedule,
             // Both reconciliation paths are wired, and they close different
             // gaps. The relay re-reads the state immediately before a metadata
             // write, which is the one intent the freeze protects. This hook

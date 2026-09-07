@@ -63,6 +63,9 @@ pub const READS: &str = "reads";
 pub const WRITES: &str = "writes";
 /// What the server was configured with.
 pub const INVENTORY: &str = "inventory";
+/// What the server itself is running under — the one scope with no id in it, and
+/// so the one that never reaches the two rules below.
+pub const CONFIG: &str = "config";
 
 /// The devices a group id addresses, or the `404` that says it addresses none.
 ///

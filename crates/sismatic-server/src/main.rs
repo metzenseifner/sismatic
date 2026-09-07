@@ -77,7 +77,7 @@ use sismatic_server::telemetry::{get_subscriber, init_subscriber};
 
 use clap::{CommandFactory, Parser};
 use sismatic_core::devices::config;
-use sismatic_server::configuration::{CONFIG_PATH_ENV, Overrides, get_configuration};
+use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides};
 use sismatic_server::run;
 use tracing::{info, instrument};
 
@@ -158,18 +158,29 @@ async fn main() -> Result<(), std::io::Error> {
         Err(e) => exit_with_help(format_args!("cannot reach {}: {e}", config_path.display())),
     }
 
-    let cfg = get_configuration(&config_path)
-        .unwrap_or_else(|e| panic!("reading server config {}: {e}", config_path.display()));
+    // Both layers above the document, bound together and kept: the file to read,
+    // and the flags to fold in over it. Kept rather than consumed because
+    // `POST /v1/config/reload` is this same load performed again, and a reload
+    // that forgot the flags would resolve to something this process never
+    // started with — see `configuration::ConfigSource`.
+    //
+    // The flags are the one layer neither the file nor the environment can
+    // express. They are folded in by `load` rather than inside `resolve_config`,
+    // so that resolver stays a function of the document alone, and in one call
+    // rather than per section so there is one answer to where a flag takes
+    // effect.
+    let source = ConfigSource {
+        path: config_path,
+        overrides: Overrides {
+            devices_config_path: args.devices_config_path,
+            host: args.host,
+            port: args.port,
+        },
+    };
 
-    // The one layer neither the file nor the environment can express: flags the
-    // operator typed. Folded in here rather than inside `resolve_config` so that
-    // resolver stays a function of the document alone, and in one call rather
-    // than per section so there is one answer to where a flag takes effect.
-    let cfg = cfg.with_overrides(Overrides {
-        devices_config_path: args.devices_config_path,
-        host: args.host,
-        port: args.port,
-    });
+    let cfg = source
+        .load()
+        .unwrap_or_else(|e| panic!("reading server config {}: {e}", source.path.display()));
 
     let devices = config::load(&cfg.devices_config_path).unwrap_or_else(|e| {
         panic!(
@@ -178,7 +189,7 @@ async fn main() -> Result<(), std::io::Error> {
         )
     });
 
-    run(cfg, devices, shutdown_signal()).await
+    run(cfg, source, devices, shutdown_signal()).await
 }
 
 /// Wait for the operator's interrupt — the process's one shutdown trigger.

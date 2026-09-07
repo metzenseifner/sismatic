@@ -167,6 +167,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::writes::set_group_setting,
         crate::handlers::writes::read_group_desired_recording_state,
         crate::handlers::writes::list_group_writes,
+        crate::handlers::config::read_config,
+        crate::handlers::config::patch_config,
+        crate::handlers::config::reload_config,
     ),
     components(schemas(
         sismatic_api_types::Read,
@@ -207,6 +210,11 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         // reachable from both.
         sismatic_api_types::FieldCatalog,
         sismatic_api_types::WritesCatalog,
+        // The config scope's two bodies. Every section of each — `SyncSettings`,
+        // `StorePatch`, `HttpSettings` and the rest — arrives by being reachable
+        // from one of them, for the same reason `ReadValue` does.
+        sismatic_api_types::ConfigDocument,
+        sismatic_api_types::ConfigPatch,
     )),
     tags(
         (name = "reads", description =
@@ -250,6 +258,22 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              happened. Metadata is writable only while nothing is recording; \
              settings are writable always, and `/v1/writes` lists which names \
              are which."),
+        (name = "config", description =
+            "The server's own settings, read and changed while it runs — the one \
+             scope that is not about a device. `GET /v1/config` states every \
+             setting, and its body is a valid `PATCH` body, so a \
+             read-modify-write cycle moves nothing a caller did not touch.\n\n\
+             A change takes effect before the response is written: the poll loops \
+             are re-timed, the store's window and byte budget re-applied, the \
+             write queue's drain rate reset. Two settings are reported and not \
+             editable — the listen socket and the devices file — because applying \
+             either means rebinding a listener or rebuilding a registry of live \
+             SSH sessions. A request that would change one is refused whole with \
+             a `409`, and naming one at the value it already has is not a change.\n\n\
+             `POST /v1/config/reload` is the declarative half: it re-runs the \
+             load the process ran at startup — file, environment, command line — \
+             so a ConfigMap mounted as that file stays the source of truth and a \
+             watcher can call it on every write to the volume."),
         (name = "health", description =
             "Liveness. Consults nothing, so it reports on this process and never on \
              its dependencies."),

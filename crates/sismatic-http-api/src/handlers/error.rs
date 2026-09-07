@@ -18,6 +18,8 @@ use sismatic_api_types::{ApiError, ErrorCode};
 use sismatic_store::ReadError;
 use sismatic_store::outbox::SubmitError;
 
+use crate::config::ConfigRefusal;
+
 /// A failed read-side request.
 #[derive(Debug)]
 pub enum ApiFailure {
@@ -48,6 +50,12 @@ pub enum ApiFailure {
     /// decision is made, and this variant defers to it for both the body and —
     /// via the code it chose — the status.
     Submit(SubmitError),
+    /// A change to the settings that was not made.
+    ///
+    /// Carried whole for the reason [`Submit`](Self::Submit) is: the port has
+    /// already classified it, into three cases that are three different people's
+    /// problems, and re-deciding here is how the two could come to disagree.
+    Config(ConfigRefusal),
 }
 
 impl std::fmt::Display for ApiFailure {
@@ -58,6 +66,7 @@ impl std::fmt::Display for ApiFailure {
             // Rendered through the same conversion the body uses, so the
             // message a log line carries is the message the caller received.
             ApiFailure::Submit(e) => f.write_str(&ApiError::from(e.clone()).error),
+            ApiFailure::Config(e) => write!(f, "{e}"),
         }
     }
 }
@@ -81,6 +90,13 @@ impl From<SubmitError> for ApiFailure {
     }
 }
 
+/// The same convenience for the config scope's two fallible routes.
+impl From<ConfigRefusal> for ApiFailure {
+    fn from(e: ConfigRefusal) -> Self {
+        ApiFailure::Config(e)
+    }
+}
+
 impl ApiFailure {
     /// The wire body for this failure.
     ///
@@ -90,17 +106,25 @@ impl ApiFailure {
     fn body(&self) -> ApiError {
         let code = match self {
             ApiFailure::NotFound(_) => ErrorCode::NotFound,
-            // The only bad request this crate can produce is about a field name,
-            // which is what `BadInstruction` classifies. A general-purpose
-            // "malformed request" code would be more accurate if there were more
-            // than one such case; adding one to the shared contract for a single
-            // caller would not be.
+            // Every bad request the *routes* can produce is about a field name,
+            // which is what `BadInstruction` classifies. The config scope's are
+            // about values rather than names and carry `BadRequest` instead —
+            // see the arm below, and `ErrorCode` for why the older, narrower
+            // code stayed as it is.
             ApiFailure::BadRequest(_) => ErrorCode::BadInstruction,
             ApiFailure::Store(_) => ErrorCode::Internal,
-            // The only variant that does not pick its own code: `store` already
-            // classified this one, and re-deciding here is how the two could
-            // disagree.
+            // The two variants that do not pick their own code: the port they
+            // came from already classified them, and re-deciding here is how the
+            // two could disagree.
             ApiFailure::Submit(e) => return ApiError::from(e.clone()),
+            ApiFailure::Config(e) => {
+                let code = match e {
+                    ConfigRefusal::Malformed(_) => ErrorCode::BadRequest,
+                    ConfigRefusal::Fixed(_) => ErrorCode::Conflict,
+                    ConfigRefusal::Source(_) => ErrorCode::Internal,
+                };
+                return ApiError::coded(code, e.to_string());
+            }
         };
         ApiError::coded(code, self.to_string())
     }
@@ -118,6 +142,16 @@ impl ResponseError for ApiFailure {
             ApiFailure::Submit(_) => match self.body().code {
                 Some(ErrorCode::Conflict) => StatusCode::CONFLICT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
+            // Three cases, three people. A value we could not read is the
+            // caller's; a setting that needs a restart is a conflict with the
+            // running process rather than a mistake; a config file that will not
+            // load is the deployment's, and there is nothing the caller could
+            // have sent instead — which is what a 500 says.
+            ApiFailure::Config(e) => match e {
+                ConfigRefusal::Malformed(_) => StatusCode::BAD_REQUEST,
+                ConfigRefusal::Fixed(_) => StatusCode::CONFLICT,
+                ConfigRefusal::Source(_) => StatusCode::INTERNAL_SERVER_ERROR,
             },
         }
     }
@@ -186,5 +220,34 @@ mod tests {
             // ...and reaches the caller as itself, not flattened into the code.
             assert_eq!(failure.body().rejection, Some(rejection));
         }
+    }
+
+    /// The config scope's three refusals reach a caller as three different
+    /// statuses, which is the whole reason the port does not return one string.
+    /// A client scripting a ConfigMap reload branches on exactly this: 400 means
+    /// fix the file, 409 means roll the deployment, 500 means the file is not
+    /// readable at all.
+    #[test]
+    fn a_config_refusal_carries_the_status_its_case_calls_for() {
+        let malformed = ApiFailure::Config(ConfigRefusal::Malformed(
+            "'5 fortnights' is not a duration".into(),
+        ));
+        assert_eq!(malformed.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(malformed.body().code, Some(ErrorCode::BadRequest));
+
+        let fixed = ApiFailure::Config(ConfigRefusal::Fixed("http.port is 8080".into()));
+        assert_eq!(fixed.status_code(), StatusCode::CONFLICT);
+        assert_eq!(fixed.body().code, Some(ErrorCode::Conflict));
+        // Not a write rejection, so the typed field a client branches on for
+        // *those* stays absent — the two 409s are told apart by its presence.
+        assert_eq!(fixed.body().rejection, None);
+
+        let source = ApiFailure::Config(ConfigRefusal::Source("no such file".into()));
+        assert_eq!(source.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(source.body().code, Some(ErrorCode::Internal));
+
+        // The message reaches the caller intact in every case: it is the only
+        // thing that says which setting or which text was the problem.
+        assert!(malformed.body().error.contains("fortnights"));
     }
 }
