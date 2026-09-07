@@ -176,6 +176,38 @@ pub struct GroupFieldStateList {
     /// ask to see, which a verdict rolled up from the projected columns could
     /// never say. Ask without `?fields=` to find out where.
     pub sync: GroupSyncState,
+    /// What the write side has accepted for this device group's recording, as
+    /// `GET /v1/writes/groups/{id}/recording` reports it: the state every member
+    /// is in, or `null` when they are not all in the same one.
+    ///
+    /// # Why a write-side value is served beside a read-side one
+    ///
+    /// It is what makes [`sync`](Self::sync) legible when it is `unknown`.
+    /// `unknown` is the honest verdict whenever there is nothing to compare, and
+    /// on its own it cannot say *which* nothing:
+    ///
+    /// | `sync` | `desired_recording_state` | reads as |
+    /// | --- | --- | --- |
+    /// | `unknown` | `idle` | nothing has been asked of this group — resting, and fine |
+    /// | `unknown` | `recording` | something *was* asked and no member has reported back — blind, and worth attention |
+    /// | `unknown` | `null` | the members disagree about what they were asked — a finding in itself |
+    ///
+    /// The middle row is the one this exists for. Without it a device group that
+    /// was told to record and has gone silent is indistinguishable from one
+    /// nobody has ever touched, and those call for opposite reactions.
+    ///
+    /// # What it does not explain
+    ///
+    /// Only the recording axis. An expectation on `TIMEZONE` that no member has
+    /// answered also yields `sync: unknown`, and this field will read `idle`
+    /// throughout — it is not a claim that nothing was asked, only that no
+    /// *recording* was. [`GroupFieldState::expected`] is per-field and answers
+    /// the general question; this answers the common one at a glance.
+    ///
+    /// Distinct from the members' reported `RUNNING_STATE` for the reason
+    /// [`DesiredRecordingState`] gives: this moves when the outbox accepts a
+    /// write, before any device is contacted.
+    pub desired_recording_state: Option<DesiredRecordingState>,
     /// Ordered by field name, for the same reason the store's `latest_all` is:
     /// a rendered page should diff cleanly between requests rather than
     /// reflecting an adapter's iteration order.

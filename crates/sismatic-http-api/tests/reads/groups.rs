@@ -380,6 +380,62 @@ async fn the_index_rolls_its_fields_up_into_one_verdict_for_the_device_group() {
     );
 }
 
+/// `sync: unknown` is the honest verdict whenever there is nothing to compare,
+/// and on its own it cannot say *which* nothing. `desired_recording_state` is
+/// what separates the two, and they call for opposite reactions: a device group
+/// nobody has touched is resting, one that was told to record and has answered
+/// nothing is a device group we have gone blind on.
+#[tokio::test]
+async fn the_desired_recording_state_says_which_kind_of_unknown_this_is() {
+    // Nothing asked, nothing reported.
+    let resting = spawn([]).await;
+    let body = get_json(&resting, &format!("/groups/{GROUP}/fields")).await;
+    assert_eq!(body["sync"], "unknown");
+    assert_eq!(body["desired_recording_state"], "idle");
+    assert_eq!(body["fields"], serde_json::json!([]));
+
+    // Asked to record, still nothing reported — the same `unknown`, and the
+    // one worth an alarm.
+    let blind = spawn([]).await;
+    start_the_device_group(&blind).await;
+    let body = get_json(&blind, &format!("/groups/{GROUP}/fields")).await;
+    assert_eq!(body["sync"], "unknown");
+    assert_eq!(
+        body["desired_recording_state"], "recording",
+        "the write side accepted a start, so `unknown` here means nobody has \
+         answered rather than nobody was asked"
+    );
+    // The expectation is visible per field too; the group-level value is what
+    // makes it legible without reading the list.
+    assert_eq!(body["fields"][0]["expected"]["value"]["value"], "started");
+}
+
+/// `null` rather than a state when the members were not all asked the same
+/// thing — a finding in itself, and the third reading of the field.
+#[tokio::test]
+async fn a_group_whose_members_were_asked_different_things_has_no_shared_desired_state() {
+    let address = spawn([]).await;
+
+    let status = reqwest::Client::new()
+        .post(format!(
+            "{address}/v1/writes/devices/{ATRIUM}/recording/start"
+        ))
+        .send()
+        .await
+        .expect("starting one member")
+        .status()
+        .as_u16();
+    assert_eq!(status, 202, "the member should have been asked to start");
+
+    let body = get_json(&address, &format!("/groups/{GROUP}/fields")).await;
+
+    assert!(
+        body["desired_recording_state"].is_null(),
+        "one member recording and one idle is no shared state, got {}",
+        body["desired_recording_state"]
+    );
+}
+
 /// A field the device group was told to set but no member has answered on yet
 /// is what a write that reached nobody looks like — so it has to appear in the
 /// index even though the store holds nothing for it.

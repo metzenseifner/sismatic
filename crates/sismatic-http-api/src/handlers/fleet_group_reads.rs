@@ -57,13 +57,19 @@
 //!
 //! # The cost, which is not the device index's
 //!
-//! A device row is one [`ReadStore`] call. A group row is one per member plus
-//! one [`GroupState`] call, because a group has no reads of its own — so a page
-//! of fifty three-member groups is two hundred port calls, not fifty. The page
-//! size is capped by the same [`page_size`] the device index uses rather than a
-//! lower one of its own, because the configured group count is bounded by the
-//! device count in practice: a group is a partition of the fleet, and there are
-//! fewer rooms than recorders.
+//! A device row is one [`ReadStore`] call. A group row is two per member — the
+//! store for what was reported, the [`WriteLog`] for what was accepted — plus
+//! one [`GroupState`] call, because a group has no reads of its own. A page of
+//! fifty three-member groups is therefore about three hundred and fifty port
+//! calls, not fifty.
+//!
+//! The page size is nevertheless capped by the same [`page_size`] the device
+//! index uses rather than a lower one of its own, because the configured group
+//! count is bounded by the device count in practice: a group is a partition of
+//! the fleet, and there are fewer rooms than recorders. If the per-member log
+//! read ever becomes the thing that hurts, the fix is to make
+//! `desired_recording_state` opt-in rather than to cap the page differently —
+//! the ceiling is not what is expensive here, the fan-out is.
 
 use std::collections::BTreeSet;
 
@@ -76,6 +82,7 @@ use sismatic_api_types::{
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::group::GroupState;
+use sismatic_store::outbox::WriteLog;
 
 use crate::handlers::error::ApiFailure;
 use crate::handlers::fleet_reads::{Predicate, csv, page_size, predicates_of, wanted_fields};
@@ -104,9 +111,11 @@ use crate::handlers::reads::normalize_field;
              one row per group, ordered by id. Each row is the body \
              `GET /v1/reads/groups/{id}/fields` returns, including its rolled-up \
              `sync` — which describes the whole group, so with `?fields=` a row can \
-             read `drifted` while every field it carries reads `unknown`. `next` \
-             carries the `after` value for the following page, or `null` on the \
-             last one.", body = FleetGroupReads),
+             read `drifted` while every field it carries reads `unknown` — and its \
+             `desired_recording_state`, which is what tells a `?sync=unknown` page \
+             the resting device groups from the ones that were told to record and \
+             have answered nothing. `next` carries the `after` value for the \
+             following page, or `null` on the last one.", body = FleetGroupReads),
         (status = 400, description = "A malformed `?where=` predicate, an unrecognized \
              `?sync=` value, or `?limit=0`. The body says which.", body = ApiError),
         (status = 404, description = "A `?groups=` id that names no configured device \
@@ -120,6 +129,7 @@ pub async fn list_fleet_groups(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     state: web::Data<dyn GroupState>,
+    log: web::Data<dyn WriteLog>,
     query: web::Query<FleetGroupQuery>,
 ) -> Result<web::Json<FleetGroupReads>, ApiFailure> {
     let query = query.into_inner();
@@ -137,7 +147,7 @@ pub async fn list_fleet_groups(
         // The whole state, because both row filters may read a field
         // `?fields=` does not ask for, and `?sync=` rolls up across all of
         // them. Projection happens after the row survives.
-        let row = group_state_of(&**catalog, &**store, &**state, group).await?;
+        let row = group_state_of(&**catalog, &**store, &**state, &**log, group).await?;
 
         if !predicates.iter().all(|p| holds(p, &row.fields)) {
             continue;
@@ -163,6 +173,10 @@ pub async fn list_fleet_groups(
             // over the projected columns: see `GroupFieldStateList::sync`, and
             // the module note on selection before projection.
             sync: row.sync,
+            // Unaffected by `?fields=` for the same reason, and doubly so: it
+            // is not a field of the group at all, so there is no column for a
+            // projection to drop.
+            desired_recording_state: row.desired_recording_state,
             fields: project(row.fields, fields.as_ref()),
         });
     }

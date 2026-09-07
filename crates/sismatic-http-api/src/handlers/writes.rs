@@ -923,6 +923,29 @@ pub async fn read_group_desired_recording_state(
     let group = path.into_inner();
     let member_ids = group_members(&**catalog, &group, WRITES, "recording").await?;
 
+    Ok(web::Json(
+        group_desired_recording_state(&**log, group, member_ids).await?,
+    ))
+}
+
+/// Every member's desired recording state, and the one they agree on.
+///
+/// The body of [`read_group_desired_recording_state`], lifted out so the reads
+/// side can report the rolled-up value beside a group's drift verdict — see
+/// [`group_reads::group_state_of`]. Shared for the reason that assembly is:
+/// "what this device group is supposed to be doing" must not be one thing under
+/// `/v1/writes` and another under `/v1/reads`, and two folds over the same
+/// port are exactly how that happens.
+///
+/// The caller resolves the members, because the two scopes reach this with a
+/// membership list already in hand and would otherwise ask the catalog twice.
+///
+/// [`group_reads::group_state_of`]: crate::handlers::group_reads::group_state_of
+pub(crate) async fn group_desired_recording_state(
+    log: &dyn WriteLog,
+    group: String,
+    member_ids: Vec<DeviceId>,
+) -> Result<GroupDesiredRecordingState, ApiFailure> {
     let mut members = Vec::with_capacity(member_ids.len());
     for device in member_ids {
         let recording = log.desired_recording_state(device.clone()).await?;
@@ -944,11 +967,11 @@ pub async fn read_group_desired_recording_state(
                 .all(|m| m.desired_recording_state == *desired)
         });
 
-    Ok(web::Json(GroupDesiredRecordingState {
+    Ok(GroupDesiredRecordingState {
         group,
         desired_recording_state,
         members,
-    }))
+    })
 }
 
 /// `GET /v1/writes/groups/{id}/history` — what each member has been asked to

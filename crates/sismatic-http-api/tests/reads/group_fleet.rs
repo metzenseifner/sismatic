@@ -299,6 +299,43 @@ async fn every_row_carries_the_verdict_the_filter_selects_on() {
 }
 
 #[tokio::test]
+async fn the_desired_recording_state_separates_the_resting_from_the_blind() {
+    // `?sync=unknown` returns both kinds of group and cannot tell them apart on
+    // its own. This is the column that does: `west-wing` was never asked for
+    // anything, while `beacon-hall` was told to record and its one member has
+    // said nothing since. One is resting; the other is a room we have gone
+    // blind on, and only the write side knows which is which.
+    let mut reads = seeded();
+    // Drop `beacon`'s reads so it is asked-but-silent rather than reporting.
+    reads.retain(|r| r.device != BEACON);
+    let address = spawn(reads).await;
+    start(&address, BEACON_HALL).await;
+
+    let body = index(&address, "sync=unknown").await;
+
+    assert_eq!(
+        body["groups"]
+            .as_array()
+            .expect("groups is an array")
+            .iter()
+            .map(|g| (
+                g["group"].as_str().expect("group"),
+                g["desired_recording_state"].as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            // Reporting, but nobody has ever asked it for anything.
+            (ATRIUM_ROOM, Some("idle")),
+            // Asked to record, and silent ever since. The one to act on.
+            (BEACON_HALL, Some("recording")),
+            // Neither asked nor reporting.
+            (WEST_WING, Some("idle")),
+        ],
+        "all three are `unknown`; the desired state is what distinguishes them"
+    );
+}
+
+#[tokio::test]
 async fn the_verdict_describes_the_group_not_the_projected_columns() {
     // The consequence of rolling up before projecting, and the reason it is
     // worth serving: the row says "this group drifted" while the only column
