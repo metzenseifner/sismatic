@@ -13,6 +13,27 @@ sync:
     - name: MAC_ADDRESS
       interval_secs: 0
 
+# What the store keeps, and how much of the machine it may use.
+#
+# `retain` accepts a rolling window (30d, 2 weeks, 1h 30min), a fixed floor
+# (2026-01-01T00:00:00Z, or a bare 2026-01-01 read as midnight UTC), or
+# `forever`. A rolling window is what a deployment normally wants: it is the
+# only form whose memory cost stops growing.
+#
+# `max_memory` is the backstop, and it is the setting that keeps an unattended
+# server alive — the bytes a retention window costs depend on the fleet size and
+# the poll schedule above, which is not something the person writing `retain`
+# is holding in their head. It is enforced on every write, not at each cleanup,
+# so it holds between sweeps. `unlimited` removes it, at the deployment's own
+# risk.
+#
+# `cleanup_interval` is how often expired reads are actually deleted, so it is
+# also how far past `retain` one can linger. `never` (or 0) starts no sweeper.
+store:
+  retain: 24h
+  cleanup_interval: 5min
+  max_memory: 256MiB
+
 http:
   host: 127.0.0.1
   port: 9000

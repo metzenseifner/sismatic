@@ -56,12 +56,25 @@
 //!
 //! # What it is not
 //!
-//! `records`, each log's `history`, and settled `batches` grow without bound,
-//! for the same reason `MemoryStore::history` does and with the same
-//! consequence: fine for a test and a development server, not the deployment
-//! story. The outbox adds a second reason to want a durable adapter — a pending
-//! write is lost on restart, so the delivery guarantee holds only for a
-//! process that stays up. Neither limit is part of the port.
+//! `records`, each log's `history`, and settled `batches` grow without bound.
+//! `MemoryStore` used to share that limit and no longer does — it has a ledger,
+//! a retention window and a byte budget (see [that module](crate)) — so this is
+//! now the one structure in the crate whose size is a function of uptime.
+//!
+//! It is left that way deliberately rather than by omission, because the two
+//! are not the same problem at the same scale. The store's history grows at
+//! *poll* rate: every field of every device, every few seconds, forever, which
+//! is what made it able to exhaust a machine unattended. This grows at
+//! *operator* rate — one record per button press — so an installation would
+//! have to run for years to accumulate what the store could in an afternoon.
+//! Bounding it also means answering a question the store never had to: a
+//! `WriteRecord` is what `GET /v1/writes/{id}` reads, so expiring one turns a
+//! caller's poll into a `404` and the retention window becomes part of the API
+//! contract rather than an internal budget.
+//!
+//! The outbox adds a second reason to want a durable adapter — a pending write
+//! is lost on restart, so the delivery guarantee holds only for a process that
+//! stays up. Neither limit is part of the port.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};

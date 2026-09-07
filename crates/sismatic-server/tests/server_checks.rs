@@ -37,6 +37,7 @@ use sismatic_server::configuration::{
     CONFIG_PATH_ENV, FieldConfig, ServerConfig, SyncConfig, env_source, get_configuration,
     get_configuration_with_env,
 };
+use sismatic_server::lifecycle::Retention;
 use sismatic_server::run;
 
 fn fixture(name: &str) -> PathBuf {
@@ -86,6 +87,28 @@ fn the_fixture_config_resolves_its_sync_and_http_sections() {
             ("UNIT_NAME", None),
         ]
     );
+}
+
+/// The `[store]` section, read from a real file rather than from config text.
+///
+/// Worth a test of its own because this section's values are *prose*, and prose
+/// is exactly what the extension-dispatched parse gets to have an opinion about
+/// before the deserializer ever sees it. `2 weeks` has a space in it; `1h` is a
+/// token a YAML scalar reader could plausibly mangle; `512MiB` is neither a
+/// number nor a keyword. The unit tests prove each spelling *parses*; only a
+/// real file shows that what an operator types survives the round trip to the
+/// values the runtime bounds itself by.
+#[test]
+fn the_fixture_config_resolves_its_store_section() {
+    let cfg = get_configuration(fixture("configuration.yaml")).expect("reading fixture config");
+
+    assert_eq!(
+        cfg.store.retain,
+        Retention::Age(Duration::from_secs(14 * 86_400)),
+        "a two-word duration has to survive the YAML scalar reader"
+    );
+    assert_eq!(cfg.store.cleanup, Some(Duration::from_secs(3_600)));
+    assert_eq!(cfg.store.max_memory, Some(512 * 1024 * 1024));
 }
 
 /// The catch-all config, read from a real file: `"*"` survives YAML quoting and
@@ -299,6 +322,15 @@ fn test_config(host: &str, port: u16) -> ServerConfig {
                     interval: None,
                 },
             ],
+        },
+        // A sweeper that will tick at least once during the run, so `run`'s
+        // startup and shutdown of it are exercised rather than merely compiled.
+        // The window is long enough that the pass finds nothing to do, which is
+        // the point: this test is about the wiring, not the policy.
+        store: sismatic_server::configuration::StoreConfig {
+            retain: Retention::Age(Duration::from_secs(3_600)),
+            cleanup: Some(Duration::from_millis(10)),
+            max_memory: Some(64 * 1024 * 1024),
         },
         http: sismatic_server::configuration::HttpConfig {
             host: host.to_owned(),

@@ -16,6 +16,14 @@ sync:
     - name: UNIT_NAME
       interval_secs: 0
 
+# All three lifecycle knobs, each in the natural-language spelling — so this
+# fixture is also the check that the shipped forms survive a real file read
+# rather than only the unit tests' config text.
+store:
+  retain: 2 weeks
+  cleanup_interval: 1h
+  max_memory: 512MiB
+
 http:
   host: 0.0.0.0
   port: 9000

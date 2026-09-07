@@ -53,8 +53,17 @@ chrono.workspace = true
 uuid.workspace = true
 clap = { workspace = true, features = ["derive"] }
 config = "0.15.25"
+# The `[store]` section's durations: `retain: 30d`, `cleanup_interval: 1h 30min`.
+# See the workspace manifest for why this one is a dependency and the byte sizes
+# beside it are not.
+humantime.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+# The store sweeper's cooperative shutdown, the same `CancellationToken` the
+# sync driver and the intent relay stop on. The sweeper lives here rather than
+# in a crate of its own because it is one timer over one port and knows nothing
+# a library could not — see `lifecycle`.
+tokio-util.workspace = true
 tracing = { workspace = true, features = ["log"] }
 tracing-bunyan-formatter.workspace = true
 tracing-log.workspace = true
