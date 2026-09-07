@@ -11,15 +11,16 @@
 //! restating those semantics would be the thing under test rather than the thing
 //! being tested against.
 //!
-//! # The three halves
+//! # The four quarters
 //!
-//! One suite per URL scope, and one module per id-space inside it, which is the
-//! shape `src/handlers` has: [`devices`] covers `/v1/reads/devices/…`
+//! One suite per URL scope, and one module per route family inside it, which is
+//! the shape `src/handlers` has: [`devices`] covers `/v1/reads/devices/…`
 //! against `handlers::reads`, [`groups`] covers `/v1/reads/groups/…`
-//! against `handlers::group_reads`, and [`fleet`] covers the bare
-//! `/v1/reads/devices` against `handlers::fleet_reads`. They are modules of one
-//! binary rather
-//! than three top-level suites because the helpers below are shared by them, and
+//! against `handlers::group_reads`, [`fleet`] covers the bare
+//! `/v1/reads/devices` against `handlers::fleet_reads`, and [`group_fleet`] the
+//! bare `/v1/reads/groups` against `handlers::fleet_group_reads`. They are
+//! modules of one binary rather
+//! than four top-level suites because the helpers below are shared by them, and
 //! because a scope is the unit worth being able to run on its own —
 //! `cargo test --test reads` is then exactly "the reads scope".
 //!
@@ -45,6 +46,7 @@ mod harness;
 
 mod devices;
 mod fleet;
+mod group_fleet;
 mod groups;
 
 /// The scope every path in this suite is built under.

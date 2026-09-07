@@ -31,11 +31,11 @@ use sismatic_store::{DynReadStore, ReadStore};
 use crate::handlers::target::{INVENTORY, READS, WRITES};
 use crate::handlers::{
     field_catalog, field_history, group_field_history, list_devices, list_fields, list_fleet,
-    list_group_fields, list_group_writes, list_groups, list_writes, pause_group_recording,
-    pause_recording, read_desired_recording_state, read_device, read_field, read_group,
-    read_group_desired_recording_state, read_group_field, read_write, set_group_metadata,
-    set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
-    stop_group_recording, stop_recording, writes_catalog,
+    list_fleet_groups, list_group_fields, list_group_writes, list_groups, list_writes,
+    pause_group_recording, pause_recording, read_desired_recording_state, read_device, read_field,
+    read_group, read_group_desired_recording_state, read_group_field, read_write,
+    set_group_metadata, set_group_setting, set_metadata, set_setting, start_group_recording,
+    start_recording, stop_group_recording, stop_recording, writes_catalog,
 };
 use crate::health_check;
 use crate::openapi::{
@@ -245,6 +245,13 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             .service(
                                 web::resource("/groups/{id}/fields")
                                     .route(web::get().to(list_group_fields)),
+                            )
+                            // The group index, last of the group routes for
+                            // the reason the fleet index is last of the device
+                            // ones: it is a bare `/groups` with everything
+                            // above it one segment longer.
+                            .service(
+                                web::resource("/groups").route(web::get().to(list_fleet_groups)),
                             ),
                     )
                     .service(

@@ -343,6 +343,41 @@ async fn the_index_covers_every_field_any_member_reported_ordered_by_name() {
         "every member is listed on every field, reported or not"
     );
     assert!(timezone["members"][0]["read"].is_null());
+
+    // Nothing has been written to this device group, so no field has anything
+    // to agree with and the roll-up over all three is `unknown` rather than a
+    // claim of agreement.
+    assert_eq!(body["sync"], "unknown");
+}
+
+/// The index carries one verdict for the whole device group, rolled up over its
+/// fields with the precedence a field uses over its members: drift wins.
+///
+/// Served rather than left to the caller because a status light derived
+/// client-side is a second implementation of this precedence, and two of them
+/// can disagree after a change here.
+#[tokio::test]
+async fn the_index_rolls_its_fields_up_into_one_verdict_for_the_device_group() {
+    let address = spawn([
+        // `atrium` did what it was told; `annex` did not.
+        state(ATRIUM, RecordingState::Started),
+        state(ANNEX, RecordingState::Stopped),
+        // A field nobody wrote to, so it can only ever be `unknown` — and must
+        // not dilute the drift beside it.
+        read(ATRIUM, "FIRMWARE", ReadValue::Version("2.11".into())),
+    ])
+    .await;
+    start_the_device_group(&address).await;
+
+    let body = get_json(&address, &format!("/groups/{GROUP}/fields")).await;
+
+    assert_eq!(field_names(&body), ["FIRMWARE", "RUNNING_STATE"]);
+    assert_eq!(body["fields"][0]["sync"], "unknown");
+    assert_eq!(body["fields"][1]["sync"], "drifted");
+    assert_eq!(
+        body["sync"], "drifted",
+        "one drifted field drifts the group"
+    );
 }
 
 /// A field the device group was told to set but no member has answered on yet

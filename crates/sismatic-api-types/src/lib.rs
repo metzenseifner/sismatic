@@ -24,8 +24,8 @@
 //! - [`mod@read`] — [`Read`], [`Timestamp`], the history-query DTOs, and the
 //!   fleet-wide [`FleetReads`] page
 //! - [`device`] — [`DeviceSummary`], [`GroupSummary`], and their list/detail forms
-//! - [`group`] — reading a group: [`GroupExpectation`], [`SyncState`], and the
-//!   member-wise response shapes
+//! - [`group`] — reading a group: [`GroupExpectation`], [`GroupSyncState`], the
+//!   member-wise response shapes, and the fleet-wide [`FleetGroupReads`] page
 //! - [`mod@write`] — write-side request bodies and instruction results
 //! - [`instruction`] — which names the routes above accept: [`FieldCatalog`],
 //!   [`WritesCatalog`]
@@ -75,9 +75,9 @@ pub use device::{
 };
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
 pub use group::{
-    GroupDesiredRecordingState, GroupExpectation, GroupFieldState, GroupFieldStateList,
-    GroupHistory, GroupWriteList, MemberDesiredRecordingState, MemberHistory, MemberState,
-    MemberWrites, SyncState,
+    FleetGroupQuery, FleetGroupReads, GroupDesiredRecordingState, GroupExpectation,
+    GroupFieldState, GroupFieldStateList, GroupHistory, GroupSyncState, GroupWriteList,
+    MemberDesiredRecordingState, MemberHistory, MemberState, MemberWrites,
 };
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
 pub use read::{

@@ -33,10 +33,10 @@
 //!
 //! # Two comparisons, and why both
 //!
-//! [`SyncState`] compares each member against the expectation. It catches the
-//! failure the expectation exists for: a device group that was told to record
-//! and is not, including the case where *every* member failed and the fleet
-//! therefore looks perfectly consistent.
+//! [`GroupSyncState`] compares each member against the expectation. It catches
+//! the failure the expectation exists for: a device group that was told to
+//! record and is not, including the case where *every* member failed and the
+//! fleet therefore looks perfectly consistent.
 //!
 //! [`GroupFieldState::uniform`] compares the members against each other. It
 //! needs no expectation, so it catches drift on fields nobody writes — one
@@ -68,7 +68,7 @@ use actix_web::web;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes below.
 use sismatic_api_types::{
     ApiError, DeviceId, FieldName, GroupExpectation, GroupFieldState, GroupFieldStateList,
-    GroupHistory, MemberHistory, MemberState, Read, ReadQuery, SyncState,
+    GroupHistory, GroupSyncState, MemberHistory, MemberState, Read, ReadQuery,
 };
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
@@ -95,7 +95,8 @@ use crate::handlers::target::{READS, group_members};
     responses(
         (status = 200, description = "Every field known for this group, ordered by \
              field name, each with what the group was told and what every member \
-             reports.", body = GroupFieldStateList),
+             reports, plus the group's drift verdict rolled up over all of them.",
+         body = GroupFieldStateList),
         (status = 404, description = "No group has this id. Unlike the device reads \
              routes' answer for an unknown device, this is a claim about \
              configuration — these routes cannot answer without the catalog.",
@@ -110,7 +111,32 @@ pub async fn list_group_fields(
     path: web::Path<String>,
 ) -> Result<web::Json<GroupFieldStateList>, ApiFailure> {
     let group = path.into_inner();
-    let members = group_members(&**catalog, &group, READS, "fields").await?;
+    Ok(web::Json(
+        group_state_of(&**catalog, &**store, &**state, group).await?,
+    ))
+}
+
+/// One device group's whole state: every field it knows about, each with what
+/// it was told and what every member reports.
+///
+/// The body of [`list_group_fields`], lifted out so
+/// [`fleet_group_reads`](crate::handlers::fleet_group_reads) can assemble a row
+/// with it. That sharing is not merely convenient — it is what makes the index
+/// and the detail view the same answer. A row built by a second traversal could
+/// disagree with the route it summarizes about which fields exist or what
+/// `sync` means, and the disagreement would surface as a dashboard whose
+/// overview and drill-down contradict each other.
+///
+/// Takes plain references rather than [`web::Data`] handles so it is callable
+/// from a handler that obtained its ports the same way but holds them under
+/// different names.
+pub(crate) async fn group_state_of(
+    catalog: &dyn DeviceCatalog,
+    store: &dyn ReadStore,
+    state: &dyn GroupState,
+    group: String,
+) -> Result<GroupFieldStateList, ApiFailure> {
+    let members = group_members(catalog, &group, READS, "fields").await?;
 
     // One store read per member rather than one per (member, field): the port
     // answers "everything known about this device" in a single call, and the
@@ -131,7 +157,7 @@ pub async fn list_group_fields(
         fields.extend(device.iter().map(|read| read.field.clone()));
     }
 
-    let fields = fields
+    let fields: Vec<GroupFieldState> = fields
         .into_iter()
         .map(|field| {
             let expected = expectations
@@ -152,7 +178,31 @@ pub async fn list_group_fields(
         })
         .collect();
 
-    Ok(web::Json(GroupFieldStateList { group, fields }))
+    Ok(GroupFieldStateList {
+        group,
+        sync: rolled_up(&fields),
+        fields,
+    })
+}
+
+/// One device group's drift verdict, its fields rolled up.
+///
+/// The precedence [`assemble`] rolls a field's members up with, applied one
+/// level out: drift wins over agreement, and `Unknown` is the resting state of
+/// a group nothing has been asked of. Spelled once and used by both routes,
+/// because a status light that meant "any member drifted" on one and "every
+/// field drifted" on another would be unreadable.
+///
+/// `Unknown` for a group with no fields at all, which has nothing to compare
+/// for the same reason a group with no expectation does.
+pub(crate) fn rolled_up(fields: &[GroupFieldState]) -> GroupSyncState {
+    if fields.iter().any(|f| f.sync == GroupSyncState::Drifted) {
+        GroupSyncState::Drifted
+    } else if fields.iter().any(|f| f.sync == GroupSyncState::InSync) {
+        GroupSyncState::InSync
+    } else {
+        GroupSyncState::Unknown
+    }
 }
 
 /// `GET /v1/reads/groups/{id}/fields/{field}` — one field across the whole
@@ -301,12 +351,12 @@ fn assemble(
                 // Nothing was asked of this device group, or this member has
                 // said nothing: `Unknown` rather than `InSync`, because
                 // agreement with nothing is not agreement.
-                (None, _) | (_, None) => SyncState::Unknown,
+                (None, _) | (_, None) => GroupSyncState::Unknown,
                 (Some(expected), Some(read)) => {
                     if satisfies(&expected.value, &read.value) {
-                        SyncState::InSync
+                        GroupSyncState::InSync
                     } else {
-                        SyncState::Drifted
+                        GroupSyncState::Drifted
                     }
                 }
             };
@@ -325,12 +375,12 @@ fn assemble(
 
     // Drift wins over agreement: a device group where four members started and
     // one did not needs attention, not one that is four-fifths fine.
-    let sync = if members.iter().any(|m| m.sync == SyncState::Drifted) {
-        SyncState::Drifted
-    } else if members.iter().any(|m| m.sync == SyncState::InSync) {
-        SyncState::InSync
+    let sync = if members.iter().any(|m| m.sync == GroupSyncState::Drifted) {
+        GroupSyncState::Drifted
+    } else if members.iter().any(|m| m.sync == GroupSyncState::InSync) {
+        GroupSyncState::InSync
     } else {
-        SyncState::Unknown
+        GroupSyncState::Unknown
     };
 
     GroupFieldState {
@@ -400,9 +450,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(answer.sync, SyncState::InSync);
+        assert_eq!(answer.sync, GroupSyncState::InSync);
         assert!(answer.uniform);
-        assert!(answer.members.iter().all(|m| m.sync == SyncState::InSync));
+        assert!(
+            answer
+                .members
+                .iter()
+                .all(|m| m.sync == GroupSyncState::InSync)
+        );
     }
 
     /// The finding the routes exist for: four started, one did not. The
@@ -418,10 +473,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(answer.sync, SyncState::Drifted);
+        assert_eq!(answer.sync, GroupSyncState::Drifted);
         assert!(!answer.uniform);
-        assert_eq!(answer.members[0].sync, SyncState::InSync);
-        assert_eq!(answer.members[1].sync, SyncState::Drifted);
+        assert_eq!(answer.members[0].sync, GroupSyncState::InSync);
+        assert_eq!(answer.members[1].sync, GroupSyncState::Drifted);
     }
 
     /// The case member-versus-member comparison cannot see, and the whole
@@ -440,7 +495,7 @@ mod tests {
         assert!(answer.uniform, "the members do agree with each other");
         assert_eq!(
             answer.sync,
-            SyncState::Drifted,
+            GroupSyncState::Drifted,
             "...and none of them agrees with what was asked"
         );
     }
@@ -460,7 +515,7 @@ mod tests {
         assert!(!answer.uniform);
         assert_eq!(
             answer.sync,
-            SyncState::Unknown,
+            GroupSyncState::Unknown,
             "nothing was asked, so there is nothing to agree with"
         );
     }
@@ -477,10 +532,10 @@ mod tests {
 
         assert_eq!(answer.members[1].device, "annex");
         assert_eq!(answer.members[1].read, None);
-        assert_eq!(answer.members[1].sync, SyncState::Unknown);
+        assert_eq!(answer.members[1].sync, GroupSyncState::Unknown);
         // One member agrees and none disagrees, so the device group reads in
         // sync — a silent member is missing evidence, not contrary evidence.
-        assert_eq!(answer.sync, SyncState::InSync);
+        assert_eq!(answer.sync, GroupSyncState::InSync);
         assert!(answer.uniform, "one reporter agrees with itself");
     }
 
@@ -491,8 +546,8 @@ mod tests {
             vec![read("atrium", state_value(RecordingState::Started))],
         );
 
-        assert_eq!(answer.sync, SyncState::Unknown);
-        assert_eq!(answer.members[0].sync, SyncState::Unknown);
+        assert_eq!(answer.sync, GroupSyncState::Unknown);
+        assert_eq!(answer.members[0].sync, GroupSyncState::Unknown);
         assert_eq!(answer.expected, None);
     }
 
@@ -511,7 +566,7 @@ mod tests {
             vec![read("atrium", ReadValue::Port(8080))],
         );
 
-        assert_eq!(answer.sync, SyncState::InSync);
+        assert_eq!(answer.sync, GroupSyncState::InSync);
     }
 
     #[test]
@@ -520,6 +575,50 @@ mod tests {
 
         assert!(answer.members.is_empty());
         assert!(answer.uniform, "no member disagrees with no member");
-        assert_eq!(answer.sync, SyncState::Unknown);
+        assert_eq!(answer.sync, GroupSyncState::Unknown);
+    }
+
+    /// A field's state with only the one thing the roll-up reads.
+    fn field(name: &str, sync: GroupSyncState) -> GroupFieldState {
+        GroupFieldState {
+            group: "atrium-room".to_owned(),
+            field: name.to_owned(),
+            expected: None,
+            sync,
+            uniform: true,
+            members: Vec::new(),
+        }
+    }
+
+    /// The group verdict is the members' precedence one level out: drift wins
+    /// over agreement, so a group that did four things right and one wrong
+    /// needs attention rather than reading four-fifths fine.
+    #[test]
+    fn the_verdict_rolls_fields_up_the_way_a_field_rolls_its_members_up() {
+        let drifted_in_one = [
+            field("RUNNING_STATE", GroupSyncState::InSync),
+            field("TITLE", GroupSyncState::Drifted),
+        ];
+        assert_eq!(rolled_up(&drifted_in_one), GroupSyncState::Drifted);
+
+        let agreeing = [
+            field("RUNNING_STATE", GroupSyncState::InSync),
+            field("TITLE", GroupSyncState::Unknown),
+        ];
+        assert_eq!(rolled_up(&agreeing), GroupSyncState::InSync);
+
+        // Nothing was ever asked of this group, so there is nothing to agree
+        // with — `Unknown`, never `InSync`.
+        let untouched = [field("RUNNING_STATE", GroupSyncState::Unknown)];
+        assert_eq!(rolled_up(&untouched), GroupSyncState::Unknown);
+        assert_eq!(rolled_up(&[]), GroupSyncState::Unknown);
+    }
+
+    /// The resting state is also the `Default`, so a `GroupFieldStateList` that
+    /// was built rather than assembled cannot claim agreement it never checked.
+    #[test]
+    fn an_unset_verdict_is_unknown() {
+        assert_eq!(GroupSyncState::default(), GroupSyncState::Unknown);
+        assert_eq!(GroupFieldStateList::default().sync, GroupSyncState::Unknown);
     }
 }

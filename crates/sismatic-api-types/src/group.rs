@@ -19,10 +19,10 @@
 //! asked to be" a statement the API can make. Without it, five members that all
 //! failed to start agree perfectly with each other and look fine.
 //!
-//! [`SyncState`] is that comparison, per member and rolled up for the group. It
-//! is [`Unknown`](SyncState::Unknown), not `InSync`, when there is nothing to
-//! compare: a group nothing was ever written to has no expectation, and
-//! reporting it as in sync would be a claim nothing supports.
+//! [`GroupSyncState`] is that comparison, per member and rolled up for the
+//! group. It is [`Unknown`](GroupSyncState::Unknown), not `InSync`, when there
+//! is nothing to compare: a group nothing was ever written to has no
+//! expectation, and reporting it as in sync would be a claim nothing supports.
 //!
 //! # Against each other
 //!
@@ -32,10 +32,10 @@
 //! on last year's firmware, or in a different timezone — which is exactly the
 //! class of problem an expectation can never see.
 //!
-//! It is a plain `bool` rather than a third [`SyncState`], because unlike the
-//! comparison against an expectation it is *always* decidable: with fewer than
-//! two members reporting it is vacuously true, and vacuity is a fact about the
-//! answer rather than an absence of one.
+//! It is a plain `bool` rather than a third [`GroupSyncState`], because unlike
+//! the comparison against an expectation it is *always* decidable: with fewer
+//! than two members reporting it is vacuously true, and vacuity is a fact about
+//! the answer rather than an absence of one.
 
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +67,7 @@ pub struct GroupExpectation {
     /// read carries the device's decode — so `"1"` is expected and
     /// `{"type":"flag","value":true}` is observed, and the two agree. The
     /// comparison that reconciles them is the server's; a client should read
-    /// [`SyncState`] rather than re-derive it.
+    /// [`GroupSyncState`] rather than re-derive it.
     pub value: ReadValue,
     /// When the group was told. The submission's instant, so every member of
     /// one request shares it.
@@ -80,12 +80,14 @@ pub struct GroupExpectation {
 /// common answer — a group nothing has ever been written to, or a member that
 /// has never reported the field — and folding it into either `true` or `false`
 /// would put a wrong claim on a dashboard. `Unknown` is the resting state of a
-/// system nobody has asked for anything yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// system nobody has asked for anything yet, and therefore also the
+/// [`Default`]: a value that arrived without being computed has, by definition,
+/// nothing behind it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum SyncState {
+pub enum GroupSyncState {
     /// The observed value satisfies the expectation.
     InSync,
     /// The observed value does not. Something happened to this member that did
@@ -94,6 +96,7 @@ pub enum SyncState {
     Drifted,
     /// Nothing to compare: no expectation is recorded for the field, or the
     /// member has never reported it.
+    #[default]
     Unknown,
 }
 
@@ -114,7 +117,7 @@ pub struct MemberState {
     /// looks identical to a one-member device group if the silent one is
     /// dropped.
     pub read: Option<Read>,
-    pub sync: SyncState,
+    pub sync: GroupSyncState,
 }
 
 /// One field across a whole group.
@@ -135,7 +138,7 @@ pub struct GroupFieldState {
     /// Drift wins over agreement deliberately. A roll-up is read as a status
     /// light, and a device group where four members started and one did not is
     /// one that needs attention, not one that is four-fifths fine.
-    pub sync: SyncState,
+    pub sync: GroupSyncState,
     /// Whether every member that has reported holds the same value.
     ///
     /// Vacuously `true` when fewer than two members have reported. Independent
@@ -154,10 +157,163 @@ pub struct GroupFieldState {
 pub struct GroupFieldStateList {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub group: GroupId,
+    /// The whole group's drift verdict: its fields rolled up the way a field's
+    /// members are — `drifted` if any field drifted, `in_sync` if at least one
+    /// agrees and none drifted, `unknown` when there is nothing to compare.
+    ///
+    /// The one number a status light needs, computed once by the server so that
+    /// every client agrees on it. Derived from [`GroupFieldState::sync`] by a
+    /// rule small enough for a caller to reimplement — which is exactly why it
+    /// is served instead: two implementations of one precedence can disagree
+    /// after a change here, and one cannot.
+    ///
+    /// # It describes the group, not the fields beside it
+    ///
+    /// On `GET /v1/reads/groups`, `?fields=` narrows `fields` **after** this is
+    /// computed, so a row can read `"sync": "drifted"` while every field it
+    /// carries reads `"sync": "unknown"`. That is not a contradiction and it is
+    /// the useful case: it says the group drifted somewhere the caller did not
+    /// ask to see, which a verdict rolled up from the projected columns could
+    /// never say. Ask without `?fields=` to find out where.
+    pub sync: GroupSyncState,
     /// Ordered by field name, for the same reason the store's `latest_all` is:
     /// a rendered page should diff cleanly between requests rather than
     /// reflecting an adapter's iteration order.
     pub fields: Vec<GroupFieldState>,
+}
+
+/// A page of the configured device groups' latest state, one row per group.
+///
+/// The row is [`GroupFieldStateList`] — the very body
+/// `GET /v1/reads/groups/{id}/fields` returns — rather than a type of its own.
+/// The device index needs [`DeviceReads`] because the per-device body
+/// ([`ReadList`]) does not name the device it belongs to; a group body already
+/// names its group, so a second type here would differ from
+/// `GroupFieldStateList` only in the spelling of one field, and a client would
+/// have to compile against two shapes for one answer.
+///
+/// [`DeviceReads`]: crate::read::DeviceReads
+/// [`ReadList`]: crate::read::ReadList
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct FleetGroupReads {
+    /// The device groups on this page, ordered by id.
+    pub groups: Vec<GroupFieldStateList>,
+    /// The `after` value that fetches the next page, or `null` when this page is
+    /// the last one.
+    ///
+    /// Always present, and the id of the last group on this page rather than an
+    /// opaque token, for the reasons [`FleetReads::next`] gives.
+    ///
+    /// [`FleetReads::next`]: crate::read::FleetReads::next
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub next: Option<GroupId>,
+}
+
+/// Filters for the group index route, deserialized from the query string, e.g.
+/// `?fields=RUNNING_STATE&sync=drifted&limit=50`.
+///
+/// The group counterpart of [`FleetQuery`], and deliberately not the same
+/// struct. Two of the six differ, and both differences are the subject
+/// changing rather than a parameter being renamed: there is no `group` filter,
+/// because groups do not nest, and there is a `sync` filter, because a device
+/// has nothing it was collectively told to be and so has no drift verdict to
+/// filter on.
+///
+/// Every field is optional, and an omitted filter means "do not narrow on this
+/// axis".
+///
+/// [`FleetQuery`]: crate::read::FleetQuery
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+// `IntoParams` for the reason `FleetQuery` derives it: the route documents the
+// struct the handler actually deserializes.
+#[cfg_attr(
+    feature = "openapi",
+    derive(utoipa::ToSchema, utoipa::IntoParams),
+    into_params(parameter_in = Query)
+)]
+pub struct FleetGroupQuery {
+    /// Which fields to report, comma-separated and by canonical name — e.g.
+    /// `RUNNING_STATE,FIRMWARE`. Omitted means every field each group knows
+    /// about.
+    ///
+    /// Normalized as in a path segment: case-insensitive, and `-` read as `_`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RUNNING_STATE,FIRMWARE"),
+        schema(value_type = Option<String>)
+    )]
+    pub fields: Option<String>,
+    /// Which device groups to report, comma-separated by id. Omitted means
+    /// every configured group.
+    ///
+    /// Every id must name a configured group; one that does not is a `404`
+    /// naming it, for the reason the device index refuses an unknown
+    /// `?devices=` id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "atrium-room,annex-hall"),
+        schema(value_type = Option<String>)
+    )]
+    pub groups: Option<String>,
+    /// Keep only groups whose members agree on a value satisfying every
+    /// `FIELD:value` predicate, comma-separated — e.g. `RUNNING_STATE:stopped`.
+    ///
+    /// Stricter than the device index's `where`, and necessarily so: a group
+    /// holds a value only if *every* member that has reported the field holds
+    /// one satisfying it. A group where four members are stopped and one is
+    /// recording is not a stopped group — that disagreement is the finding
+    /// these routes exist to surface, and a filter that reported such a group
+    /// as stopped would hide it.
+    ///
+    /// A group no member of which has reported the field cannot satisfy the
+    /// predicate and is excluded, exactly as a silent device is on the device
+    /// index.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RUNNING_STATE:stopped"),
+        schema(value_type = Option<String>)
+    )]
+    pub predicates: Option<String>,
+    /// Keep only groups whose rolled-up drift verdict is this one:
+    /// `drifted`, `in_sync` or `unknown`. Case-insensitive, and `-` is read as
+    /// `_`.
+    ///
+    /// The verdict is the group's fields rolled up the way a field's members
+    /// are: `drifted` if any field drifted, `in_sync` if any agrees and none
+    /// drifted, `unknown` when there is nothing to compare. `?sync=drifted` is
+    /// therefore "every device group that is not doing what it was told",
+    /// which is the question this route exists to answer at fleet scale.
+    ///
+    /// Evaluated over every field the group knows about, not only the ones
+    /// `fields` asks for — see the handler's note on selection before
+    /// projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "drifted"),
+        schema(value_type = Option<String>)
+    )]
+    pub sync: Option<String>,
+    /// Maximum device groups to return. Omitted means the server's default page
+    /// size; the server also caps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", param(example = 50))]
+    pub limit: Option<u32>,
+    /// Resume after this group id, exclusive — the `next` of the previous page.
+    /// Omitted starts at the first group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "atrium-room"),
+        schema(value_type = Option<String>)
+    )]
+    pub after: Option<GroupId>,
 }
 
 /// One member's series over the requested span, oldest first.

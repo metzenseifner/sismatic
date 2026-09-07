@@ -141,6 +141,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::instructions::field_catalog,
         crate::handlers::instructions::writes_catalog,
         crate::handlers::fleet_reads::list_fleet,
+        crate::handlers::fleet_group_reads::list_fleet_groups,
         crate::handlers::reads::list_fields,
         crate::handlers::reads::read_field,
         crate::handlers::reads::field_history,
@@ -190,11 +191,14 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::GroupList,
         sismatic_api_types::GroupSummary,
         // The group read bodies. `MemberState`, `MemberHistory`,
-        // `GroupExpectation` and `SyncState` arrive by being reachable from
+        // `GroupExpectation` and `GroupSyncState` arrive by being reachable from
         // these, for the same reason `ReadValue` does.
         sismatic_api_types::GroupFieldState,
         sismatic_api_types::GroupFieldStateList,
         sismatic_api_types::GroupHistory,
+        // The group index's page. Its rows are `GroupFieldStateList`, already
+        // named above because the per-group route returns one directly.
+        sismatic_api_types::FleetGroupReads,
         // The group write-side bodies. `MemberDesiredRecordingState` and `MemberWrites`
         // arrive by being reachable from these.
         sismatic_api_types::GroupDesiredRecordingState,
@@ -206,13 +210,13 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     )),
     tags(
         (name = "reads", description =
-            "Stored reads, of one device, of a whole device group, or of the \
-             fleet. Every queryable field of every device is reachable through \
-             these seven routes, because the field is a path parameter passed \
-             through to the store rather than a symbol the server was compiled \
-             against — a field added to the device catalog is served here with no \
-             code change. `/v1/reads` lists every name those seven accept, which \
-             is the one thing a path parameter cannot tell you.\n\n\
+            "Stored reads, of one device, of one device group, or of every one of \
+             either at once. Every queryable field of every device is reachable \
+             through these eight routes, because the field is a path parameter \
+             passed through to the store rather than a symbol the server was \
+             compiled against — a field added to the device catalog is served here \
+             with no code change. `/v1/reads` lists every name those eight accept, \
+             which is the one thing a path parameter cannot tell you.\n\n\
              The per-device routes under `/v1/reads/devices` answer from the \
              store alone, so an unknown id there is `nothing stored` rather than a \
              `404`. The `/v1/reads/groups` half \
@@ -222,11 +226,17 @@ const SCALAR_HTML: &str = r#"<!doctype html>
              device group was last told to be, which is what makes a device group \
              that ignored a request detectable when its members agree perfectly \
              with each other.\n\n\
-             The fleet index `GET /v1/reads/devices` consults the catalog for the \
-             same reason the group routes do — it has to know what to enumerate — \
-             so an id named in one of its filters is a `404` when nothing is \
-             configured under it, and a configured device that has never answered \
-             is a row with no reads rather than a missing one."),
+             The two indexes — `GET /v1/reads/devices` and `GET /v1/reads/groups` \
+             — consult the catalog for the same reason the group routes do: they \
+             have to know what to enumerate. So an id named in one of their \
+             filters is a `404` when nothing is configured under it, and a \
+             configured subject that has never answered is a row with nothing in \
+             it rather than a missing one. Both filter with `?fields=` and \
+             `?where=` and page with an id cursor; the group index adds \
+             `?sync=drifted`, which names every device group that is not doing \
+             what it was told — the one question no per-device route can ask, \
+             because the comparison needs an expectation and an expectation is \
+             recorded against a group."),
         (name = "inventory", description =
             "What this server was configured with. Answered from the device catalog \
              rather than the store, so an unknown id here is a `404` — a real claim \

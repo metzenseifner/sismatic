@@ -142,8 +142,8 @@ pub async fn list_fleet(
 ) -> Result<web::Json<FleetReads>, ApiFailure> {
     let query = query.into_inner();
 
-    let fields = wanted_fields(&query);
-    let predicates = predicates_of(&query)?;
+    let fields = wanted_fields(&query.fields);
+    let predicates = predicates_of(&query.predicates)?;
     let limit = page_size(query.limit)?;
     let candidates = candidates(&**catalog, &query).await?;
 
@@ -250,8 +250,12 @@ async fn unknown_device(catalog: &dyn DeviceCatalog, id: &str) -> ApiFailure {
 }
 
 /// One `FIELD:value` row filter.
-struct Predicate {
-    field: FieldName,
+///
+/// `pub(crate)` for the reason [`crate::handlers::reads`]'s parsing helpers are:
+/// the group index parses the same `?where=` syntax, and two parsers would be
+/// two spellings of one filter that could drift apart.
+pub(crate) struct Predicate {
+    pub(crate) field: FieldName,
     /// The caller's text, held as [`ReadValue::Text`] so [`satisfies`] reads it
     /// in whatever shape the device answered in. Nothing here parses the value,
     /// because nothing here knows what shape the field holds — the read does.
@@ -259,7 +263,7 @@ struct Predicate {
 }
 
 impl Predicate {
-    fn parse(raw: &str) -> Result<Self, ApiFailure> {
+    pub(crate) fn parse(raw: &str) -> Result<Self, ApiFailure> {
         let (field, want) = raw.split_once(':').ok_or_else(|| {
             ApiFailure::BadRequest(format!(
                 "'{raw}' is not a filter; write one as 'FIELD:value', \
@@ -280,6 +284,17 @@ impl Predicate {
         })
     }
 
+    /// Whether one read is of this filter's field *and* satisfies its value.
+    ///
+    /// Split out of [`holds`](Self::holds) because the two indexes quantify
+    /// over it differently: a device satisfies a predicate when *some* read of
+    /// it does, and a device group when *every* member that reported does. The
+    /// comparison itself is the same either way, and being one function is what
+    /// keeps it so.
+    pub(crate) fn matches(&self, read: &Read) -> bool {
+        read.field == self.field && satisfies(&self.want, &read.value)
+    }
+
     /// Whether `latest` — one device's whole snapshot — satisfies this filter.
     ///
     /// A device with no read of the named field holds nothing that could satisfy
@@ -287,18 +302,17 @@ impl Predicate {
     /// from "never answered"; the unfiltered page shows the second as an empty
     /// row, so the distinction is one request away rather than absent.
     fn holds(&self, latest: &[Read]) -> bool {
-        latest
-            .iter()
-            .any(|read| read.field == self.field && satisfies(&self.want, &read.value))
+        latest.iter().any(|read| self.matches(read))
     }
 }
 
 /// The `?where=` predicates, or an empty list if none were given.
-fn predicates_of(query: &FleetQuery) -> Result<Vec<Predicate>, ApiFailure> {
-    csv(&query.predicates)
-        .into_iter()
-        .map(Predicate::parse)
-        .collect()
+///
+/// Takes the raw parameter rather than the query struct, because the two
+/// indexes deserialize different structs and this is the one filter they spell
+/// identically.
+pub(crate) fn predicates_of(raw: &Option<String>) -> Result<Vec<Predicate>, ApiFailure> {
+    csv(raw).into_iter().map(Predicate::parse).collect()
 }
 
 /// The fields `?fields=` asked for, or `None` for "every field".
@@ -306,11 +320,8 @@ fn predicates_of(query: &FleetQuery) -> Result<Vec<Predicate>, ApiFailure> {
 /// `None` rather than an empty set, because the two mean opposite things and an
 /// empty `?fields=` is the caller declining to narrow rather than asking for
 /// nothing.
-fn wanted_fields(query: &FleetQuery) -> Option<BTreeSet<FieldName>> {
-    let fields: BTreeSet<FieldName> = csv(&query.fields)
-        .into_iter()
-        .map(normalize_field)
-        .collect();
+pub(crate) fn wanted_fields(raw: &Option<String>) -> Option<BTreeSet<FieldName>> {
+    let fields: BTreeSet<FieldName> = csv(raw).into_iter().map(normalize_field).collect();
     (!fields.is_empty()).then_some(fields)
 }
 
@@ -333,7 +344,7 @@ fn project(latest: Vec<Read>, fields: Option<&BTreeSet<FieldName>>) -> Vec<Read>
 /// else. A page of zero devices has no last row, so it can produce no cursor —
 /// a caller that accepted one would loop forever on a `next` that is always
 /// `null` while the fleet it never saw sits behind it.
-fn page_size(limit: Option<u32>) -> Result<usize, ApiFailure> {
+pub(crate) fn page_size(limit: Option<u32>) -> Result<usize, ApiFailure> {
     match limit {
         Some(0) => Err(ApiFailure::BadRequest(
             "?limit=0 asks for a page with no devices on it, which can carry no \
@@ -351,7 +362,7 @@ fn page_size(limit: Option<u32>) -> Result<usize, ApiFailure> {
 /// empty string a form submits for an untouched field, reads as "this filter was
 /// not given" — which is what the caller meant, and what an absent parameter
 /// already means.
-fn csv(raw: &Option<String>) -> Vec<&str> {
+pub(crate) fn csv(raw: &Option<String>) -> Vec<&str> {
     raw.iter()
         .flat_map(|list| list.split(','))
         .map(str::trim)
@@ -375,11 +386,8 @@ mod tests {
         }
     }
 
-    fn query(predicates: &str) -> FleetQuery {
-        FleetQuery {
-            predicates: Some(predicates.to_owned()),
-            ..FleetQuery::default()
-        }
+    fn query(predicates: &str) -> Option<String> {
+        Some(predicates.to_owned())
     }
 
     /// The comparison `where` is built on, reached through the parser a caller
@@ -459,10 +467,7 @@ mod tests {
 
     #[test]
     fn field_selection_folds_case_and_dashes_and_an_empty_filter_means_every_field() {
-        let selected = wanted_fields(&FleetQuery {
-            fields: Some("running-state, firmware ,".to_owned()),
-            ..FleetQuery::default()
-        });
+        let selected = wanted_fields(&Some("running-state, firmware ,".to_owned()));
         assert_eq!(
             selected,
             Some(BTreeSet::from([
@@ -473,14 +478,8 @@ mod tests {
 
         // Absent and blank both mean "do not narrow", which is not the same as
         // narrowing to nothing.
-        assert_eq!(wanted_fields(&FleetQuery::default()), None);
-        assert_eq!(
-            wanted_fields(&FleetQuery {
-                fields: Some(" , ".to_owned()),
-                ..FleetQuery::default()
-            }),
-            None
-        );
+        assert_eq!(wanted_fields(&None), None);
+        assert_eq!(wanted_fields(&Some(" , ".to_owned())), None);
     }
 
     #[test]

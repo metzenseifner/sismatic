@@ -159,7 +159,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        29,
+        30,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -207,8 +207,8 @@ async fn every_documented_operation_is_one_the_server_serves() {
 
     // One operation per path here, but asserted rather than assumed: a path
     // that gained a second method and lost it in `startup` would otherwise slip
-    // through as "29 paths, still fine".
-    assert_eq!(checked, 29, "expected one operation per documented path");
+    // through as "30 paths, still fine".
+    assert_eq!(checked, 30, "expected one operation per documented path");
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
@@ -407,7 +407,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        28,
+        29,
         "expected every reads, group, writes and inventory route under /v1, \
          got {:?}",
         paths.keys().collect::<Vec<_>>()
@@ -522,6 +522,34 @@ async fn the_fleet_route_documents_its_filters_under_their_wire_names() {
     assert_eq!(
         query,
         ["fields", "devices", "group", "where", "limit", "after"]
+    );
+}
+
+#[tokio::test]
+async fn the_group_index_documents_the_filters_that_are_its_own() {
+    // The two indexes are not the same six parameters, and the document has to
+    // show the difference: there is no `group` here, because groups do not
+    // nest, and there is a `sync` here, because a device has nothing it was
+    // collectively told to be. A client generated against the device index's
+    // list would offer a filter this route ignores and hide the one it exists
+    // for.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let params = doc["paths"]["/v1/reads/groups"]["get"]["parameters"]
+        .as_array()
+        .expect("the group index documents parameters");
+
+    let query: Vec<&str> = params
+        .iter()
+        .filter(|p| p["in"] == "query")
+        .map(|p| p["name"].as_str().expect("a parameter name"))
+        .collect();
+
+    // `where` under its wire name here too — same `serde` rename, same reason.
+    assert_eq!(
+        query,
+        ["fields", "groups", "where", "sync", "limit", "after"]
     );
 }
 
