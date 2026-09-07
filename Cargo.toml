@@ -164,3 +164,21 @@ tracing-bunyan-formatter = "0.3.10"
 tracing-log = "0.2.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+# Time spans an operator writes in words — `30d`, `2 weeks`, `1h 30min` — for the
+# server config's `[store]` section. A superset of the syntax a systemd unit
+# file accepts, which is where an operator configuring a service on these hosts
+# has most recently seen the form.
+#
+# Worth a dependency rather than a hand-rolled parser on the strength of one
+# property: it has no dependencies of its own, so the whole cost is the crate
+# itself, and `cargo deny` has nothing new to audit beyond MIT/Apache-2.0. What
+# it replaces is not the happy path — a dozen lines of `split` would cover
+# `30d` — but the unit table, the multi-term sums, the whitespace rules and the
+# overflow handling, each of which is a small correctness question this
+# workspace would then own forever for the sake of one config key.
+#
+# The byte sizes beside it are *not* taken from a crate, and the asymmetry is
+# deliberate: `512MiB` has one term and no arithmetic, and the only real
+# decision — whether a bare `M` is 1024- or 1000-based — is one this project has
+# to make explicitly rather than inherit. See `sismatic_server::units`.
+humantime = "2.3"

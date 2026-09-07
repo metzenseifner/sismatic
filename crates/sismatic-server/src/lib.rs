@@ -8,9 +8,12 @@
 //!   about what was persisted through a [`DynReadStore`], and records requests
 //!   to change a device through a `WriteSubmit`;
 //! - the **relay side**, [`sismatic_intent_relay::spawn`], which drains those
-//!   recorded requests and applies them to devices.
+//!   recorded requests and applies them to devices;
+//! - the **sweeper**, [`lifecycle::spawn`], which bounds what the store keeps —
+//!   the one of the four that talks to no device at all, and the reason it
+//!   lives in this crate rather than in one of its own.
 //!
-//! The three meet at two ports and nowhere else. That is what lets the HTTP
+//! The three device-facing sides meet at two ports and nowhere else. That is what lets the HTTP
 //! side accept a write without being able to name a `Device`: it appends an
 //! intent, and the relay — the only one of the three that may name one —
 //! performs it. This function is the only place that knows the store behind
@@ -23,8 +26,10 @@
 //! are then read by nobody, and the first poll of every field races to open the
 //! same connection.
 pub mod configuration;
+pub mod lifecycle;
 pub mod status;
 pub mod telemetry;
+pub mod units;
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -44,6 +49,7 @@ use sismatic_core::protocol::instructions::register::Register;
 use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_http_api::{Ports, ServerHandle, Stamp};
 use sismatic_store::group::DynGroupState;
+use sismatic_store::lifecycle::DynLifecycle;
 use sismatic_store::outbox::{DynWriteDrain, DynWriteLog, DynWriteSubmit};
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
@@ -63,15 +69,22 @@ pub async fn run(
     devices: Resolved,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), std::io::Error> {
-    let store = MemoryStore::default();
+    // The budget is handed to the store rather than to the sweeper, because it
+    // is enforced on the write path: a cap that only held at sweep time would
+    // give a burst the whole interval to exhaust the machine. What the sweeper
+    // gets is the other axis — the retention window — plus the reading that
+    // says whether the budget is having to do the window's job.
+    let store = MemoryStore::with_budget(cfg.store.max_memory);
     let read: DynReadStore = Arc::new(store.clone());
+    let lifecycle: DynLifecycle = Arc::new(store.clone());
     let write: DynWriteStore = Arc::new(store);
 
     // One object, four capabilities. Only this function knows they are the
-    // same value — the same arrangement `ReadStore`/`WriteStore` already use,
-    // and the reason neither side can perform the other's half by accident: the
-    // HTTP surface holds a handle that can only append and read, the relay one
-    // that can only drain, and neither type admits the other's methods.
+    // same value — the same arrangement the three store ports above already
+    // use, and the reason neither side can perform the other's half by
+    // accident: the HTTP surface holds a handle that can only append and read,
+    // the relay one that can only drain, the sweeper one that can only prune,
+    // and no type admits another's methods.
     //
     // `group_state` is the read-only view of what each device group was last
     // told. It is on the outbox rather than the store because an expectation is
@@ -150,6 +163,11 @@ pub async fn run(
         },
     );
 
+    // Started before the poll loops that fill the store, so a process restarting
+    // into a long retention window enforces it on the first tick rather than
+    // after the first interval of fresh writes.
+    let sweeper = lifecycle::spawn(lifecycle, cfg.store.retain, cfg.store.cleanup);
+
     let sync = sismatic_sync::spawn(
         registry,
         write,
@@ -190,6 +208,12 @@ pub async fn run(
     // once we are on the way out, and a keepalive probe starting now would only
     // add an SSH exchange for the drain below to wait behind.
     drop(keepalive);
+
+    // Stopped first among the tasks, and it is the one whose order does not
+    // matter: nothing waits on a sweep, and the data it would have deleted is
+    // about to go with the process. Stopping it here keeps it from competing for
+    // the store's locks with the drain below, which does have work to finish.
+    sweeper.shutdown().await;
 
     // Order matters, and it is the reverse of startup. The HTTP server is
     // already down, so no new intent can arrive; draining the relay next lets

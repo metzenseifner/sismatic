@@ -11,6 +11,9 @@ use serde::Deserialize;
 use serde::de::{self, MapAccess, value::MapAccessDeserializer};
 use sismatic_core::protocol::instructions::query::Query;
 
+use crate::lifecycle::Retention;
+use crate::units;
+
 /// Default devices config path relative to the configuration file.
 const DEFAULT_DEVICES_CONFIG_PATH: &str = "devices.toml";
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -23,6 +26,43 @@ const DEFAULT_PORT: u16 = 8080;
 
 const DEFAULT_INTENT_RELAY_POLL_MS: u64 = 250;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
+/// How far back the store keeps history when `[store]` says nothing.
+///
+/// A day, and deliberately short. The number that matters is not this one but
+/// the product of it with the poll schedule and the fleet size: a `'*'` wildcard
+/// at 300s is roughly nine thousand reads per device per day, so a fifty-device
+/// installation writes something like half a gigabyte a week. A default measured
+/// in weeks would therefore be a default that fills a small server, and it would
+/// do it to the deployments that never opened this file — which are exactly the
+/// ones with nobody watching. A day is enough history for the question this
+/// store is actually asked ("what has this recorder been doing today"), and an
+/// installation that wants more says so.
+const DEFAULT_RETAIN_SECS: u64 = 24 * 60 * 60;
+
+/// How often the sweeper looks for expired reads when `[store]` says nothing.
+///
+/// Five minutes. The interval decides how far *past* the retention window an
+/// expired read can linger, so it trades a little slack in the window against
+/// wake-ups; five minutes against a window of a day is under half a percent of
+/// overshoot, and costs twelve passes an hour over a structure the poll loops
+/// are touching thousands of times in the same period.
+const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 5 * 60;
+
+/// The store's byte budget when `[store]` says nothing.
+///
+/// 256 MiB — the setting that makes this adapter safe to ship. Before it, an
+/// unattended server's memory use was a function of its uptime, which is the
+/// property that kept the in-memory store a development story. It is a *cap*,
+/// not a reservation: nothing allocates it up front, and a small installation
+/// will never approach it.
+///
+/// Bounded by default rather than unbounded, and that is a behaviour change for
+/// an existing deployment: a server that has been quietly growing past this now
+/// discards its oldest history instead. That is the change being asked for. An
+/// installation that genuinely wants the old behaviour writes
+/// `max_memory: unlimited` and owns the consequence.
+const DEFAULT_MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
 const ENV_PREFIX: &str = "SISMATIC_SERVER";
 const ENV_SEPARATOR: &str = "__";
@@ -156,6 +196,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let intent_relay = raw.intent_relay.unwrap_or_default();
     let sync = raw.sync.unwrap_or_default();
     let http = raw.http.unwrap_or_default();
+    let store = raw.store.unwrap_or_default();
 
     let devices_config_path = base.join(
         raw.devices_config_path
@@ -193,8 +234,45 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
             default_interval,
             fields,
         },
+        store: StoreConfig {
+            retain: store
+                .retain
+                .unwrap_or(Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS))),
+            cleanup: handle_cleanup(store.cleanup_interval.map_or(
+                Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS),
+                |every| every.0,
+            )),
+            max_memory: handle_budget(
+                store
+                    .max_memory
+                    .map_or(DEFAULT_MAX_MEMORY_BYTES, |bytes| bytes.0),
+            ),
+        },
         http: HttpConfig { host, port },
     }
+}
+
+/// Decode the `store.cleanup_interval` sentinel: a zero delay is *never*,
+/// anything else is a sweep schedule.
+///
+/// Distinct from [`handle_interval`] rather than reusing it, because the value
+/// arrives as a `Duration` rather than a whole number of seconds:
+/// `cleanup_interval: 500ms` is expressible, and truncating it to seconds would
+/// read a real — if ill-advised — interval as the disable sentinel.
+fn handle_cleanup(every: Duration) -> Option<Duration> {
+    (!every.is_zero()).then_some(every)
+}
+
+/// Decode the `store.max_memory` sentinel: `0` is *unbounded*, anything else is
+/// a cap.
+///
+/// The same shape [`handle_interval`] gives a delay, and the same reason for
+/// spelling it out here rather than at the type: `Option<u64>` is what the store
+/// takes, and "no cap" has to be distinguishable from "a cap of nothing" by the
+/// time it gets there. The word `unlimited` decodes to `0` at the serde layer,
+/// so both spellings arrive here as one.
+fn handle_budget(bytes: u64) -> Option<u64> {
+    (bytes > 0).then_some(bytes)
 }
 
 /// Decode `intent_relay.poll_ms`.
@@ -292,6 +370,7 @@ pub struct RawServerConfig {
     pub devices_config_path: Option<String>,
     pub intent_relay: Option<RawIntentRelay>,
     pub sync: Option<RawSync>,
+    pub store: Option<RawStore>,
     pub http: Option<RawHttp>,
 }
 
@@ -325,6 +404,134 @@ pub struct RawSync {
     /// The interval every entry of `fields` inherits unless it pins its own.
     pub interval_secs: Option<u64>,
     pub fields: Option<Vec<RawField>>,
+}
+
+/// The `store` section as written — the store's lifecycle, in the two units it
+/// is actually bounded in.
+///
+/// A section of its own for the same reason `intent_relay` is one: the three
+/// settings only mean anything together, and nothing else in the document would
+/// inherit them. They are deliberately absent from [`Defaults`], which is a
+/// fallback table for values two sections might both want.
+///
+/// The values carry their own units — `30d`, `512MiB` — where the rest of the
+/// document puts the unit in the key. See [`units`](crate::units) for why the
+/// two conventions coexist, and note that a bare integer still works at every
+/// key here, read as seconds and as bytes respectively.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawStore {
+    /// The oldest read to keep: a rolling window (`30d`, `2 weeks`,
+    /// `1h 30min`), a fixed floor (`2026-01-01T00:00:00Z`, `2026-01-01`), or
+    /// `forever`.
+    pub retain: Option<Retention>,
+    /// How often to delete what `retain` has put out of scope. `0` or `never`
+    /// starts no sweeper at all.
+    pub cleanup_interval: Option<RawDuration>,
+    /// The store's byte budget (`512MiB`, `2GB`, a plain number of bytes), or
+    /// `unlimited`.
+    ///
+    /// Enforced continuously on the write path rather than at each sweep — see
+    /// [`sismatic_store::lifecycle`] — so it holds between cleanups, which is
+    /// what makes it a cap rather than an average.
+    pub max_memory: Option<RawBytes>,
+}
+
+/// A duration as written: `1h 30min`, `5min`, or a bare number of seconds.
+///
+/// A newtype rather than a `String` field parsed during resolution, because
+/// [`resolve_config`] is infallible and should stay that way: a bad duration is
+/// a malformed *document*, so it belongs with the unknown-key errors that
+/// `deny_unknown_fields` produces, reported by the same load and naming the same
+/// key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawDuration(pub Duration);
+
+/// A byte size as written: `512MiB`, `2GB`, `unlimited`, or a bare number of
+/// bytes. `unlimited` decodes to `0`, the sentinel [`handle_budget`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawBytes(pub u64);
+
+/// The word that switches the sweeper off, alongside the `0` every other delay
+/// in this document uses.
+const NEVER: &str = "never";
+
+/// The word that removes the cap, alongside `0`.
+const UNLIMITED: &str = "unlimited";
+
+/// Hand-written for the reason [`RawField`]'s is: the error an operator gets
+/// has to name their text and the forms that would have worked, which a derived
+/// or untagged impl cannot do.
+///
+/// Both integer visitors are required, not decorative. `config`'s
+/// `try_parsing(true)` — which [`env_source`] needs for `list_separator` to work
+/// at all — converts `SISMATIC_SERVER__STORE__CLEANUP_INTERVAL=300` into an
+/// integer before this is reached, so a string-only visitor would make every
+/// numeric spelling unreachable from the environment.
+impl<'de> Deserialize<'de> for RawDuration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DurationVisitor;
+
+        impl de::Visitor<'_> for DurationVisitor {
+            type Value = RawDuration;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a duration such as 5min, 1h 30min, a number of seconds, or 'never'")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<RawDuration, E> {
+                if text.trim().eq_ignore_ascii_case(NEVER) {
+                    return Ok(RawDuration(Duration::ZERO));
+                }
+                units::duration(text).map(RawDuration).map_err(E::custom)
+            }
+
+            fn visit_u64<E: de::Error>(self, secs: u64) -> Result<RawDuration, E> {
+                Ok(RawDuration(Duration::from_secs(secs)))
+            }
+
+            fn visit_i64<E: de::Error>(self, secs: i64) -> Result<RawDuration, E> {
+                let secs = u64::try_from(secs)
+                    .map_err(|_| E::custom(format!("a duration cannot be negative: {secs}")))?;
+                self.visit_u64(secs)
+            }
+        }
+
+        deserializer.deserialize_any(DurationVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BytesVisitor;
+
+        impl de::Visitor<'_> for BytesVisitor {
+            type Value = RawBytes;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a size such as 512MiB, 2GB, a number of bytes, or 'unlimited'")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<RawBytes, E> {
+                if text.trim().eq_ignore_ascii_case(UNLIMITED) {
+                    return Ok(RawBytes(0));
+                }
+                units::bytes(text).map(RawBytes).map_err(E::custom)
+            }
+
+            fn visit_u64<E: de::Error>(self, bytes: u64) -> Result<RawBytes, E> {
+                Ok(RawBytes(bytes))
+            }
+
+            fn visit_i64<E: de::Error>(self, bytes: i64) -> Result<RawBytes, E> {
+                let bytes = u64::try_from(bytes)
+                    .map_err(|_| E::custom(format!("a size cannot be negative: {bytes}")))?;
+                self.visit_u64(bytes)
+            }
+        }
+
+        deserializer.deserialize_any(BytesVisitor)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -416,6 +623,7 @@ pub struct ServerConfig {
     pub devices_config_path: PathBuf,
     pub intent_relay: IntentRelayConfig,
     pub sync: SyncConfig,
+    pub store: StoreConfig,
     pub http: HttpConfig,
 }
 
@@ -453,9 +661,10 @@ impl ServerConfig {
                 .devices_config_path
                 .unwrap_or(self.devices_config_path),
             // No command-line flag reaches the relay, so it passes through
-            // untouched — the same as `sync`.
+            // untouched — the same as `sync` and `store`.
             intent_relay: self.intent_relay,
             sync: self.sync,
+            store: self.store,
             http: HttpConfig {
                 host: overrides.host.unwrap_or(self.http.host),
                 port: overrides.port.unwrap_or(self.http.port),
@@ -483,6 +692,27 @@ pub struct FieldConfig {
     pub interval: Option<Duration>,
 }
 
+/// The store's resolved lifecycle: how far back it keeps, how often it prunes,
+/// and how much it may hold.
+///
+/// Every `Option` here is a resolved *never*, not an unset value — the same
+/// convention [`FieldConfig::interval`] uses. That is what makes the disabled
+/// cases legible at the point they are read: `cleanup: None` is a deployment
+/// that starts no sweeper, and `max_memory: None` is one with no cap, and
+/// neither is a value someone forgot to fill in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreConfig {
+    /// The oldest read to keep. See [`Retention`] for why the fixed-floor form
+    /// needs `max_memory` under it.
+    pub retain: Retention,
+    /// How often to delete what `retain` has put out of scope, or `None` for
+    /// never (`cleanup_interval: 0`).
+    pub cleanup: Option<Duration>,
+    /// The store's byte budget, or `None` for unbounded
+    /// (`max_memory: unlimited`).
+    pub max_memory: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConfig {
     pub host: String,
@@ -492,6 +722,8 @@ pub struct HttpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use sismatic_api_types::Timestamp;
 
     /// Parse config *text* with a stated environment rather than a file: these
     /// tests exercise the same merge and the same serde surface the real loader
@@ -857,6 +1089,11 @@ mod tests {
                         interval: Some(Duration::from_secs(DEFAULT_INTERVAL_SECS)),
                     }],
                 },
+                store: StoreConfig {
+                    retain: Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS)),
+                    cleanup: Some(Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS)),
+                    max_memory: Some(DEFAULT_MAX_MEMORY_BYTES),
+                },
                 http: HttpConfig {
                     host: DEFAULT_HOST.to_owned(),
                     port: DEFAULT_PORT,
@@ -930,6 +1167,238 @@ mod tests {
             err.to_string().contains("pollms"),
             "expected the unknown key named, got: {err}"
         );
+    }
+
+    // ---- the store section -----------------------------------------------
+
+    #[test]
+    fn an_absent_store_section_is_bounded_anyway() {
+        // The property that makes this adapter shippable: a config written
+        // before `[store]` existed — or by someone who never opened this page —
+        // still gets a cap. Unbounded is a thing you now have to ask for.
+        let cfg = resolve("", "{}");
+        assert_eq!(
+            cfg.store.max_memory,
+            Some(DEFAULT_MAX_MEMORY_BYTES),
+            "the default must be a bound, not the absence of one"
+        );
+        assert!(cfg.store.cleanup.is_some(), "and something must enforce it");
+    }
+
+    #[test]
+    fn the_store_section_is_read_in_its_natural_spellings() {
+        let cfg = resolve(
+            "",
+            "store:\n  retain: 30d\n  cleanup_interval: 1h\n  max_memory: 512MiB\n",
+        );
+        assert_eq!(
+            cfg.store,
+            StoreConfig {
+                retain: Retention::Age(Duration::from_secs(30 * 86_400)),
+                cleanup: Some(Duration::from_secs(3_600)),
+                max_memory: Some(512 * 1024 * 1024),
+            }
+        );
+    }
+
+    #[test]
+    fn a_multi_term_retention_is_summed() {
+        let cfg = resolve("", "store:\n  retain: 1w 3d 12h\n");
+        assert_eq!(
+            cfg.store.retain,
+            Retention::Age(Duration::from_secs(10 * 86_400 + 12 * 3_600))
+        );
+    }
+
+    #[test]
+    fn a_retention_may_be_a_fixed_instant() {
+        let cfg = resolve("", "store:\n  retain: '2026-01-01T00:00:00Z'\n");
+        assert_eq!(
+            cfg.store.retain,
+            Retention::Since(Timestamp("2026-01-01T00:00:00.000Z".into()))
+        );
+    }
+
+    #[test]
+    fn a_retention_may_be_a_bare_date() {
+        // The form an operator actually has when they pin a floor, and the one
+        // YAML is most likely to hand over unquoted.
+        let cfg = resolve("", "store:\n  retain: 2026-01-01\n");
+        assert_eq!(
+            cfg.store.retain,
+            Retention::Since(Timestamp("2026-01-01T00:00:00.000Z".into()))
+        );
+    }
+
+    #[test]
+    fn a_retention_may_opt_out() {
+        let cfg = resolve("", "store:\n  retain: forever\n");
+        assert_eq!(cfg.store.retain, Retention::Forever);
+        // ...case-insensitively, since the word is prose rather than an
+        // identifier.
+        assert_eq!(
+            resolve("", "store:\n  retain: Forever\n").store.retain,
+            Retention::Forever
+        );
+    }
+
+    #[test]
+    fn a_zero_retention_is_refused_rather_than_guessed() {
+        // The one place `[store]` breaks the document's `0`-means-off rule. Read
+        // as "off" it keeps everything; read literally it keeps nothing; the two
+        // are opposite and one of them is the unbounded growth this section
+        // exists to prevent.
+        let err = try_raw("store:\n  retain: 0\n", &[]).unwrap_err();
+        assert!(err.to_string().contains("forever"), "got: {err}");
+
+        // ...including when it is spelled with a unit.
+        assert!(try_raw("store:\n  retain: 0s\n", &[]).is_err());
+    }
+
+    #[test]
+    fn a_partial_store_section_is_accepted() {
+        // Each key is independently optional, so capping memory does not force
+        // an operator to restate a retention window they were happy with.
+        let cfg = resolve("", "store:\n  max_memory: 1GiB\n");
+        assert_eq!(cfg.store.max_memory, Some(1024 * 1024 * 1024));
+        assert_eq!(
+            cfg.store.retain,
+            Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS))
+        );
+        assert_eq!(
+            cfg.store.cleanup,
+            Some(Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS))
+        );
+    }
+
+    #[test]
+    fn integers_are_seconds_and_bytes() {
+        // The spelling the rest of the document uses, and the one the
+        // environment produces on its own — so it has to mean the obvious thing
+        // rather than being a parse error.
+        let cfg = resolve(
+            "",
+            "store:\n  retain: 3600\n  cleanup_interval: 60\n  max_memory: 1048576\n",
+        );
+        assert_eq!(cfg.store.retain, Retention::Age(Duration::from_secs(3_600)));
+        assert_eq!(cfg.store.cleanup, Some(Duration::from_secs(60)));
+        assert_eq!(cfg.store.max_memory, Some(1_048_576));
+    }
+
+    #[test]
+    fn the_disable_sentinels_resolve_to_none() {
+        // `0` and the word are one value by the time they get here, which is
+        // what keeps the two spellings from drifting apart.
+        for text in [
+            "store:\n  cleanup_interval: 0\n  max_memory: 0\n",
+            "store:\n  cleanup_interval: never\n  max_memory: unlimited\n",
+        ] {
+            let cfg = resolve("", text);
+            assert_eq!(cfg.store.cleanup, None, "for: {text}");
+            assert_eq!(cfg.store.max_memory, None, "for: {text}");
+        }
+    }
+
+    #[test]
+    fn a_sub_second_cleanup_interval_is_not_read_as_never() {
+        // The case truncating to seconds would get exactly backwards: an
+        // ill-advised interval is still an interval, and silently disabling the
+        // sweeper is the one outcome it must not produce.
+        let cfg = resolve("", "store:\n  cleanup_interval: 500ms\n");
+        assert_eq!(cfg.store.cleanup, Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn the_store_section_is_reachable_from_the_environment() {
+        // Every key by the one derivation rule, in the word spellings — which
+        // is the interesting half, because `config`'s type-guessing sees these
+        // as strings and the numeric spellings as integers.
+        let cfg = resolve_env(
+            "",
+            "{}",
+            &[
+                ("SISMATIC_SERVER__STORE__RETAIN", "7d"),
+                ("SISMATIC_SERVER__STORE__CLEANUP_INTERVAL", "10min"),
+                ("SISMATIC_SERVER__STORE__MAX_MEMORY", "2GiB"),
+            ],
+        );
+        assert_eq!(
+            cfg.store,
+            StoreConfig {
+                retain: Retention::Age(Duration::from_secs(7 * 86_400)),
+                cleanup: Some(Duration::from_secs(600)),
+                max_memory: Some(2 * 1024 * 1024 * 1024),
+            }
+        );
+    }
+
+    #[test]
+    fn the_numeric_spellings_survive_the_environment_too() {
+        // The path `try_parsing` changes: these arrive as integers rather than
+        // strings, which a string-only deserializer would reject outright.
+        let cfg = resolve_env(
+            "",
+            "store:\n  retain: 30d\n  max_memory: 512MiB\n",
+            &[
+                ("SISMATIC_SERVER__STORE__RETAIN", "3600"),
+                ("SISMATIC_SERVER__STORE__MAX_MEMORY", "0"),
+            ],
+        );
+        assert_eq!(cfg.store.retain, Retention::Age(Duration::from_secs(3_600)));
+        assert_eq!(cfg.store.max_memory, None);
+    }
+
+    #[test]
+    fn an_environment_variable_beats_the_file_inside_the_store_section() {
+        let cfg = resolve_env(
+            "",
+            "store:\n  retain: 30d\n  max_memory: 512MiB\n",
+            &[("SISMATIC_SERVER__STORE__RETAIN", "1h")],
+        );
+        assert_eq!(cfg.store.retain, Retention::Age(Duration::from_secs(3_600)));
+        // ...and says nothing about the key beside it: tables merge.
+        assert_eq!(cfg.store.max_memory, Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_misspelled_store_key_is_an_error() {
+        let err = try_raw("store:\n  max_memmory: 512MiB\n", &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("max_memmory"),
+            "expected the unknown key named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_retention_names_both_forms_it_could_have_taken() {
+        // The reason `Retention` hand-rolls its deserializer: an untagged enum
+        // would report "data did not match any variant" and leave the operator
+        // to guess which of the three spellings they were closest to.
+        let err = try_raw("store:\n  retain: last tuesday\n", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("last tuesday"), "got: {err}");
+        assert!(err.contains("30d"), "the duration form, got: {err}");
+        assert!(err.contains("2026-01-01"), "the instant form, got: {err}");
+    }
+
+    #[test]
+    fn an_unparseable_size_names_itself() {
+        let err = try_raw("store:\n  max_memory: plenty\n", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plenty"), "got: {err}");
+        assert!(err.contains("512MiB"), "and a good one, got: {err}");
+    }
+
+    #[test]
+    fn a_negative_size_is_rejected_rather_than_wrapping() {
+        // `u64::try_from` on a negative is the difference between "refuse" and
+        // "a budget of eighteen exabytes", which is a cap that does nothing.
+        let err = try_raw("store:\n  max_memory: -1\n", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("negative"), "got: {err}");
     }
 
     /// The overrides an operator who typed every flag would produce.
@@ -1323,6 +1792,18 @@ mod shipped_config_check {
             super::IntentRelayConfig {
                 poll: std::time::Duration::from_millis(250),
                 max_attempts: 3,
+            }
+        );
+        // The `[store]` section is the one whose values are prose, so "does the
+        // shipped file load" and "does it load as what it reads like" are
+        // genuinely different questions — a suffix this crate does not accept
+        // would parse as a *different* window rather than as nothing.
+        assert_eq!(
+            cfg.store,
+            super::StoreConfig {
+                retain: super::Retention::Age(std::time::Duration::from_secs(24 * 60 * 60)),
+                cleanup: Some(std::time::Duration::from_secs(5 * 60)),
+                max_memory: Some(256 * 1024 * 1024),
             }
         );
     }

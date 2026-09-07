@@ -5,6 +5,12 @@
 //! one object. Neither side can name the other, which is what keeps the read
 //! side free of a compile path to the device model.
 //!
+//! A third port, [`Lifecycle`], says what stops being recorded. It is separate
+//! from the write side because it is written by a different caller on a
+//! different clock — a sweeper on a timer, not a poll loop on a device — and a
+//! `WriteStore` that also pruned would hand every poll loop a method it must
+//! never call. See [`lifecycle`] for the rest of the argument.
+//!
 //! # Why every method is keyed by `(device, field)`
 //!
 //! A [`Read`] is a statement about one *quantity* on one device — the value
@@ -30,12 +36,14 @@ use sismatic_api_types::{DeviceId, FieldName, Read, TimeSpan};
 pub mod catalog;
 pub mod error;
 pub mod group;
+pub mod lifecycle;
 pub mod outbox;
 pub mod status;
 
 pub use catalog::{DeviceCatalog, DynDeviceCatalog};
 pub use error::{ReadError, WriteError};
 pub use group::{DynGroupState, GroupState};
+pub use lifecycle::{DynLifecycle, Lifecycle, Swept, Usage};
 pub use status::{DeviceStatus, DynDeviceStatus};
 
 /// A convenient object-safe handle.
