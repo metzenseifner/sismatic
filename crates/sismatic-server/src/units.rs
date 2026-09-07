@@ -140,6 +140,37 @@ pub fn bytes(text: &str) -> Result<u64, String> {
     }
 }
 
+/// Render a byte count as text [`bytes`] reads back as the same number.
+///
+/// The inverse of the parser above, and only ever the *exact* inverse: a figure
+/// that is a whole number of some binary unit is written with that unit, and
+/// anything else is written as plain bytes. There is no rounding and no `1.5GiB`
+/// — approximation is fine in a status line and wrong here, because what this
+/// renders is fed straight back in. `GET /v1/config` returns a document that is
+/// a valid `PATCH` body, and this is one of the four values that promise rests
+/// on.
+///
+/// Binary units rather than decimal, because those are the ones the bare
+/// suffixes mean and the ones a `MemoryMax=` beside this config is written in.
+#[must_use]
+pub fn format_bytes(bytes: u64) -> String {
+    // Largest first, so 1 GiB is `1GiB` rather than `1024MiB`.
+    const UNITS: [(u64, &str); 4] = [
+        (1 << 40, "TiB"),
+        (1 << 30, "GiB"),
+        (1 << 20, "MiB"),
+        (1 << 10, "KiB"),
+    ];
+
+    UNITS
+        .iter()
+        .find(|(scale, _)| bytes >= *scale && bytes.is_multiple_of(*scale))
+        .map_or_else(
+            || bytes.to_string(),
+            |(scale, suffix)| format!("{}{suffix}", bytes / scale),
+        )
+}
+
 /// Parse an absolute instant: RFC 3339, or a bare `YYYY-MM-DD` read as midnight
 /// UTC.
 ///
@@ -352,5 +383,77 @@ mod tests {
     #[test]
     fn a_duration_is_not_an_instant() {
         assert!(instant("30d").is_err());
+    }
+
+    // ---- rendering a size back out ----------------------------------------
+
+    #[test]
+    fn a_size_is_written_in_the_largest_unit_that_divides_it() {
+        assert_eq!(format_bytes(256 * 1024 * 1024), "256MiB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1GiB");
+        assert_eq!(format_bytes(1024), "1KiB");
+        assert_eq!(format_bytes(1 << 40), "1TiB");
+    }
+
+    #[test]
+    fn a_size_that_is_no_whole_unit_is_written_in_bytes() {
+        // Exact rather than pretty. What this renders is fed straight back in —
+        // `GET /v1/config` returns a document that is a valid `PATCH` body — so
+        // a rounded `1.2MiB` would make a read-modify-write cycle silently move
+        // the budget.
+        assert_eq!(format_bytes(1_234_567), "1234567");
+        assert_eq!(format_bytes(0), "0");
+        assert_eq!(format_bytes(1), "1");
+        // ...including a figure that is *nearly* a unit.
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1048575");
+    }
+
+    #[test]
+    fn every_rendered_size_parses_back_as_itself() {
+        // The property the round trip rests on, over both the values a config
+        // is likely to hold and the boundaries of each unit.
+        for value in [
+            0,
+            1,
+            1023,
+            1024,
+            1025,
+            1_048_576,
+            256 * 1024 * 1024,
+            1_234_567,
+            (1 << 30) + 1,
+            1 << 40,
+            u64::MAX,
+        ] {
+            let rendered = format_bytes(value);
+            assert_eq!(
+                bytes(&rendered),
+                Ok(value),
+                "{value} rendered as '{rendered}'"
+            );
+        }
+    }
+
+    #[test]
+    fn every_rendered_duration_parses_back_as_itself() {
+        // The same property for the other half of the `[store]` section, which
+        // is rendered by `humantime` rather than by this module — asserted here
+        // because it is this module's parser that has to accept it.
+        for value in [
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(300),
+            Duration::from_secs(3_600),
+            Duration::from_secs(24 * 60 * 60),
+            Duration::from_secs(30 * 86_400),
+            Duration::from_secs(10 * 86_400 + 12 * 3_600),
+        ] {
+            let rendered = humantime::format_duration(value).to_string();
+            assert_eq!(
+                duration(&rendered),
+                Ok(value),
+                "{value:?} rendered as '{rendered}'"
+            );
+        }
     }
 }

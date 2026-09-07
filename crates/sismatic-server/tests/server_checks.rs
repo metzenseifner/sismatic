@@ -34,8 +34,8 @@ use tokio::sync::oneshot;
 use sismatic_core::devices::config::{self, Resolved};
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_server::configuration::{
-    CONFIG_PATH_ENV, FieldConfig, ServerConfig, SyncConfig, env_source, get_configuration,
-    get_configuration_with_env,
+    CONFIG_PATH_ENV, ConfigSource, FieldConfig, Overrides, ServerConfig, SyncConfig, env_source,
+    get_configuration, get_configuration_with_env,
 };
 use sismatic_server::lifecycle::Retention;
 use sismatic_server::run;
@@ -296,6 +296,19 @@ fn a_missing_config_file_makes_the_binary_print_help() {
     assert!(out.stdout.is_empty(), "expected a clean stdout");
 }
 
+/// Where `run` would re-read its config from, for a test that never asks it to.
+///
+/// `run` takes the source alongside the resolved value because the two answer
+/// different questions — what to run under, and where a *new* answer would come
+/// from. Only `POST /v1/config/reload` asks the second one, and nothing here
+/// does, so this names a file that need not exist.
+fn test_source() -> ConfigSource {
+    ConfigSource {
+        path: PathBuf::from("unused-by-run.yaml"),
+        overrides: Overrides::default(),
+    }
+}
+
 /// A `ServerConfig` naming no real devices file, with the two poll schedules
 /// worth distinguishing — one enabled, one disabled — and an http section
 /// pinned to `host`/`port`.
@@ -350,6 +363,7 @@ fn test_config(host: &str, port: u16) -> ServerConfig {
 async fn run_starts_and_shuts_down_without_touching_the_filesystem() {
     run(
         test_config("127.0.0.1", 0),
+        test_source(),
         Resolved::default(),
         std::future::ready(()),
     )
@@ -385,6 +399,7 @@ async fn run_serves_the_health_check_on_the_configured_port() {
     let (stop, shutdown) = oneshot::channel::<()>();
     let server = tokio::spawn(run(
         test_config("127.0.0.1", port),
+        test_source(),
         Resolved::default(),
         async {
             // A dropped sender resolves this too, so a failing test tears the
@@ -412,12 +427,107 @@ async fn run_serves_the_health_check_on_the_configured_port() {
         .expect("run should shut down cleanly");
 }
 
+/// The other end-to-end path, and the one that goes the other way: a request
+/// that changes what `run` started.
+///
+/// Every piece of this is tested where it lives — `configuration::patched` over
+/// values, `dynamic` over channels, the route over a stated port in
+/// `sismatic-http-api`. What only this can show is that the root wired them to
+/// each other: that the settings the API reports are the ones `run` was handed,
+/// and that a `PATCH` against the running server moves them. A miswiring here —
+/// a `LiveSettings` built over a config the tasks were not started from, say —
+/// leaves every one of those suites green.
+#[tokio::test]
+async fn a_patch_changes_the_settings_the_running_server_reports() {
+    let port = {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
+        probe
+            .local_addr()
+            .expect("reading the bound address")
+            .port()
+    };
+
+    let (stop, shutdown) = oneshot::channel::<()>();
+    let server = tokio::spawn(run(
+        test_config("127.0.0.1", port),
+        test_source(),
+        Resolved::default(),
+        async {
+            let _ = shutdown.await;
+        },
+    ));
+
+    let exchange = tokio::task::spawn_blocking(move || {
+        // What `test_config` was built with, read back through the API.
+        let before = request(port, "GET", "/v1/config", None);
+        // Then one key changed, and the whole document read back again — the
+        // response to the patch is asserted separately from the next read, so a
+        // route that echoed its own input without applying it would fail here.
+        let patched = request(
+            port,
+            "PATCH",
+            "/v1/config",
+            Some(r#"{"sync":{"interval_secs":7}}"#),
+        );
+        let after = request(port, "GET", "/v1/config", None);
+        (before, patched, after)
+    })
+    .await
+    .expect("the client task");
+
+    stop.send(()).expect("run should still be listening");
+    server
+        .await
+        .expect("the server task")
+        .expect("run should shut down cleanly");
+
+    let (before, patched, after) = exchange;
+    assert!(
+        before.0.starts_with("HTTP/1.1 200"),
+        "expected the settings, got: {}",
+        before.0
+    );
+    assert!(
+        before.1.contains(r#""interval_secs":1"#),
+        "the reported settings should be the ones `run` was handed, got: {}",
+        before.1
+    );
+
+    assert!(
+        patched.0.starts_with("HTTP/1.1 200"),
+        "expected the patch to apply, got: {}\n{}",
+        patched.0,
+        patched.1
+    );
+    assert!(
+        after.1.contains(r#""interval_secs":7"#),
+        "the change should be what the server now reports, got: {}",
+        after.1
+    );
+    // The rest of the document is untouched — a patch that replaced the settings
+    // rather than folding onto them would have dropped these.
+    assert!(
+        after.1.contains(r#""max_memory":"64MiB""#) && after.1.contains(r#""port":"#),
+        "a patch should leave what it does not name, got: {}",
+        after.1
+    );
+}
+
 /// `GET /health_check` on loopback, returning the response's status line.
+fn get_status_line(port: u16) -> String {
+    request(port, "GET", "/health_check", None).0
+}
+
+/// One HTTP request on loopback, as `(status line, body)`.
+///
+/// Spoken by hand over a plain socket rather than through an HTTP client: what
+/// these tests assert is what an external probe reads, and a dependency to
+/// produce one would be a dependency this crate otherwise has no use for.
 ///
 /// Retries the connect: `run` is spawned, so there is no moment the test can
 /// observe at which it has reached its `bind`. Blocking I/O, hence the
 /// [`tokio::task::spawn_blocking`] at the call site.
-fn get_status_line(port: u16) -> String {
+fn request(port: u16, method: &str, path: &str, body: Option<&str>) -> (String, String) {
     /// Long enough to cover a loaded CI machine starting a runtime; short
     /// enough that a server which never binds fails the test rather than
     /// hanging until the harness gives up.
@@ -436,8 +546,19 @@ fn get_status_line(port: u16) -> String {
 
     // `Connection: close` so the server ends the body by closing, and
     // `read_to_string` therefore terminates without parsing a single header.
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+    if let Some(body) = body {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
+
     socket
-        .write_all(b"GET /health_check HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .write_all(request.as_bytes())
         .expect("sending the request");
 
     let mut response = String::new();
@@ -445,5 +566,10 @@ fn get_status_line(port: u16) -> String {
         .read_to_string(&mut response)
         .expect("reading the response");
 
-    response.lines().next().unwrap_or_default().to_owned()
+    let status = response.lines().next().unwrap_or_default().to_owned();
+    // The body is whatever follows the blank line that ends the headers.
+    let body = response
+        .split_once("\r\n\r\n")
+        .map_or(String::new(), |(_, body)| body.to_owned());
+    (status, body)
 }

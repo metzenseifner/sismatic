@@ -106,3 +106,92 @@ The http section configures the HTTP server. Devices are protected from HTTP
 floods (DDoS) because queries access the database, not the devices directly.
 This means that data queried is as up-to-date as the latest query by the
 synchronization runtime.
+
+## Changing configuration while it runs
+
+Most of the document above can be changed without restarting the process, over
+`/v1/config`:
+
+```text
+GET   /v1/config          every setting as it stands
+PATCH /v1/config          change some of them
+POST  /v1/config/reload   read the config file again and apply it
+```
+
+A change takes effect before the response is written. Re-timing a field starts
+and stops the poll loops for it; a new retention window is enforced at the next
+sweep, and a lowered `max_memory` discards the oldest history immediately.
+
+```sh
+# poll everything every sixty seconds
+curl -X PATCH localhost:8080/v1/config \
+     -H 'content-type: application/json' \
+     -d '{"sync": {"interval_secs": 60}}'
+
+# watch one field closely and leave the rest alone
+curl -X PATCH localhost:8080/v1/config \
+     -H 'content-type: application/json' \
+     -d '{"sync": {"fields": [{"name": "RUNNING_STATE", "interval_secs": 5},
+                              {"name": "*", "interval_secs": 300}]}}'
+
+# keep less, and cap the store harder
+curl -X PATCH localhost:8080/v1/config \
+     -H 'content-type: application/json' \
+     -d '{"store": {"retain": "6h", "max_memory": "64MiB"}}'
+```
+
+The body speaks the same vocabulary as the config file — `30d`, `512MiB`,
+`never`, `forever`, `unlimited`, `interval_secs: 0` for a field you want listed
+and not polled — because it is parsed by the same code. A key you do not name
+is left alone, and a misspelled key is a `400` rather than a setting that
+silently did nothing.
+
+`GET /v1/config` returns a complete statement of every setting, and that body is
+itself a valid `PATCH` body. So read-modify-write is safe to script: fetch it,
+change one number, send it back, and nothing you did not touch moves.
+
+**What cannot change.** `http` and `devices_config_path` are reported and not
+editable — one is the socket the server is already bound to, the other names the
+file the device registry and its SSH sessions were built from. Naming either at
+the value it already has is accepted (that is what keeps the whole document a
+valid patch); changing one is a `409` saying a restart is what applies it. Note
+also that the devices file's *contents* are read once at startup: a device added
+to it arrives with a restart and by nothing else.
+
+**A patch is not written to disk.** It changes the running process, and the file
+stays the single source of truth — so a `PATCH` is an override that lasts until
+the next reload or restart. Put a change you want to survive in the file.
+
+### Kubernetes
+
+Keep the server config in a ConfigMap and mount it as the file the server reads.
+kubelet rewrites that file within a minute or so of the ConfigMap changing, and
+nothing tells the process — so a watcher calls the reload route:
+
+```sh
+curl -X POST localhost:8080/v1/config/reload
+```
+
+That re-runs exactly the load the process ran at startup — file, then
+environment, then the flags the command line carried — so the running settings
+converge on the ConfigMap. It takes no body and is idempotent, which is what
+makes it safe to call on every write to the mounted volume (a ConfigMap update
+produces more than one). Either a sidecar watching the mount or a `kubectl exec`
+in a rollout hook will do.
+
+The reload answers:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Applied. The body is every setting as it now stands. |
+| `400` | The file parsed but a value could not be applied. Nothing was reloaded. |
+| `409` | `http` or `devices_config_path` moved. Those need a restart, so nothing was reloaded — roll the deployment. |
+| `500` | The file could not be read or parsed. The server keeps running under the settings it had. |
+
+The `409` is the one worth automating around: it is the ConfigMap telling you
+this particular change is a rolling restart rather than a reload.
+
+**Access.** There is no authentication in front of these routes yet, and unlike
+the rest of the API they change what the server does. Keep `/v1/config` behind
+whatever fronts the service — a NetworkPolicy, an ingress rule, or by not
+exposing the port beyond the cluster.

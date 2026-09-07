@@ -1,6 +1,6 @@
 //! Wiring shared by the black-box suites.
 //!
-//! [`run`](sismatic_http_api::run) takes eight collaborators, and rarely more
+//! [`run`](sismatic_http_api::run) takes nine collaborators, and rarely more
 //! than one of them is what a given suite is actually about. This module
 //! supplies the rest so a test file states the part it cares about and nothing
 //! else — and so the next collaborator is one edit here rather than one per
@@ -20,10 +20,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{
-    Barrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary, InstructionSummary,
-    Timestamp, WritesCatalog,
+    Barrier, ConfigDocument, ConfigPatch, ConnectionStatus, DeviceSummary, FieldCatalog,
+    FieldSettings, GroupSummary, HttpSettings, InstructionSummary, RelaySettings, StoreSettings,
+    SyncSettings, Timestamp, WritesCatalog,
 };
 use sismatic_http_api::Stamp;
+use sismatic_http_api::config::{ConfigRefusal, DynLiveConfig, LiveConfig};
 use sismatic_store::group::DynGroupState;
 use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit};
 use sismatic_store::status::DeviceStatus;
@@ -134,6 +136,122 @@ pub fn writes_catalog() -> WritesCatalog {
     }
 }
 
+/// The settings the suites run against unless they state their own.
+///
+/// Realistic rather than minimal — the built-in defaults, roughly — because the
+/// config suite compares whole bodies, and a document of zeroes would pass a
+/// route that served a `Default::default()` of its own.
+pub fn settings() -> ConfigDocument {
+    ConfigDocument {
+        sync: SyncSettings {
+            interval_secs: 30,
+            fields: vec![FieldSettings {
+                name: "RUNNING_STATE".to_owned(),
+                interval_secs: Some(5),
+            }],
+        },
+        store: StoreSettings {
+            retain: "1day".to_owned(),
+            cleanup_interval: "5m".to_owned(),
+            max_memory: "256MiB".to_owned(),
+        },
+        intent_relay: RelaySettings {
+            poll_ms: 250,
+            max_attempts: 3,
+        },
+        http: HttpSettings {
+            host: "127.0.0.1".to_owned(),
+            port: 8080,
+        },
+        devices_config_path: "/etc/sismatic/devices.toml".to_owned(),
+    }
+}
+
+/// A [`LiveConfig`] that answers with what it was told to and records what it
+/// was asked.
+///
+/// A double rather than the real adapter, and for the reason [`StatedStatus`] is
+/// one rather than a weaker one: the real implementation lives in
+/// `sismatic-server`, which this crate may not name — it is the composition
+/// root, and the port exists precisely so these routes need not know that.
+///
+/// So the split is the same one the instruction catalogs use. These suites pin
+/// what the *routes* are responsible for: that a body reaches the port parsed,
+/// that what the port answers is what a caller receives, and that each refusal
+/// becomes the status its case calls for. That folding a patch onto a config
+/// produces the right config is `sismatic-server`'s own half, tested there over
+/// values. Neither crate can check both, and between them nothing is unchecked.
+pub struct StatedConfig {
+    document: ConfigDocument,
+    /// What every change refuses with, or `None` to accept them.
+    refusal: Option<ConfigRefusal>,
+    /// Every patch that arrived, in order — the only evidence that a body was
+    /// deserialized rather than dropped.
+    applied: std::sync::Mutex<Vec<ConfigPatch>>,
+    reloads: AtomicUsize,
+}
+
+impl Default for StatedConfig {
+    fn default() -> Self {
+        Self::stating(settings())
+    }
+}
+
+impl StatedConfig {
+    /// One that accepts every change and reports `document`.
+    pub fn stating(document: ConfigDocument) -> Self {
+        Self {
+            document,
+            refusal: None,
+            applied: std::sync::Mutex::new(Vec::new()),
+            reloads: AtomicUsize::new(0),
+        }
+    }
+
+    /// One that refuses every change with `refusal`.
+    pub fn refusing(refusal: ConfigRefusal) -> Self {
+        Self {
+            refusal: Some(refusal),
+            ..Self::default()
+        }
+    }
+
+    /// The patches that reached the port.
+    pub fn applied(&self) -> Vec<ConfigPatch> {
+        self.applied.lock().expect("lock").clone()
+    }
+
+    /// How many times a reload was asked for.
+    pub fn reloads(&self) -> usize {
+        self.reloads.load(Ordering::SeqCst)
+    }
+
+    /// The answer to a change: the stated refusal, or the stated document.
+    fn answer(&self) -> Result<ConfigDocument, ConfigRefusal> {
+        match &self.refusal {
+            Some(refusal) => Err(refusal.clone()),
+            None => Ok(self.document.clone()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveConfig for StatedConfig {
+    async fn current(&self) -> ConfigDocument {
+        self.document.clone()
+    }
+
+    async fn apply(&self, patch: ConfigPatch) -> Result<ConfigDocument, ConfigRefusal> {
+        self.applied.lock().expect("lock").push(patch);
+        self.answer()
+    }
+
+    async fn reload(&self) -> Result<ConfigDocument, ConfigRefusal> {
+        self.reloads.fetch_add(1, Ordering::SeqCst);
+        self.answer()
+    }
+}
+
 /// Serve `store` and a fresh outbox on `listener`, detached; hand the outbox
 /// back so a test can inspect the write side directly.
 ///
@@ -169,6 +287,7 @@ pub fn serve_with_status(
         status,
         field_catalog(),
         writes_catalog(),
+        Arc::new(StatedConfig::default()),
     )
 }
 
@@ -187,6 +306,7 @@ pub fn serve_all(
     status: StatedStatus,
     fields: FieldCatalog,
     writes: WritesCatalog,
+    config: DynLiveConfig,
 ) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
@@ -209,6 +329,7 @@ pub fn serve_all(
             submit,
             log,
             group_state,
+            config,
             fields,
             writes,
         },
@@ -269,8 +390,32 @@ pub fn spawn_with_instructions(
         StatedStatus::default(),
         fields,
         writes,
+        Arc::new(StatedConfig::default()),
     );
     (format!("http://127.0.0.1:{port}"), outbox)
+}
+
+/// [`spawn`] over a stated settings port, for the suite that is about the config
+/// scope. Returns the base URL and the double, so a test can ask what reached
+/// the port as well as what came back.
+pub fn spawn_with_config(config: StatedConfig) -> (String, Arc<StatedConfig>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("reading the bound address")
+        .port();
+    let config = Arc::new(config);
+    let store: DynReadStore = Arc::new(sismatic_store_memory::MemoryStore::default());
+    drop(serve_all(
+        listener,
+        store,
+        catalog(),
+        StatedStatus::default(),
+        field_catalog(),
+        writes_catalog(),
+        config.clone(),
+    ));
+    (format!("http://127.0.0.1:{port}"), config)
 }
 
 /// A [`DeviceStatus`] that reports whatever it was told to.

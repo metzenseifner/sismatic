@@ -58,6 +58,14 @@
 //! for the group-shaped reads, and [`handlers::writes`] for the status routes
 //! themselves.
 //!
+//! One scope has no device in it at all. `/v1/config` is where the *server* is
+//! read and changed — how often it polls, how much it keeps, how fast it drains
+//! — and it is the only place a request alters what the rest of this API will
+//! do next. It is served over a port like everything else, and that port is the
+//! only one here the store cannot supply: what is behind it is the composition
+//! root itself. See [`config`] for why the port is declared by its consumer, and
+//! [`handlers::config`] for why a reload route sits beside the patch route.
+//!
 //! The last two are the same routes described to a reader: an OpenAPI document
 //! derived from the handlers and the DTOs themselves, and the Scalar API
 //! reference served over it so the API can be browsed and exercised from a
@@ -110,11 +118,13 @@
 //! [`DynReadStore`]: sismatic_store::DynReadStore
 //! [`web::Data::from`]: actix_web::web::Data
 
+pub mod config;
 pub mod handlers;
 pub mod openapi;
 pub mod stamp;
 pub mod startup;
 
+pub use config::{ConfigRefusal, DynLiveConfig, LiveConfig};
 pub use handlers::health_check;
 pub use openapi::ApiDoc;
 pub use stamp::Stamp;

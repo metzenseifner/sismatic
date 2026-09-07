@@ -11,4 +11,4 @@ mod translate;
 // Re-exported at the root so the composition root spells
 // `sismatic_intent_relay::spawn(..)` rather than naming the module. `relay`
 // stays public because `RelayHandle`'s methods are documented there.
-pub use relay::{RelayConfig, RelayHandle, spawn};
+pub use relay::{RelayConfig, RelayHandle, fixed, spawn};

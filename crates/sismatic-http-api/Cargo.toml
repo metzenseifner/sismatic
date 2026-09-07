@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 actix-web.workspace = true
+# The store's ports are async traits and this crate declares one of its own:
+# `config::LiveConfig`, whose adapter can only be the composition root. A
+# dev-dependency until then, for the test doubles that implement `ReadStore`.
+async-trait.workspace = true
 # `openapi` turns on the DTOs' `ToSchema`/`IntoParams` derives. This crate is the
 # only place that needs them: it is where the schemas are assembled into a
 # document and served, and the contract crate has no opinion about HTTP.
@@ -40,9 +44,6 @@ scalar_api_reference.workspace = true
 flate2.workspace = true
 
 [dev-dependencies]
-# Needed to implement `ReadStore` for the test doubles in `tests/` — the store
-# port is an async trait.
-async-trait.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 # The tests drive a real server, so they need a runtime and `#[tokio::test]`.
 # `rt` (current-thread) is enough: actix runs its workers on their own threads,

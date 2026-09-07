@@ -12,6 +12,9 @@ sismatic-store = { workspace = true, optional = true }
 tokio = { workspace = true, features = [
   "macros",
   "rt",
+  # The `watch` channel the poll schedule arrives on: the driver's supervisor
+  # holds a receiver, and whoever changes the config holds the sender.
+  "sync",
   "time",
 ], optional = true }
 tokio-util = { workspace = true, optional = true }

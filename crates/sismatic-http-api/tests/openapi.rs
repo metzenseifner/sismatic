@@ -159,7 +159,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        30,
+        32,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -178,6 +178,12 @@ async fn every_documented_operation_is_one_the_server_serves() {
                 // body is a 400 from the extractor, which would be
                 // indistinguishable from a route that does not exist.
                 "put" => client.put(&url).json(&serde_json::json!({"value": "x"})),
+                // The config scope's body, and the one that says the most about
+                // this suite's purpose: `{}` is a patch that names nothing, so
+                // the route is reached and applies nothing. A `PATCH` with no
+                // body at all would be a 400 from the extractor, which reads
+                // exactly like a route that does not exist.
+                "patch" => client.patch(&url).json(&serde_json::json!({})),
                 other => panic!("{template} documents an unhandled method: {other}"),
             };
             let status = request
@@ -205,10 +211,11 @@ async fn every_documented_operation_is_one_the_server_serves() {
         }
     }
 
-    // One operation per path here, but asserted rather than assumed: a path
-    // that gained a second method and lost it in `startup` would otherwise slip
-    // through as "30 paths, still fine".
-    assert_eq!(checked, 30, "expected one operation per documented path");
+    // One operation per path except `/v1/config`, which is read and written on
+    // one resource — asserted rather than assumed, because a path that gained a
+    // second method and lost it in `startup` would otherwise slip through as
+    // "32 paths, still fine".
+    assert_eq!(checked, 33, "expected every documented operation");
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
@@ -407,7 +414,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        29,
+        31,
         "expected every reads, group, writes and inventory route under /v1, \
          got {:?}",
         paths.keys().collect::<Vec<_>>()
@@ -438,9 +445,12 @@ async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
         .iter()
         .map(|t| t["name"].as_str().expect("a tag name"))
         .collect();
-    assert_eq!(declared, ["reads", "inventory", "writes", "health"]);
+    assert_eq!(
+        declared,
+        ["reads", "inventory", "writes", "config", "health"]
+    );
 
-    // Every operation carries exactly one tag, and it is one of those four. An
+    // Every operation carries exactly one tag, and it is one of those five. An
     // untagged operation lands in the renderer's catch-all bucket, which is how
     // a route goes missing from the rendered document without going missing from
     // the server.

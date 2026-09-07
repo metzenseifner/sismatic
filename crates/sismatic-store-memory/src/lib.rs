@@ -44,6 +44,12 @@
 //!   [`upsert_latest`](WriteStore::upsert_latest) that pushes the estimate over
 //!   the budget evicts oldest-first until it is under again, before returning.
 //!
+//! The budget is settable while the store is in use — see
+//! [`set_budget`](MemoryStore::set_budget), which the composition root calls when
+//! `store.max_memory` changes under it. Lowering one has to evict *there and
+//! then* rather than at the next write, because a store nobody is writing to
+//! would otherwise sit over a cap it has already been given.
+//!
 //! The ledger holds one `Slot` per stored history entry, in the order it was
 //! written. That queue *is* the eviction order, which is what makes both
 //! operations amortised O(1) per entry rather than a scan for the oldest series
@@ -158,10 +164,38 @@ impl MemoryStore {
             latest: Arc::new(DashMap::new()),
             history: Arc::new(DashMap::new()),
             ledger: Arc::new(Ledger {
-                budget,
-                books: Mutex::new(Books::default()),
+                books: Mutex::new(Books {
+                    budget,
+                    ..Books::default()
+                }),
             }),
         }
+    }
+
+    /// Re-cap the store, evicting immediately down to the new figure, and report
+    /// how many entries that cost.
+    ///
+    /// An inherent method rather than a [`Lifecycle`] verb, and the distinction
+    /// is the same one that keeps `prune_to_bytes` off that port: what crosses a
+    /// port is what a *handler* may do, and no handler may re-cap a store. The
+    /// composition root holds the concrete adapter — it is the only thing that
+    /// knows this object is also the one behind three trait handles — so it
+    /// reaches the budget without a fourth capability existing for anyone else
+    /// to hold.
+    ///
+    /// Eviction happens here rather than being left to the next write, because a
+    /// quiet store would otherwise sit over a cap it has already been given: an
+    /// operator who lowers the budget in response to memory pressure needs the
+    /// memory back now, and the next write may be a poll interval away.
+    ///
+    /// Raising a budget frees nothing and evicts nothing — what was discarded
+    /// under the old figure is gone — so this returns `0` and the store simply
+    /// grows back into the room.
+    pub fn set_budget(&self, budget: Option<u64>) -> u64 {
+        let evicted = self.ledger.recap(budget);
+        let entries = evicted.len() as u64;
+        self.drop_front(&evicted);
+        entries
     }
 
     /// Remove the entries `slots` names, front-first, from the series they
@@ -211,20 +245,26 @@ impl MemoryStore {
     }
 }
 
-/// The budget and the books it is enforced against.
+/// The books the budget is enforced against.
 ///
-/// Split from [`Books`] so `budget` — which never changes after construction —
-/// is readable without taking the lock, and so the lock covers exactly the
-/// mutable state.
+/// A wrapper around one mutex rather than a struct with fields beside it: the
+/// budget used to sit out here, on the argument that a value fixed at
+/// construction is readable without taking the lock. It is not fixed any more —
+/// [`set_budget`](MemoryStore::set_budget) moves it — and a cap read outside the
+/// lock that settles a write inside one is a cap that can be enforced at a
+/// figure nobody asked for. So it went under the lock with the totals it is
+/// compared against, which is where the two calls that read it were already
+/// standing.
 struct Ledger {
-    /// Estimated bytes the store may hold, or `None` for unbounded.
-    budget: Option<u64>,
     books: Mutex<Books>,
 }
 
-/// Every stored history entry, in write order, plus the running totals.
+/// Every stored history entry, in write order, plus the running totals and the
+/// cap they are held under.
 #[derive(Default)]
 struct Books {
+    /// Estimated bytes the store may hold, or `None` for unbounded.
+    budget: Option<u64>,
     /// One slot per live history entry, oldest first. The eviction order, and
     /// — since a read is stamped immediately before it is written — very nearly
     /// the chronological one; see [`Books::take_expired`] for where the
@@ -287,6 +327,19 @@ impl Books {
     /// evictable has been evicted and the store is still over. The caller
     /// learns that from [`Usage::over_budget`] rather than from an error,
     /// because there is nothing a *write* could have done differently.
+    /// Claim whatever the current cap says has to go — nothing at all when
+    /// there is no cap.
+    ///
+    /// The one place the `Option` is read, so "unbounded" is spelled once rather
+    /// than at each caller, and a new caller cannot forget which of the two
+    /// meanings a `None` budget has.
+    fn enforce(&mut self) -> Vec<Slot> {
+        match self.budget {
+            Some(budget) => self.take_over_budget(budget),
+            None => Vec::new(),
+        }
+    }
+
     fn take_over_budget(&mut self, budget: u64) -> Vec<Slot> {
         let mut taken = Vec::new();
         while self.used() > budget {
@@ -359,10 +412,16 @@ impl Ledger {
         let mut books = self.books.lock().expect("ledger poisoned");
         books.restate_latest(added, displaced);
         books.record(slot);
-        match self.budget {
-            Some(budget) => books.take_over_budget(budget),
-            None => Vec::new(),
-        }
+        books.enforce()
+    }
+
+    /// Set the cap and settle the books against it at once, so no write can be
+    /// admitted between the two and be judged by the figure that is on its way
+    /// out.
+    fn recap(&self, budget: Option<u64>) -> Vec<Slot> {
+        let mut books = self.books.lock().expect("ledger poisoned");
+        books.budget = budget;
+        books.enforce()
     }
 
     /// Claim everything stamped before `before`, settling the books for it.
@@ -515,7 +574,7 @@ impl Lifecycle for MemoryStore {
         Ok(Usage {
             bytes: books.used(),
             entries: books.queue.len() as u64,
-            budget: self.ledger.budget,
+            budget: books.budget,
             evicted: books.evicted,
         })
     }
@@ -915,6 +974,92 @@ mod tests {
             .collect();
         assert_eq!(kept, [2, 3, 4]);
         assert_eq!(store.usage().await.unwrap().evicted, 2);
+    }
+
+    #[tokio::test]
+    async fn a_lowered_budget_evicts_at_once_rather_than_at_the_next_write() {
+        // The property `set_budget` exists for. An operator lowering the cap in
+        // response to memory pressure needs the memory back now, and the next
+        // write may be a poll interval away — or, on a store nobody is writing
+        // to, may never come.
+        let sample = read("dev-1", "T", 0, "2026-07-23T14:00:00Z");
+        let store = MemoryStore::default();
+        for n in 0..5 {
+            store
+                .upsert_latest(read("dev-1", "T", n, &format!("2026-07-23T14:00:{n:02}Z")))
+                .await
+                .unwrap();
+        }
+
+        let evicted = store.set_budget(Some(budget_for(&sample, 2, 1)));
+
+        assert_eq!(evicted, 3, "the three oldest should have gone");
+        let usage = store.usage().await.unwrap();
+        assert_eq!(usage.entries, 2);
+        assert!(!usage.over_budget(), "{usage:?}");
+        // Oldest-first, as on the write path: it is one queue and one rule.
+        let kept: Vec<u32> = all_history(&store, "dev-1", "T")
+            .await
+            .iter()
+            .map(|r| match r.value {
+                ReadValue::Number(n) => n,
+                _ => unreachable!("the fixture writes numbers"),
+            })
+            .collect();
+        assert_eq!(kept, [3, 4]);
+    }
+
+    #[tokio::test]
+    async fn a_re_capped_store_is_enforced_on_the_write_path_at_the_new_figure() {
+        // The other half: the cap is not merely applied once when it is set. A
+        // store re-capped and then written to has to stay at the new figure,
+        // which is what would break if `set_budget` swept and left the enforced
+        // value behind.
+        let sample = read("dev-1", "T", 0, "2026-07-23T14:00:00Z");
+        let store = MemoryStore::with_budget(Some(budget_for(&sample, 10, 1)));
+        store.set_budget(Some(budget_for(&sample, 2, 1)));
+
+        for n in 0..6 {
+            store
+                .upsert_latest(read("dev-1", "T", n, &format!("2026-07-23T14:00:{n:02}Z")))
+                .await
+                .unwrap();
+        }
+
+        let usage = store.usage().await.unwrap();
+        assert_eq!(usage.entries, 2);
+        assert_eq!(usage.budget, Some(budget_for(&sample, 2, 1)));
+    }
+
+    #[tokio::test]
+    async fn raising_a_budget_evicts_nothing_and_removing_it_unbounds() {
+        let sample = read("dev-1", "T", 0, "2026-07-23T14:00:00Z");
+        let store = MemoryStore::with_budget(Some(budget_for(&sample, 2, 1)));
+        for n in 0..4 {
+            store
+                .upsert_latest(read("dev-1", "T", n, &format!("2026-07-23T14:00:{n:02}Z")))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.set_budget(Some(budget_for(&sample, 100, 1))), 0);
+        // What the old cap discarded is gone — a budget is a bound, not a
+        // reservation, and raising one only makes room to grow back into.
+        assert_eq!(store.usage().await.unwrap().entries, 2);
+
+        assert_eq!(store.set_budget(None), 0);
+        assert_eq!(store.usage().await.unwrap().budget, None);
+        for n in 4..12 {
+            store
+                .upsert_latest(read("dev-1", "T", n, &format!("2026-07-23T14:00:{n:02}Z")))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.usage().await.unwrap().entries,
+            10,
+            "an unbounded store should evict nothing"
+        );
     }
 
     #[tokio::test]

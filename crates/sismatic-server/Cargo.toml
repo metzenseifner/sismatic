@@ -74,3 +74,8 @@ sismatic-intent-relay.workspace = true
 # `sync` for the oneshot the end-to-end test shuts `run` down with — the library
 # itself takes shutdown as a plain future and needs no channel of its own.
 tokio = { workspace = true, features = ["sync"] }
+# The config-scope tests state a `ConfigPatch` as the JSON a caller would send,
+# rather than as a struct literal: what the API accepts is the bytes, and a
+# literal would skip the very `deny_unknown_fields` and optionality the wire
+# contract is made of.
+serde_json.workspace = true
