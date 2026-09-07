@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/metzenseifner/sismatic/compare/v0.5.0...v0.6.0) - 2026-09-07
+
+### Added
+
+- *(sismatic-http-api)* [**breaking**] a group contains the desired_recording_state based on the latest write so that it is clear what the expected state of a groups members should be
+
 ## [0.5.0](https://github.com/metzenseifner/sismatic/compare/v0.4.1...v0.5.0) - 2026-09-07
 
 ### Added
