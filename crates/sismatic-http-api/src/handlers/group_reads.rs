@@ -73,10 +73,12 @@ use sismatic_api_types::{
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::group::{GroupState, satisfies};
+use sismatic_store::outbox::WriteLog;
 
 use crate::handlers::error::ApiFailure;
 use crate::handlers::reads::{normalize_field, reject_conflicting_field, span_of, truncate};
 use crate::handlers::target::{READS, group_members};
+use crate::handlers::writes::group_desired_recording_state;
 
 /// `GET /v1/reads/groups/{id}/fields` — every field any member has reported
 /// or the group has been told about, with each member's latest value.
@@ -95,8 +97,11 @@ use crate::handlers::target::{READS, group_members};
     responses(
         (status = 200, description = "Every field known for this group, ordered by \
              field name, each with what the group was told and what every member \
-             reports, plus the group's drift verdict rolled up over all of them.",
-         body = GroupFieldStateList),
+             reports, plus the group's drift verdict rolled up over all of them and \
+             the recording state the write side has accepted. Read the two together: \
+             `sync: unknown` with `desired_recording_state: idle` is a device group \
+             at rest, while the same `unknown` with `recording` is one that was told \
+             to record and has answered nothing.", body = GroupFieldStateList),
         (status = 404, description = "No group has this id. Unlike the device reads \
              routes' answer for an unknown device, this is a claim about \
              configuration — these routes cannot answer without the catalog.",
@@ -108,11 +113,12 @@ pub async fn list_group_fields(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     state: web::Data<dyn GroupState>,
+    log: web::Data<dyn WriteLog>,
     path: web::Path<String>,
 ) -> Result<web::Json<GroupFieldStateList>, ApiFailure> {
     let group = path.into_inner();
     Ok(web::Json(
-        group_state_of(&**catalog, &**store, &**state, group).await?,
+        group_state_of(&**catalog, &**store, &**state, &**log, group).await?,
     ))
 }
 
@@ -130,10 +136,27 @@ pub async fn list_group_fields(
 /// Takes plain references rather than [`web::Data`] handles so it is callable
 /// from a handler that obtained its ports the same way but holds them under
 /// different names.
+///
+/// # Why a read assembly holds the write log
+///
+/// [`GroupFieldStateList::desired_recording_state`] is what the outbox accepted,
+/// and it is here because it is what makes a `sync` of `unknown` legible —
+/// "nothing was asked" and "something was asked and nobody answered" are the
+/// same verdict with opposite meanings, and only the write side can tell them
+/// apart.
+///
+/// This does not widen what the read routes can do. [`WriteLog`] reads what was
+/// appended and cannot append; the narrowing that matters — no `WriteStore`, no
+/// `WriteDrain`, one write verb behind `submit` — is untouched, and the port was
+/// already assembled into the application for the `/v1/writes` routes. The scope
+/// boundary being crossed is a conceptual one, and the read side already crosses
+/// it: [`GroupState`] is the same outbox, and every `sync` verdict on this route
+/// is a read-side observation compared against a write-side claim.
 pub(crate) async fn group_state_of(
     catalog: &dyn DeviceCatalog,
     store: &dyn ReadStore,
     state: &dyn GroupState,
+    log: &dyn WriteLog,
     group: String,
 ) -> Result<GroupFieldStateList, ApiFailure> {
     let members = group_members(catalog, &group, READS, "fields").await?;
@@ -178,9 +201,17 @@ pub(crate) async fn group_state_of(
         })
         .collect();
 
+    // Read after the fields rather than before, so that when the two describe
+    // slightly different instants it is the *write-side* claim that is the
+    // newer one. That is the honest ordering for "what it should be, and what
+    // it has been" — the same argument the history route makes for reading its
+    // expectation last.
+    let recording = group_desired_recording_state(log, group.clone(), members).await?;
+
     Ok(GroupFieldStateList {
         group,
         sync: rolled_up(&fields),
+        desired_recording_state: recording.desired_recording_state,
         fields,
     })
 }
