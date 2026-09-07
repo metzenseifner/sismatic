@@ -140,6 +140,8 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         crate::handlers::health_check::health_check,
         crate::handlers::instructions::field_catalog,
         crate::handlers::instructions::writes_catalog,
+        crate::handlers::fleet_reads::list_fleet,
+        crate::handlers::fleet_group_reads::list_fleet_groups,
         crate::handlers::reads::list_fields,
         crate::handlers::reads::read_field,
         crate::handlers::reads::field_history,
@@ -169,6 +171,9 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     components(schemas(
         sismatic_api_types::Read,
         sismatic_api_types::ReadList,
+        // The fleet index's page. `DeviceReads` arrives by being reachable
+        // from it, for the same reason `ReadValue` does.
+        sismatic_api_types::FleetReads,
         sismatic_api_types::ApiError,
         // The write side's top-level bodies. `Intent`, `WriteStatus`,
         // `DesiredRecordingState`, `Rejection` and `Accepted` are reachable
@@ -186,11 +191,14 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         sismatic_api_types::GroupList,
         sismatic_api_types::GroupSummary,
         // The group read bodies. `MemberState`, `MemberHistory`,
-        // `GroupExpectation` and `SyncState` arrive by being reachable from
+        // `GroupExpectation` and `GroupSyncState` arrive by being reachable from
         // these, for the same reason `ReadValue` does.
         sismatic_api_types::GroupFieldState,
         sismatic_api_types::GroupFieldStateList,
         sismatic_api_types::GroupHistory,
+        // The group index's page. Its rows are `GroupFieldStateList`, already
+        // named above because the per-group route returns one directly.
+        sismatic_api_types::FleetGroupReads,
         // The group write-side bodies. `MemberDesiredRecordingState` and `MemberWrites`
         // arrive by being reachable from these.
         sismatic_api_types::GroupDesiredRecordingState,
@@ -202,22 +210,33 @@ const SCALAR_HTML: &str = r#"<!doctype html>
     )),
     tags(
         (name = "reads", description =
-            "Stored reads, of one device or of a whole device group. Every \
-             queryable field of every device is reachable through these six \
-             routes, because the field is a path parameter passed through to the \
-             store rather than a symbol the server was compiled against — a field \
-             added to the device catalog is served here with no code change. \
-             `/v1/reads` lists every name those six accept, which is the one \
-             thing a path parameter cannot tell you.\n\n\
-             The `/v1/reads/devices` half answers from the store alone, so an \
-             unknown id there is `nothing stored` rather than a `404`. The \
-             `/v1/reads/groups` half \
+            "Stored reads, of one device, of one device group, or of every one of \
+             either at once. Every queryable field of every device is reachable \
+             through these eight routes, because the field is a path parameter \
+             passed through to the store rather than a symbol the server was \
+             compiled against — a field added to the device catalog is served here \
+             with no code change. `/v1/reads` lists every name those eight accept, \
+             which is the one thing a path parameter cannot tell you.\n\n\
+             The per-device routes under `/v1/reads/devices` answer from the \
+             store alone, so an unknown id there is `nothing stored` rather than a \
+             `404`. The `/v1/reads/groups` half \
              also consults the catalog, because a device group has no reads of \
              its own and its membership has to come from somewhere — so an unknown \
              *group* is a `404`, and each response additionally carries what the \
              device group was last told to be, which is what makes a device group \
              that ignored a request detectable when its members agree perfectly \
-             with each other."),
+             with each other.\n\n\
+             The two indexes — `GET /v1/reads/devices` and `GET /v1/reads/groups` \
+             — consult the catalog for the same reason the group routes do: they \
+             have to know what to enumerate. So an id named in one of their \
+             filters is a `404` when nothing is configured under it, and a \
+             configured subject that has never answered is a row with nothing in \
+             it rather than a missing one. Both filter with `?fields=` and \
+             `?where=` and page with an id cursor; the group index adds \
+             `?sync=drifted`, which names every device group that is not doing \
+             what it was told — the one question no per-device route can ask, \
+             because the comparison needs an expectation and an expectation is \
+             recorded against a group."),
         (name = "inventory", description =
             "What this server was configured with. Answered from the device catalog \
              rather than the store, so an unknown id here is a `404` — a real claim \

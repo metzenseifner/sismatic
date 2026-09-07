@@ -11,6 +11,8 @@
 // the generated item is not the function.
 pub mod devices;
 pub mod error;
+pub mod fleet_group_reads;
+pub mod fleet_reads;
 pub mod group_reads;
 pub mod health_check;
 pub mod instructions;
@@ -19,6 +21,10 @@ pub mod target;
 pub mod writes;
 
 pub use devices::{list_devices, list_groups, read_device, read_group};
+
+pub use fleet_group_reads::list_fleet_groups;
+
+pub use fleet_reads::list_fleet;
 
 pub use instructions::{field_catalog, writes_catalog};
 
