@@ -203,11 +203,20 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let http = raw.http.unwrap_or_default();
     let store = raw.store.unwrap_or_default();
 
-    let devices_config_path = base.join(
-        raw.devices_config_path
-            .or(defaults.devices_config_path)
-            .unwrap_or_else(|| DEFAULT_DEVICES_CONFIG_PATH.to_owned()),
-    );
+    // Both paths anchored to the config file's directory, for the reason the
+    // module docs give: a relative path in a document belongs to that document,
+    // not to whatever directory the process happens to have been started from.
+    let raw_inventory = raw.inventory.unwrap_or_default();
+    let inventory = InventoryConfig {
+        config_path: base.join(
+            raw_inventory
+                .config_path
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_DEVICES_CONFIG_PATH)),
+        ),
+        runtime_config_path: raw_inventory
+            .runtime_config_path
+            .map(|path| base.join(path)),
+    };
 
     let default_interval = handle_interval(
         sync.interval_secs
@@ -230,7 +239,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let port = http.port.or(defaults.port).unwrap_or(DEFAULT_PORT);
 
     ServerConfig {
-        devices_config_path,
+        inventory,
         intent_relay: IntentRelayConfig {
             poll: handle_poll(intent_relay.poll_ms.unwrap_or(DEFAULT_INTENT_RELAY_POLL_MS)),
             max_attempts: effective_attempts(
@@ -254,6 +263,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
                     .max_memory
                     .map_or(DEFAULT_MAX_MEMORY_BYTES, |bytes| bytes.0),
             ),
+            cleanup_on_remove: store.cleanup_on_remove.unwrap_or(false),
         },
         http: HttpConfig { host, port },
     }
@@ -420,9 +430,9 @@ fn canonical_name(name: &str) -> String {
 pub struct RawServerConfig {
     #[serde(default)]
     pub defaults: Defaults,
-    pub devices_config_path: Option<String>,
     pub intent_relay: Option<RawIntentRelay>,
     pub sync: Option<RawSync>,
+    pub inventory: Option<RawInventory>,
     pub store: Option<RawStore>,
     pub http: Option<RawHttp>,
 }
@@ -432,7 +442,6 @@ pub struct RawServerConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
-    pub devices_config_path: Option<String>,
     pub interval_secs: Option<u64>,
     pub fields: Option<Vec<RawField>>,
     pub host: Option<String>,
@@ -449,6 +458,45 @@ pub struct Defaults {
 pub struct RawIntentRelay {
     pub poll_ms: Option<u64>,
     pub max_attempts: Option<u32>,
+}
+
+/// The `inventory` section as written: where the fleet comes from, and where
+/// runtime changes to it go.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawInventory {
+    /// The devices file. Absent means the built-in default.
+    pub config_path: Option<PathBuf>,
+    /// Where to persist runtime changes to the device set. Absent means nowhere,
+    /// which leaves [`config_path`](Self::config_path) authoritative.
+    pub runtime_config_path: Option<PathBuf>,
+}
+
+/// How the fleet may be changed while the process runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InventoryConfig {
+    /// The devices file this server's fleet is read from, resolved against the
+    /// server config's directory.
+    pub config_path: PathBuf,
+    /// Where runtime changes to the device set are written, or `None` to keep
+    /// them in memory only.
+    ///
+    /// **Unset by default, and that default is load-bearing.** With nothing
+    /// persisted the devices file is unambiguously authoritative: a restart
+    /// returns to exactly what it says, and there is no second source of truth.
+    ///
+    /// Setting it makes the state file win at startup, which is the point — a
+    /// fleet edited through the API survives a restart — and also the hazard.
+    /// The failure it invites is silent: an operator edits the devices file,
+    /// restarts, and nothing changes, because a state file they had forgotten
+    /// about is shadowing it. The server says so at `warn!` on every startup
+    /// that loads from state, and `POST /v1/inventory/reset` is how the file is
+    /// made authoritative again.
+    ///
+    /// The file carries credentials, necessarily: it exists to be loadable, and
+    /// a device this process cannot authenticate to is one it cannot poll. The
+    /// path and its mode are the deployment's to choose accordingly.
+    pub runtime_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -468,7 +516,7 @@ pub struct RawSync {
 /// fallback table for values two sections might both want.
 ///
 /// The values carry their own units — `30d`, `512MiB` — where the rest of the
-/// document puts the unit in the key. See [`units`](crate::units) for why the
+/// document puts the unit in the key. See [`crate::units`] for why the
 /// two conventions coexist, and note that a bare integer still works at every
 /// key here, read as seconds and as bytes respectively.
 #[derive(Debug, Default, Deserialize)]
@@ -488,6 +536,9 @@ pub struct RawStore {
     /// [`sismatic_store::lifecycle`] — so it holds between cleanups, which is
     /// what makes it a cap rather than an average.
     pub max_memory: Option<RawBytes>,
+    /// Whether removing a device drops its recorded reads. Absent means `false`
+    /// — see [`StoreConfig::cleanup_on_remove`].
+    pub cleanup_on_remove: Option<bool>,
 }
 
 /// A duration as written: `1h 30min`, `5min`, or a bare number of seconds.
@@ -672,8 +723,9 @@ impl<'de> Deserialize<'de> for RawField {
 /// [`resolve_config`], so no code path can skip it (folds in the default values).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
-    /// Where the devices file lives, using the server config's directory as base.
-    pub devices_config_path: PathBuf,
+    /// Where the fleet comes from, where runtime changes to it go, and — through
+    /// those two — which of the pair a restart reads.
+    pub inventory: InventoryConfig,
     pub intent_relay: IntentRelayConfig,
     pub sync: SyncConfig,
     pub store: StoreConfig,
@@ -686,7 +738,7 @@ pub struct ServerConfig {
 /// the composition root: `main` maps its own `Args` into this.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Overrides {
-    pub devices_config_path: Option<PathBuf>,
+    pub inventory_config_path: Option<PathBuf>,
     pub host: Option<String>,
     pub port: Option<u16>,
 }
@@ -701,18 +753,26 @@ impl ServerConfig {
     /// `default_value` would arrive here indistinguishable from a value the
     /// operator typed, and would silently outrank the config file every time.
     ///
-    /// Note what does *not* happen to `devices_config_path` here. It is not
+    /// Note what does *not* happen to `inventory.config_path` here. It is not
     /// anchored to the config file's directory the way [`resolve_config`] anchors
-    /// a path the file's devices_config_path named, because a path typed at a shell prompt is
+    /// a path the file's `inventory.config_path` named, because a path typed at a shell prompt is
     /// relative to the process's working directory. Re-anchoring it would hand
     /// back the very file the flag set out to replace — see
     /// [the module docs](self#relative-paths).
     #[must_use]
     pub fn with_overrides(self, overrides: Overrides) -> Self {
         Self {
-            devices_config_path: overrides
-                .devices_config_path
-                .unwrap_or(self.devices_config_path),
+            inventory: InventoryConfig {
+                config_path: overrides
+                    .inventory_config_path
+                    .unwrap_or(self.inventory.config_path),
+                // No command-line flag reaches this one. It is a path resolved
+                // against the config file's directory, so an override would have
+                // to re-anchor it — the very ambiguity `config_path` above
+                // documents, and one nobody has asked to take on for a file the
+                // server writes rather than reads.
+                runtime_config_path: self.inventory.runtime_config_path,
+            },
             // No command-line flag reaches the relay, so it passes through
             // untouched — the same as `sync` and `store`.
             intent_relay: self.intent_relay,
@@ -764,6 +824,18 @@ pub struct StoreConfig {
     /// The store's byte budget, or `None` for unbounded
     /// (`max_memory: unlimited`).
     pub max_memory: Option<u64>,
+    /// Whether removing a device also drops the reads recorded for it.
+    ///
+    /// Off by default, and that is the safe direction: a device removed by
+    /// mistake can be added back and its history is still there, where a purge
+    /// cannot be undone. What it costs is orphaned series — which the retention
+    /// window expires on its own schedule anyway, so nothing accumulates
+    /// forever.
+    ///
+    /// It never touches the *write* log. A cancelled write stays readable at
+    /// `GET /v1/writes/{id}` whatever this says, because a caller polling one
+    /// has to be able to learn it was cancelled.
+    pub cleanup_on_remove: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -903,7 +975,14 @@ pub fn document(cfg: &ServerConfig) -> ConfigDocument {
             host: cfg.http.host.clone(),
             port: cfg.http.port,
         },
-        devices_config_path: cfg.devices_config_path.display().to_string(),
+        inventory: sismatic_api_types::InventorySettings {
+            config_path: cfg.inventory.config_path.display().to_string(),
+            runtime_config_path: cfg
+                .inventory
+                .runtime_config_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        },
     }
 }
 
@@ -956,20 +1035,43 @@ pub fn patched(current: &ServerConfig, patch: &ConfigPatch) -> Result<ServerConf
         )));
     }
 
-    let devices_config_path = current.devices_config_path.display().to_string();
-    if let Some(named) = &patch.devices_config_path
-        && *named != devices_config_path
-    {
-        return Err(PatchError::Fixed(format!(
-            "devices_config_path is fixed until this process restarts: the device \
-             registry — and its open SSH sessions — was built from \
-             '{devices_config_path}', and pointing it at '{named}' means building \
-             another one"
-        )));
+    // Both inventory paths, refused by name. They are fixed for related but
+    // distinct reasons: the first named the document the registry — and its open
+    // SSH sessions — was built from, and the second names a file this process may
+    // already have written, so moving it mid-run would leave two of them each
+    // describing a fleet nobody is running.
+    if let Some(inventory) = &patch.inventory {
+        let config_path = current.inventory.config_path.display().to_string();
+        if let Some(named) = &inventory.config_path
+            && *named != config_path
+        {
+            return Err(PatchError::Fixed(format!(
+                "inventory.config_path is fixed until this process restarts: the device \
+                 registry — and its open SSH sessions — was built from \
+                 '{config_path}', and pointing it at '{named}' means building another one"
+            )));
+        }
+
+        let runtime = current
+            .inventory
+            .runtime_config_path
+            .as_ref()
+            .map(|path| path.display().to_string());
+        if inventory.runtime_config_path.is_some() && inventory.runtime_config_path != runtime {
+            return Err(PatchError::Fixed(format!(
+                "inventory.runtime_config_path is fixed until this process restarts: this \
+                 server persists the fleet to {}, and moving that mid-run would leave two \
+                 files each describing a fleet nobody is running",
+                runtime.as_deref().unwrap_or("nowhere")
+            )));
+        }
     }
 
     Ok(ServerConfig {
-        devices_config_path: current.devices_config_path.clone(),
+        // Both fixed, and checked above — carried forward rather than taken from
+        // the patch, so a patch that names them at their current values is the
+        // no-op the round trip promises.
+        inventory: current.inventory.clone(),
         intent_relay: patched_relay(&current.intent_relay, patch.intent_relay.as_ref()),
         sync: patched_sync(&current.sync, patch.sync.as_ref())?,
         store: patched_store(&current.store, patch.store.as_ref())?,
@@ -1085,6 +1187,10 @@ fn patched_store(
             Some(text) => handle_budget(setting::<RawBytes>(text, "store.max_memory")?.0),
             None => current.max_memory,
         },
+        // Not patchable: it is a policy about *removal*, and the removal
+        // routes are not the config scope's. Carried forward so a `PATCH` that
+        // names the other three store settings leaves it where it was.
+        cleanup_on_remove: current.cleanup_on_remove,
     })
 }
 
@@ -1183,37 +1289,61 @@ mod tests {
     #[test]
     fn devices_path_falls_back_to_the_built_in_default() {
         let cfg = resolve("", "{}");
-        assert_eq!(cfg.devices_config_path, PathBuf::from("devices.toml"));
+        assert_eq!(cfg.inventory.config_path, PathBuf::from("devices.toml"));
     }
 
+    /// The key moved under `inventory` and lost its `[defaults]` fallback, and
+    /// both old spellings are now refused rather than ignored.
+    ///
+    /// `deny_unknown_fields` is what does it, which is the good kind of
+    /// breaking: a config written against the old layout fails to start, naming
+    /// the key, instead of silently reading its devices from somewhere else.
     #[test]
-    fn defaults_table_supplies_the_devices_path() {
-        let cfg = resolve("", "defaults:\n  devices_config_path: pool.toml\n");
-        assert_eq!(cfg.devices_config_path, PathBuf::from("pool.toml"));
-    }
-
-    #[test]
-    fn explicit_devices_path_beats_the_defaults_table() {
-        let cfg = resolve(
-            "",
-            "devices_config_path: explicit.toml\ndefaults:\n  devices_config_path: fallback.toml\n",
-        );
-        assert_eq!(cfg.devices_config_path, PathBuf::from("explicit.toml"));
+    fn the_old_devices_config_path_spellings_are_refused() {
+        for text in [
+            "devices_config_path: pool.toml\n",
+            "defaults:\n  devices_config_path: pool.toml\n",
+        ] {
+            assert!(
+                try_raw(text, &[]).is_err(),
+                "`{text}` should no longer load; the key is `inventory.config_path`"
+            );
+        }
     }
 
     #[test]
     fn relative_devices_path_is_anchored_to_the_config_file_directory() {
-        let cfg = resolve("/etc/sismatic", "devices_config_path: devices.toml\n");
+        let cfg = resolve("/etc/sismatic", "inventory:\n  config_path: devices.toml\n");
         assert_eq!(
-            cfg.devices_config_path,
+            cfg.inventory.config_path,
             PathBuf::from("/etc/sismatic/devices.toml")
         );
     }
 
     #[test]
     fn absolute_devices_path_ignores_the_config_file_directory() {
-        let cfg = resolve("/etc/sismatic", "devices_config_path: /srv/devices.toml\n");
-        assert_eq!(cfg.devices_config_path, PathBuf::from("/srv/devices.toml"));
+        let cfg = resolve(
+            "/etc/sismatic",
+            "inventory:\n  config_path: /srv/devices.toml\n",
+        );
+        assert_eq!(
+            cfg.inventory.config_path,
+            PathBuf::from("/srv/devices.toml")
+        );
+    }
+
+    /// The second path in the section is anchored the same way, so the two keys
+    /// behave alike — which is half the reason they now sit together.
+    #[test]
+    fn the_runtime_config_path_is_anchored_the_same_way() {
+        let cfg = resolve(
+            "/etc/sismatic",
+            "inventory:\n  runtime_config_path: devices.state.toml\n",
+        );
+        assert_eq!(
+            cfg.inventory.runtime_config_path,
+            Some(PathBuf::from("/etc/sismatic/devices.state.toml"))
+        );
     }
 
     #[test]
@@ -1487,7 +1617,10 @@ mod tests {
         assert_eq!(
             cfg,
             ServerConfig {
-                devices_config_path: PathBuf::from(DEFAULT_DEVICES_CONFIG_PATH),
+                inventory: InventoryConfig {
+                    config_path: PathBuf::from(DEFAULT_DEVICES_CONFIG_PATH),
+                    runtime_config_path: None,
+                },
                 intent_relay: IntentRelayConfig {
                     poll: Duration::from_millis(DEFAULT_INTENT_RELAY_POLL_MS),
                     max_attempts: DEFAULT_MAX_ATTEMPTS,
@@ -1500,6 +1633,7 @@ mod tests {
                     retain: Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS)),
                     cleanup: Some(Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS)),
                     max_memory: Some(DEFAULT_MAX_MEMORY_BYTES),
+                    cleanup_on_remove: false,
                 },
                 http: HttpConfig {
                     host: DEFAULT_HOST.to_owned(),
@@ -1607,6 +1741,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(30 * 86_400)),
                 cleanup: Some(Duration::from_secs(3_600)),
                 max_memory: Some(512 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -1738,6 +1873,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(7 * 86_400)),
                 cleanup: Some(Duration::from_secs(600)),
                 max_memory: Some(2 * 1024 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -1812,9 +1948,9 @@ mod tests {
     }
 
     /// The overrides an operator who typed every flag would produce.
-    fn overrides(devices_config_path: &str, host: &str, port: u16) -> Overrides {
+    fn overrides(inventory_config_path: &str, host: &str, port: u16) -> Overrides {
         Overrides {
-            devices_config_path: Some(PathBuf::from(devices_config_path)),
+            inventory_config_path: Some(PathBuf::from(inventory_config_path)),
             host: Some(host.to_owned()),
             port: Some(port),
         }
@@ -1824,11 +1960,11 @@ mod tests {
     fn a_command_line_override_beats_every_layer_of_the_file() {
         let cfg = resolve(
             "",
-            "devices_config_path: from-the-file.toml\ndefaults:\n  port: 9999\nhttp:\n  host: 0.0.0.0\n",
+            "inventory:\n  config_path: from-the-file.toml\ndefaults:\n  port: 9999\nhttp:\n  host: 0.0.0.0\n",
         )
         .with_overrides(overrides("/srv/typed.toml", "::1", 3000));
 
-        assert_eq!(cfg.devices_config_path, PathBuf::from("/srv/typed.toml"));
+        assert_eq!(cfg.inventory.config_path, PathBuf::from("/srv/typed.toml"));
         assert_eq!(cfg.http.host, "::1");
         assert_eq!(cfg.http.port, 3000);
     }
@@ -1840,7 +1976,7 @@ mod tests {
         // must leave the sections it says nothing about entirely alone.
         let resolved = resolve(
             "",
-            "devices_config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
+            "inventory:\n  config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
         );
         let cfg = resolved.clone().with_overrides(Overrides {
             port: Some(3000),
@@ -1849,7 +1985,7 @@ mod tests {
 
         assert_eq!(cfg.http.port, 3000);
         assert_eq!(cfg.http.host, "0.0.0.0");
-        assert_eq!(cfg.devices_config_path, resolved.devices_config_path);
+        assert_eq!(cfg.inventory.config_path, resolved.inventory.config_path);
         assert_eq!(cfg.sync, resolved.sync);
     }
 
@@ -1860,7 +1996,7 @@ mod tests {
         // operator typed anything before calling it.
         let cfg = resolve(
             "",
-            "devices_config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
+            "inventory:\n  config_path: from-the-file.toml\nhttp:\n  host: 0.0.0.0\n  port: 9999\n",
         );
         assert_eq!(cfg.clone().with_overrides(Overrides::default()), cfg);
     }
@@ -1872,17 +2008,17 @@ mod tests {
         // A document travels with the deployment, so its path anchors to the
         // config's directory; a flag travels with the operator, so its path is
         // theirs to resolve against the working directory they typed it in.
-        let resolved = resolve("/etc/sismatic", "devices_config_path: devices.toml\n");
+        let resolved = resolve("/etc/sismatic", "inventory:\n  config_path: devices.toml\n");
         assert_eq!(
-            resolved.devices_config_path,
+            resolved.inventory.config_path,
             PathBuf::from("/etc/sismatic/devices.toml")
         );
 
         let cfg = resolved.with_overrides(Overrides {
-            devices_config_path: Some(PathBuf::from("devices.toml")),
+            inventory_config_path: Some(PathBuf::from("devices.toml")),
             ..Overrides::default()
         });
-        assert_eq!(cfg.devices_config_path, PathBuf::from("devices.toml"));
+        assert_eq!(cfg.inventory.config_path, PathBuf::from("devices.toml"));
     }
 
     #[test]
@@ -1906,7 +2042,7 @@ mod tests {
             .with_overrides(inner.clone())
             .with_overrides(outer.clone());
         let merged = cfg.with_overrides(Overrides {
-            devices_config_path: outer.devices_config_path.or(inner.devices_config_path),
+            inventory_config_path: outer.inventory_config_path.or(inner.inventory_config_path),
             host: outer.host.or(inner.host),
             port: outer.port.or(inner.port),
         });
@@ -1929,14 +2065,14 @@ mod tests {
     #[test]
     fn every_section_is_reachable_by_its_key_path() {
         // The property that makes the scheme worth adopting: one derivation rule
-        // — `SISMATIC_SERVER__` + the path, upper-cased — reaches a top-level key, a
-        // nested one, and the `[defaults]` table alike, with nothing per-key
-        // written down anywhere in this crate.
+        // — `SISMATIC_SERVER__` + the path, upper-cased — reaches a nested key,
+        // a doubly nested one, and the `[defaults]` table alike, with nothing
+        // per-key written down anywhere in this crate.
         let cfg = resolve_env(
             "",
             "{}",
             &[
-                ("SISMATIC_SERVER__DEVICES_CONFIG_PATH", "/srv/pool.toml"),
+                ("SISMATIC_SERVER__INVENTORY__CONFIG_PATH", "/srv/pool.toml"),
                 ("SISMATIC_SERVER__SYNC__INTERVAL_SECS", "5"),
                 ("SISMATIC_SERVER__HTTP__HOST", "0.0.0.0"),
                 ("SISMATIC_SERVER__DEFAULTS__PORT", "9000"),
@@ -1945,7 +2081,7 @@ mod tests {
                 ("SISMATIC_SERVER__DEFAULTS__FIELDS", "FIRMWARE,UNIT_NAME"),
             ],
         );
-        assert_eq!(cfg.devices_config_path, PathBuf::from("/srv/pool.toml"));
+        assert_eq!(cfg.inventory.config_path, PathBuf::from("/srv/pool.toml"));
         assert_eq!(cfg.sync.default_interval, Some(Duration::from_secs(5)));
         assert_eq!(cfg.http.host, "0.0.0.0");
         assert_eq!(cfg.http.port, 9000);
@@ -1978,10 +2114,10 @@ mod tests {
         let cfg = resolve_env(
             "/etc/sismatic",
             "{}",
-            &[("SISMATIC_SERVER__DEVICES_CONFIG_PATH", "devices.toml")],
+            &[("SISMATIC_SERVER__INVENTORY__CONFIG_PATH", "devices.toml")],
         );
         assert_eq!(
-            cfg.devices_config_path,
+            cfg.inventory.config_path,
             PathBuf::from("/etc/sismatic/devices.toml")
         );
     }
@@ -2390,6 +2526,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(30 * 86_400)),
                 cleanup: Some(Duration::from_secs(3_600)),
                 max_memory: Some(512 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -2465,13 +2602,15 @@ mod tests {
         // The rule that makes the whole document a valid patch, and the one a
         // GitOps deployment depends on: sending back what was read is a no-op
         // rather than a refusal.
-        let text = "http:\n  host: 0.0.0.0\n  port: 9999\ndevices_config_path: pool.toml\n";
+        let text = "http:\n  host: 0.0.0.0\n  port: 9999\n\
+                    inventory:\n  config_path: pool.toml\n  runtime_config_path: state.toml\n";
         let before = resolve("/etc/sismatic", text);
 
         let after = applied(
             text,
             r#"{"http":{"host":"0.0.0.0","port":9999},
-                "devices_config_path":"/etc/sismatic/pool.toml"}"#,
+                "inventory":{"config_path":"/etc/sismatic/pool.toml",
+                             "runtime_config_path":"/etc/sismatic/state.toml"}}"#,
         );
 
         assert_eq!(after, before);
@@ -2494,7 +2633,7 @@ mod tests {
 
     #[test]
     fn repointing_the_devices_file_is_refused() {
-        let err = patch("{}", r#"{"devices_config_path":"/srv/other.toml"}"#)
+        let err = patch("{}", r#"{"inventory":{"config_path":"/srv/other.toml"}}"#)
             .expect_err("the devices file should not be repointable");
 
         assert!(
@@ -2548,7 +2687,7 @@ mod tests {
         assert_eq!(doc.store.cleanup_interval, "5m");
         assert_eq!(doc.store.max_memory, "256MiB");
         assert_eq!(doc.intent_relay.poll_ms, 250);
-        assert_eq!(doc.devices_config_path, "/etc/sismatic/devices.toml");
+        assert_eq!(doc.inventory.config_path, "/etc/sismatic/devices.toml");
     }
 
     #[test]
@@ -2636,6 +2775,7 @@ mod shipped_config_check {
                 retain: super::Retention::Age(std::time::Duration::from_secs(24 * 60 * 60)),
                 cleanup: Some(std::time::Duration::from_secs(5 * 60)),
                 max_memory: Some(256 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }

@@ -1,3 +1,4 @@
+pub mod auto_disabled;
 pub mod config;
 pub mod connector;
 pub mod controller;

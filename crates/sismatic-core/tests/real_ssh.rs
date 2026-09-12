@@ -13,7 +13,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sismatic_core::devices::config::DeviceConfig;
+use std::collections::BTreeSet;
+
+use sismatic_core::devices::config::{DeviceConfig, Uuid};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::transport::ssh::RusshConnector;
 use sismatic_core::protocol::Value;
@@ -39,19 +41,26 @@ async fn queries_firmware_over_real_ssh() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(22023);
-    let configs = vec![DeviceConfig {
-        id: "real".into(),
-        host,
-        port,
-        username: user,
-        password: pass.into(),
-        connect_timeout: Duration::from_secs(10),
-        exchange_timeout: Duration::from_secs(5),
-        eager: false,
-        sis_keepalive: None,
-        eager_retry: None,
-        cold_backoff: None,
-    }];
+    let configs = vec![
+        DeviceConfig {
+            id: "real".into(),
+            host,
+            port,
+            username: user,
+            password: pass.into(),
+            connect_timeout: Duration::from_secs(10),
+            exchange_timeout: Duration::from_secs(5),
+            eager: false,
+            sis_keepalive: None,
+            eager_retry: None,
+            cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
+        }
+        .derive_uuid(),
+    ];
     let registry = Registry::from_configs(configs, Arc::new(RusshConnector));
     let device = registry.device("real").expect("device present");
 

@@ -10,13 +10,27 @@
 //! output, the input is written once, and sorting once at startup is the
 //! cheapest place to keep that promise.
 
+use std::sync::{Arc, RwLock};
+
 use sismatic_api_types::{DeviceSummary, GroupSummary};
 use sismatic_store::catalog::DeviceCatalog;
 
+/// The configured set, behind locks so it can be replaced while the server runs.
+///
+/// It was two plain `Vec`s until the fleet could change — the module docs above
+/// still say why that was the whole implementation, and the reasoning holds for
+/// everything except *when* the set is written. A `RwLock` rather than a
+/// `DashMap`: the set is read on every inventory request and written when an
+/// operator adds or removes a recorder, so readers should not contend with each
+/// other and a writer taking the whole thing is free at that rate.
+///
+/// `Arc` inside, so the clones the composition root hands out are handles on one
+/// catalog. Without it a `replace` through one clone would leave every other
+/// clone serving the old fleet.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCatalog {
-    devices: Vec<DeviceSummary>,
-    groups: Vec<GroupSummary>,
+    devices: Arc<RwLock<Vec<DeviceSummary>>>,
+    groups: Arc<RwLock<Vec<GroupSummary>>>,
 }
 
 impl MemoryCatalog {
@@ -30,18 +44,45 @@ impl MemoryCatalog {
     pub fn new(mut devices: Vec<DeviceSummary>, mut groups: Vec<GroupSummary>) -> Self {
         devices.sort_by(|a, b| a.id.cmp(&b.id));
         groups.sort_by(|a, b| a.id.cmp(&b.id));
-        Self { devices, groups }
+        Self {
+            devices: Arc::new(RwLock::new(devices)),
+            groups: Arc::new(RwLock::new(groups)),
+        }
+    }
+
+    /// Adopt a new device and group set wholesale.
+    ///
+    /// For a fleet that changes while the server runs. Wholesale rather than
+    /// per-device because the caller is holding the freshly resolved set anyway
+    /// — and because a device *replaced* is a different device, so an
+    /// incremental API would need the same three verbs the inventory port
+    /// already has, duplicated here with nothing new to say.
+    ///
+    /// Takes `&self` and not `&mut self`: this is called through the shared
+    /// handle the composition root keeps, which is what makes it reachable from
+    /// a request at all. Sorting happens here for the same reason
+    /// [`new`](Self::new) does it — the port promises an order, and promising it
+    /// once at the point of construction is what keeps every reader from
+    /// re-establishing it.
+    pub fn replace(&self, mut devices: Vec<DeviceSummary>, mut groups: Vec<GroupSummary>) {
+        devices.sort_by(|a, b| a.id.cmp(&b.id));
+        groups.sort_by(|a, b| a.id.cmp(&b.id));
+        *self.devices.write().expect("the catalog is poisoned") = devices;
+        *self.groups.write().expect("the catalog is poisoned") = groups;
     }
 }
 
 #[async_trait::async_trait]
 impl DeviceCatalog for MemoryCatalog {
     async fn devices(&self) -> Vec<DeviceSummary> {
-        self.devices.clone()
+        self.devices
+            .read()
+            .expect("the catalog is poisoned")
+            .clone()
     }
 
     async fn groups(&self) -> Vec<GroupSummary> {
-        self.groups.clone()
+        self.groups.read().expect("the catalog is poisoned").clone()
     }
 
     // Linear rather than a map lookup, deliberately. A fleet is tens of
@@ -50,11 +91,21 @@ impl DeviceCatalog for MemoryCatalog {
     // be a second thing to keep in step for a scan that is faster than the JSON
     // serialisation of its own result.
     async fn device(&self, id: &str) -> Option<DeviceSummary> {
-        self.devices.iter().find(|d| d.id == id).cloned()
+        self.devices
+            .read()
+            .expect("the catalog is poisoned")
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
     }
 
     async fn group(&self, id: &str) -> Option<GroupSummary> {
-        self.groups.iter().find(|g| g.id == id).cloned()
+        self.groups
+            .read()
+            .expect("the catalog is poisoned")
+            .iter()
+            .find(|g| g.id == id)
+            .cloned()
     }
 }
 
@@ -66,10 +117,13 @@ mod tests {
     fn device(id: &str) -> DeviceSummary {
         DeviceSummary {
             id: id.to_owned(),
+            uuid: "00000000-0000-0000-0000-000000000000".to_owned(),
             host: "10.0.0.1".to_owned(),
             port: 22023,
             eager: false,
             status: ConnectionStatus::Unknown,
+            disabled_fields: Vec::new(),
+            auto_disabled_fields: Vec::new(),
         }
     }
 

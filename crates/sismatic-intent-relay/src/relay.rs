@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 
 use chrono::{SecondsFormat, Utc};
 use sismatic_api_types::{BatchId, Intent, ReadValue, Timestamp, WriteId, WriteRecord};
+use sismatic_core::devices::config::Uuid;
 use sismatic_core::devices::device::Device;
 use sismatic_core::devices::group::DeviceGroup;
 use sismatic_core::devices::registry::Registry;
@@ -67,9 +68,42 @@ pub fn fixed(poll: Duration) -> watch::Receiver<Duration> {
     watch::channel(poll).1
 }
 
+/// One device's relay task, and the configuration it was started for.
+struct Running {
+    /// The [`uuid`] of the config this task captured. A device is immutable, so
+    /// an edited one is *replaced*, and the task is left holding an
+    /// `Arc<Device>` the registry no longer hands out — which for a relay means
+    /// dispatching writes down a connection nobody else can see. The id cannot
+    /// tell that; this can.
+    ///
+    /// [`uuid`]: sismatic_core::devices::config::DeviceConfig::uuid
+    device: Uuid,
+    cancel: CancellationToken,
+}
+
+/// What one pass of [`RelayHandle::apply`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelayChange {
+    pub started: usize,
+    pub stopped: usize,
+    /// Replaced devices, whose task was stopped and started against the new
+    /// handle.
+    pub rebound: usize,
+    pub unchanged: usize,
+}
+
 pub struct RelayHandle {
     tasks: JoinSet<()>,
     cancel: CancellationToken,
+    /// One entry per device with a task running, keyed by device id.
+    running: BTreeMap<String, Running>,
+    /// Everything needed to start another task. Held rather than passed to
+    /// [`apply`](Self::apply), because a fleet change says only *which* devices
+    /// exist — the drain and the rate are properties of the deployment and have
+    /// not moved.
+    registry: Arc<Registry>,
+    drain: DynWriteDrain,
+    poll: watch::Receiver<Duration>,
 }
 
 impl RelayHandle {
@@ -82,22 +116,102 @@ impl RelayHandle {
         while self.tasks.join_next().await.is_some() {}
         info!("intent relay stopped");
     }
+
+    /// Make the running tasks match the registry's current device set.
+    ///
+    /// The diff is by [`uuid`], so a reload that left a device alone leaves its
+    /// relay task — and the per-device FIFO ordering that task is the sole
+    /// owner of — completely undisturbed.
+    ///
+    /// Stopping is cooperative and does **not** wait, which is what makes this
+    /// safe to call from a reconciler holding other handles: a task mid-dispatch
+    /// finishes its SIS exchange and settles the write it claimed, rather than
+    /// being abandoned with a row stuck `InFlight`. The consequence worth
+    /// knowing is that a removed device's task may still be draining for one
+    /// exchange after this returns, so cancelling that device's *queued* writes
+    /// has to happen after the task is told to stop, not before.
+    ///
+    /// [`uuid`]: sismatic_core::devices::config::DeviceConfig::uuid
+    pub fn apply(&mut self) -> RelayChange {
+        while let Some(joined) = self.tasks.try_join_next() {
+            if let Err(err) = joined {
+                warn!(%err, "a relay loop ended abnormally");
+            }
+        }
+
+        let wanted: BTreeMap<String, Arc<Device>> = self
+            .registry
+            .devices()
+            .into_iter()
+            .map(|device| (device.id().to_owned(), device))
+            .collect();
+
+        let mut change = RelayChange::default();
+
+        let stale: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(id, running)| {
+                wanted
+                    .get(*id)
+                    .is_none_or(|device| device.config().uuid != running.device)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some(running) = self.running.remove(&id) {
+                running.cancel.cancel();
+            }
+            if wanted.contains_key(&id) {
+                change.rebound += 1;
+            } else {
+                change.stopped += 1;
+            }
+        }
+
+        let mut spawned = 0usize;
+        for (id, device) in wanted {
+            if self.running.contains_key(&id) {
+                change.unchanged += 1;
+                continue;
+            }
+            let uuid = device.config().uuid;
+            let cancel = self.cancel.child_token();
+            self.tasks.spawn(relay_loop(
+                device,
+                Arc::clone(&self.registry),
+                self.drain.clone(),
+                self.poll.clone(),
+                cancel.clone(),
+            ));
+            self.running.insert(
+                id,
+                Running {
+                    device: uuid,
+                    cancel,
+                },
+            );
+            spawned += 1;
+        }
+        // A replaced device was stopped above and spawned just now; charge it
+        // once, to the more specific of the two.
+        change.started = spawned - change.rebound;
+        change
+    }
 }
 
 pub fn spawn(registry: Arc<Registry>, drain: DynWriteDrain, cfg: RelayConfig) -> RelayHandle {
-    let cancel = CancellationToken::new();
-    let mut tasks = JoinSet::new();
-    for device in registry.devices() {
-        tasks.spawn(relay_loop(
-            device,
-            Arc::clone(&registry),
-            drain.clone(),
-            cfg.poll.clone(),
-            cancel.clone(),
-        ));
-    }
-    info!(tasks = tasks.len(), "intent relay started");
-    RelayHandle { tasks, cancel }
+    let mut handle = RelayHandle {
+        tasks: JoinSet::new(),
+        cancel: CancellationToken::new(),
+        running: BTreeMap::new(),
+        registry,
+        drain,
+        poll: cfg.poll,
+    };
+    handle.apply();
+    info!(tasks = handle.tasks.len(), "intent relay started");
+    handle
 }
 
 /// Drain one device's queue on a schedule that may be re-set under it.
@@ -109,11 +223,17 @@ pub fn spawn(registry: Arc<Registry>, drain: DynWriteDrain, cfg: RelayConfig) ->
 /// usually empty.
 ///
 /// Unlike the sync driver's, this loop watches its own channel rather than being
-/// restarted by a supervisor. The two differ because the *shape* of the change
-/// does: a relay task exists per device and always exists, so there is nothing
-/// to start or stop and nothing for a supervisor to own — only a number to read
-/// again. The sync driver has a set of loops whose membership changes, which is
-/// what needs somewhere to hold the `JoinSet`.
+/// restarted by a supervisor, and the two differ because the *shape* of the two
+/// changes does. A drain rate is a number every task reads again, so a channel
+/// reaches them all with nothing to start or stop. A device appearing or leaving
+/// changes which tasks should exist at all, which needs somewhere holding the
+/// `JoinSet` — [`RelayHandle::apply`] for this crate, the supervisor task for
+/// sync.
+///
+/// The split is also why this loop is not restarted by a re-paced rate: a
+/// re-pace is a value it can pick up itself, where a replaced device means this
+/// task is holding the wrong `Arc<Device>` and only something outside it can fix
+/// that.
 #[instrument(name = "intent_relay", skip_all, fields(device = %device.id()))]
 async fn relay_loop(
     device: Arc<Device>,
@@ -406,4 +526,160 @@ async fn observe_state(device: &Device, drain: &dyn WriteDrain) -> Option<Record
 
 fn now() -> Timestamp {
     Timestamp(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use sismatic_core::devices::config::{DeviceConfig, Resolved};
+    use sismatic_core::devices::connector::fake::CountingConnector;
+    use sismatic_core::devices::transport::fake::FakeTransport;
+    use sismatic_store_memory::MemoryOutbox;
+
+    use super::*;
+
+    fn device_config(id: &str) -> DeviceConfig {
+        DeviceConfig {
+            id: id.into(),
+            host: "10.0.0.1".into(),
+            port: 22023,
+            username: "admin".into(),
+            password: "extron".into(),
+            connect_timeout: Duration::from_millis(200),
+            exchange_timeout: Duration::from_millis(200),
+            eager: false,
+            sis_keepalive: None,
+            eager_retry: None,
+            cold_backoff: None,
+            uuid: sismatic_core::devices::config::Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
+        }
+        .derive_uuid()
+    }
+
+    /// A relay over a registry of `ids`, draining an outbox nothing submits to.
+    ///
+    /// The drain rate is deliberately long: these tests are about which *tasks*
+    /// exist, and a fast rate would only add empty queue polls to reason about.
+    fn relay_over(ids: &[&str]) -> (Arc<Registry>, RelayHandle) {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads(["2.11\r\n"; 8])
+        }));
+        let registry = Arc::new(Registry::build(
+            ids.iter().map(|id| device_config(id)).collect(),
+            vec![],
+            connector,
+        ));
+        let drain: DynWriteDrain = Arc::new(MemoryOutbox::with_max_attempts(1));
+        let handle = spawn(
+            Arc::clone(&registry),
+            drain,
+            RelayConfig {
+                poll: fixed(Duration::from_secs(3600)),
+            },
+        );
+        (registry, handle)
+    }
+
+    #[tokio::test]
+    async fn one_task_per_device_at_startup() {
+        let (_registry, relay) = relay_over(&["a", "b"]);
+        assert_eq!(relay.running.len(), 2);
+        relay.shutdown().await;
+    }
+
+    /// The property a reload rests on: a device that did not change keeps its
+    /// task — and with it the per-device FIFO ordering that task solely owns.
+    #[tokio::test]
+    async fn re_applying_the_same_fleet_keeps_every_task() {
+        let (registry, mut relay) = relay_over(&["a", "b"]);
+        let before: Vec<String> = relay.running.keys().cloned().collect();
+
+        registry.apply(Resolved {
+            devices: vec![device_config("a"), device_config("b")],
+            groups: vec![],
+        });
+        let change = relay.apply();
+
+        assert_eq!(change.unchanged, 2);
+        assert_eq!(
+            change,
+            RelayChange {
+                unchanged: 2,
+                ..RelayChange::default()
+            }
+        );
+        assert_eq!(relay.running.keys().cloned().collect::<Vec<_>>(), before);
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_device_added_to_the_fleet_gains_a_task() {
+        let (registry, mut relay) = relay_over(&["a"]);
+
+        registry.apply(Resolved {
+            devices: vec![device_config("a"), device_config("b")],
+            groups: vec![],
+        });
+        let change = relay.apply();
+
+        assert_eq!(change.started, 1);
+        assert_eq!(change.unchanged, 1);
+        assert!(relay.running.contains_key("b"));
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_device_removed_from_the_fleet_loses_its_task() {
+        let (registry, mut relay) = relay_over(&["a", "goner"]);
+
+        registry.apply(Resolved {
+            devices: vec![device_config("a")],
+            groups: vec![],
+        });
+        let change = relay.apply();
+
+        assert_eq!(change.stopped, 1);
+        assert_eq!(change.unchanged, 1);
+        assert!(!relay.running.contains_key("goner"));
+        // Cooperative: the departed task was told to stop, and the drain here is
+        // what waits for it. A shutdown that hangs means the cancel never
+        // reached it.
+        tokio::time::timeout(Duration::from_secs(2), relay.shutdown())
+            .await
+            .expect("the departed task should have been cancelled");
+    }
+
+    /// A replaced device — same id, edited config — must be rebound. Left alone,
+    /// the task would go on dispatching writes down a connection the registry no
+    /// longer hands out.
+    #[tokio::test]
+    async fn a_replaced_device_is_rebound_to_the_new_handle() {
+        let (registry, mut relay) = relay_over(&["edited"]);
+        let before = relay.running["edited"].device;
+
+        registry.apply(Resolved {
+            devices: vec![
+                DeviceConfig {
+                    connect_timeout: Duration::from_secs(30),
+                    ..device_config("edited")
+                }
+                .derive_uuid(),
+            ],
+            groups: vec![],
+        });
+        let change = relay.apply();
+
+        assert_eq!(change.rebound, 1);
+        assert_eq!(change.started, 0, "a rebind is charged once, not twice");
+        assert_eq!(change.unchanged, 0);
+        assert_ne!(
+            relay.running["edited"].device, before,
+            "the task should be bound to the replacement"
+        );
+        relay.shutdown().await;
+    }
 }

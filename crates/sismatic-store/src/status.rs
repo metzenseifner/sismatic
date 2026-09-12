@@ -33,11 +33,29 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use sismatic_api_types::{ConnectionStatus, DeviceId};
+use sismatic_api_types::{AutoDisabledField, ConnectionStatus, DeviceId};
 
 pub type DynDeviceStatus = Arc<dyn DeviceStatus>;
 
-/// Live connection state, keyed by device.
+/// Everything about a device that is true *right now* rather than configured.
+///
+/// One value and not two ports, because the two answer the same question — what
+/// is this device doing at this instant — and an adapter walks the same registry
+/// to find both. Splitting them would make the fleet index walk it twice to fill
+/// one page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    pub connection: ConnectionStatus,
+    /// Fields this device has been observed to refuse, ordered by name.
+    ///
+    /// Empty for a device that has refused nothing, which is the ordinary case
+    /// and is why this is a plain `Vec` rather than an `Option`: "nothing has
+    /// been inferred" and "we have not looked" are the same answer from a port
+    /// that cannot fail to look.
+    pub auto_disabled: Vec<AutoDisabledField>,
+}
+
+/// Live device state, keyed by device.
 ///
 /// Infallible, like [`DeviceCatalog`](crate::DeviceCatalog) and for a related
 /// reason: there is no I/O behind these, only a read of in-process state. An
@@ -46,18 +64,35 @@ pub type DynDeviceStatus = Arc<dyn DeviceStatus>;
 /// is what this exists to avoid.
 #[async_trait::async_trait]
 pub trait DeviceStatus: Send + Sync {
-    /// One device's state. An id the registry does not hold reports
-    /// [`ConnectionStatus::Unknown`] rather than an error: the caller has
-    /// already established the device exists (the catalog said so), and a
-    /// disagreement between the two is this process's problem to log, not the
-    /// caller's to handle.
-    async fn status(&self, id: &str) -> ConnectionStatus;
+    /// One device's live state. An id the registry does not hold reports
+    /// [`ConnectionStatus::Unknown`] and an empty veto list rather than an
+    /// error: the caller has already established the device exists (the catalog
+    /// said so), and a disagreement between the two is this process's problem to
+    /// log, not the caller's to handle.
+    async fn observe(&self, id: &str) -> Observation;
 
-    /// Every device's state, in one pass.
+    /// Every device's live state, in one pass.
     ///
-    /// A method of its own rather than a loop over [`status`](Self::status),
+    /// A method of its own rather than a loop over [`observe`](Self::observe),
     /// because the index route needs the whole fleet and an adapter can walk
     /// its registry once. A `BTreeMap` so the caller can look up by id without
     /// re-scanning, and so iteration order is stable for a rendered page.
-    async fn all(&self) -> BTreeMap<DeviceId, ConnectionStatus>;
+    async fn all(&self) -> BTreeMap<DeviceId, Observation>;
+}
+
+/// What an id the registry does not hold observes as: `Unknown`, and nothing
+/// inferred.
+///
+/// Hand-written rather than derived because [`ConnectionStatus`] has no
+/// `Default` and should not gain one — it is a wire enum, and "the resting state
+/// of a device" is a claim only this port is in a position to make. The same
+/// reasoning `sismatic_store_memory`'s `DeviceLog` gives for hand-writing its
+/// own.
+impl Default for Observation {
+    fn default() -> Self {
+        Self {
+            connection: ConnectionStatus::Unknown,
+            auto_disabled: Vec::new(),
+        }
+    }
 }

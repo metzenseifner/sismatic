@@ -43,6 +43,7 @@
 //! [`sis_keepalive`]: super::config::DeviceConfig::sis_keepalive
 //! [`eager_retry`]: super::config::DeviceConfig::eager_retry
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
@@ -54,10 +55,41 @@ use crate::protocol::instructions::query::Query;
 
 use super::device::Device;
 
+/// One device's keep-warm task, and the configuration it was started for.
+struct Warm {
+    /// The [`uuid`] of the config this task captured.
+    ///
+    /// A device is immutable, so an edited one is *replaced* and the task is
+    /// holding an `Arc<Device>` the registry no longer hands out — pointed at a
+    /// connection nothing else can use, and warming it forever. The id alone
+    /// cannot see that; this can.
+    ///
+    /// [`uuid`]: super::config::DeviceConfig::uuid
+    device: Uuid,
+    task: JoinHandle<()>,
+}
+
+/// What one pass of [`SisKeepalive::apply`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeepaliveChange {
+    pub started: usize,
+    pub stopped: usize,
+    /// Replaced devices, whose task was stopped and started against the new
+    /// handle.
+    pub rebound: usize,
+    pub unchanged: usize,
+}
+
 /// A set of background tasks keeping eager devices' connections warm. Dropping
 /// it aborts them all.
 pub struct SisKeepalive {
-    tasks: Vec<JoinHandle<()>>,
+    /// Kept so [`apply`](Self::apply) can spawn without being handed a runtime
+    /// again — a fleet change arrives wherever the reconciler happens to run,
+    /// and requiring a `Handle` there would push this type's implementation
+    /// detail onto its caller.
+    handle: Handle,
+    /// One entry per *eager* device with a task running, keyed by device id.
+    warm: BTreeMap<String, Warm>,
 }
 
 impl SisKeepalive {
@@ -68,19 +100,100 @@ impl SisKeepalive {
     ///
     /// [`eager`]: super::config::DeviceConfig::eager
     pub fn spawn(handle: &Handle, devices: impl IntoIterator<Item = Arc<Device>>) -> Self {
-        let tasks = devices
+        let mut keepalive = Self {
+            handle: handle.clone(),
+            warm: BTreeMap::new(),
+        };
+        keepalive.apply(devices);
+        keepalive
+    }
+
+    /// Make the running tasks match `devices`, and report what moved.
+    ///
+    /// Idempotent: applying the same fleet twice is a no-op, because a device
+    /// whose [`uuid`] is unchanged keeps the task it has. That is what stops a
+    /// reload from dropping and re-warming every eager connection in the fleet
+    /// to apply a change to one of them.
+    ///
+    /// A device that stops being `eager` is indistinguishable here from one that
+    /// left the fleet — both are "no task should be running for this id" — and
+    /// both are correct: the connection is left for the next real command to
+    /// re-open lazily, which is exactly what a non-eager device does.
+    ///
+    /// [`uuid`]: super::config::DeviceConfig::uuid
+    pub fn apply(&mut self, devices: impl IntoIterator<Item = Arc<Device>>) -> KeepaliveChange {
+        let wanted: BTreeMap<String, Arc<Device>> = devices
             .into_iter()
             .filter(|device| device.config().eager)
-            .map(|device| handle.spawn(keep_warm(device)))
+            .map(|device| (device.id().to_owned(), device))
             .collect();
-        Self { tasks }
+
+        let mut change = KeepaliveChange::default();
+
+        // Stop first, so a replaced device's old task has already been told to
+        // go before its successor starts dialing the same address.
+        let stale: Vec<String> = self
+            .warm
+            .iter()
+            .filter(|(id, warm)| {
+                wanted
+                    .get(*id)
+                    .is_none_or(|device| device.config().uuid != warm.device)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some(warm) = self.warm.remove(&id) {
+                // Abort rather than a cooperative cancel, which is what `Drop`
+                // has always done here. A keepalive probe holds the device's
+                // connection lock, but the device being abandoned is one nothing
+                // else references — so the worst an aborted probe can leave
+                // mid-exchange is a connection that is about to be dropped.
+                warm.task.abort();
+            }
+            if wanted.contains_key(&id) {
+                change.rebound += 1;
+            } else {
+                change.stopped += 1;
+            }
+        }
+
+        // Anything the pass above removed is gone from `warm`, so a device still
+        // present here is one whose task is correct and stays untouched.
+        let mut spawned = 0usize;
+        for (id, device) in wanted {
+            if self.warm.contains_key(&id) {
+                change.unchanged += 1;
+                continue;
+            }
+            let uuid = device.config().uuid;
+            let task = self.handle.spawn(keep_warm(device));
+            self.warm.insert(id, Warm { device: uuid, task });
+            spawned += 1;
+        }
+        // A replaced device was stopped above and spawned just now, so it is in
+        // `spawned` too. It is charged once, to the more specific of the two.
+        change.started = spawned - change.rebound;
+        change
+    }
+
+    /// How many devices are being kept warm.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.warm.len()
+    }
+
+    /// Whether nothing is being kept warm.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.warm.is_empty()
     }
 }
 
 impl Drop for SisKeepalive {
     fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
+        for warm in self.warm.values() {
+            warm.task.abort();
         }
     }
 }
@@ -145,6 +258,7 @@ async fn keep_warm(device: Arc<Device>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -178,7 +292,12 @@ mod tests {
             // Gated hard, to prove these tasks dial *through* the gate: with
             // `probe` swapped back to `run`, the cold-side tests below stall.
             cold_backoff: Some(Duration::from_secs(3600)),
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     /// Poll `cond` until it holds, or panic after ~2s. Lets a spawned SIS keepalive
@@ -205,6 +324,140 @@ mod tests {
         let _sis_keepalive = SisKeepalive::spawn(&Handle::current(), [Arc::clone(&device)]);
 
         wait_for(|| opens.load(Ordering::SeqCst) == 1).await;
+    }
+
+    // ---- reconciling against a fleet that changes -------------------------
+
+    /// An eager device at `id`, over a connector that answers every warm-up.
+    fn eager_at(id: &str, connector: Arc<CountingConnector>) -> Arc<Device> {
+        let config = DeviceConfig {
+            id: id.into(),
+            ..eager_config(None, None)
+        }
+        .derive_uuid();
+        Arc::new(Device::new(config, connector))
+    }
+
+    fn answering_connector() -> Arc<CountingConnector> {
+        Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 8])
+        }))
+    }
+
+    /// The property a reload rests on: applying the same fleet twice touches
+    /// nothing, so a change to one device does not drop and re-warm every eager
+    /// connection in the fleet.
+    #[tokio::test]
+    async fn re_applying_the_same_fleet_keeps_every_task() {
+        let connector = answering_connector();
+        let opens = connector.opens_handle();
+        let device = eager_at("warm", connector);
+
+        let mut keepalive = SisKeepalive::spawn(&Handle::current(), [Arc::clone(&device)]);
+        wait_for(|| opens.load(Ordering::SeqCst) == 1).await;
+
+        let change = keepalive.apply([Arc::clone(&device)]);
+
+        assert_eq!(change.unchanged, 1);
+        assert_eq!(change.started, 0);
+        assert_eq!(change.stopped, 0);
+        assert_eq!(change.rebound, 0);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "an unchanged device must not be re-dialed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_added_to_the_fleet_is_warmed() {
+        let connector = answering_connector();
+        let opens = connector.opens_handle();
+        let first = eager_at("first", Arc::clone(&connector));
+
+        let mut keepalive = SisKeepalive::spawn(&Handle::current(), [Arc::clone(&first)]);
+        wait_for(|| opens.load(Ordering::SeqCst) == 1).await;
+
+        let second = eager_at("second", connector);
+        let change = keepalive.apply([first, second]);
+
+        assert_eq!(change.started, 1);
+        assert_eq!(change.unchanged, 1);
+        assert_eq!(keepalive.len(), 2);
+        wait_for(|| opens.load(Ordering::SeqCst) == 2).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_removed_from_the_fleet_stops_being_warmed() {
+        let connector = answering_connector();
+        let device = eager_at("goner", connector);
+
+        let mut keepalive = SisKeepalive::spawn(&Handle::current(), [device]);
+        assert_eq!(keepalive.len(), 1);
+
+        let change = keepalive.apply([]);
+
+        assert_eq!(change.stopped, 1);
+        assert_eq!(change.started, 0);
+        assert!(keepalive.is_empty());
+    }
+
+    /// A device that stops being `eager` is the same instruction as one that
+    /// left: no task should run for it, and the connection is left for the next
+    /// real command to open lazily.
+    #[tokio::test]
+    async fn a_device_that_stops_being_eager_loses_its_task() {
+        let connector = answering_connector();
+        let eager = eager_at("settled", Arc::clone(&connector));
+
+        let mut keepalive = SisKeepalive::spawn(&Handle::current(), [eager]);
+        assert_eq!(keepalive.len(), 1);
+
+        let lazy = Arc::new(Device::new(
+            DeviceConfig {
+                id: "settled".into(),
+                eager: false,
+                ..eager_config(None, None)
+            }
+            .derive_uuid(),
+            connector,
+        ));
+        let change = keepalive.apply([lazy]);
+
+        assert_eq!(change.stopped, 1);
+        assert!(keepalive.is_empty());
+    }
+
+    /// A replaced device — same id, edited config — must be re-warmed against
+    /// the new handle. The old task is holding a `Device` nothing else
+    /// references, so left alone it would warm a connection forever that no
+    /// command can ever use.
+    #[tokio::test]
+    async fn a_replaced_device_is_rebound_to_the_new_handle() {
+        let connector = answering_connector();
+        let opens = connector.opens_handle();
+        let before = eager_at("edited", Arc::clone(&connector));
+
+        let mut keepalive = SisKeepalive::spawn(&Handle::current(), [before]);
+        wait_for(|| opens.load(Ordering::SeqCst) == 1).await;
+
+        let after = Arc::new(Device::new(
+            DeviceConfig {
+                id: "edited".into(),
+                connect_timeout: Duration::from_millis(900),
+                ..eager_config(None, None)
+            }
+            .derive_uuid(),
+            connector,
+        ));
+        let change = keepalive.apply([after]);
+
+        assert_eq!(change.rebound, 1);
+        assert_eq!(change.started, 0, "a rebind is charged once, not twice");
+        assert_eq!(change.unchanged, 0);
+        assert_eq!(keepalive.len(), 1);
+        wait_for(|| opens.load(Ordering::SeqCst) == 2).await;
     }
 
     #[tokio::test]

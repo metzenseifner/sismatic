@@ -117,8 +117,8 @@ use serde::Deserialize;
 // handlers return `ApiFailure` and let it render.
 use sismatic_api_types::{
     Acceptance, ApiError, DeviceDesiredRecordingState, DeviceId, GroupDesiredRecordingState,
-    GroupSummary, GroupWriteList, Intent, MemberDesiredRecordingState, MemberWrites, WriteList,
-    WriteRecord,
+    GroupSummary, GroupWriteList, Intent, MemberDesiredRecordingState, MemberWrites, Rejection,
+    WriteList, WriteRecord,
 };
 use sismatic_store::catalog::DeviceCatalog;
 use sismatic_store::outbox::{BarrierPolicy, Submission, WriteLog, WriteSubmit};
@@ -201,6 +201,7 @@ const fn needs_rendezvous(intent: &Intent) -> bool {
 /// `target` is a device id or a group id — the two share one namespace, and
 /// which it is decides only how many rows the submission expands into.
 async fn submit(
+    catalog: &dyn DeviceCatalog,
     port: &dyn WriteSubmit,
     stamp: &Stamp,
     targets: Vec<DeviceId>,
@@ -208,6 +209,8 @@ async fn submit(
     intent: Intent,
     idempotency_key: Option<String>,
 ) -> Result<HttpResponse, ApiFailure> {
+    reject_disabled_field(catalog, &targets, &intent).await?;
+
     // `targets` is already expanded and `group` already resolved, by whichever
     // entry point enforced its own URL space. Expansion happens *there* rather
     // than at dispatch because admission is per device: a device group where one
@@ -261,6 +264,78 @@ async fn submit(
     Ok(response.json(accepted))
 }
 
+/// The field a write names, or `None` for one that names none.
+///
+/// The three recording verbs are the `None` case, and deliberately so: a
+/// `disabled_fields` entry may only name a *field* — something a read can ask
+/// for or a write can address by name — and `STARTRECORDING` is a verb. A
+/// deployment that wants a recorder to stop recording removes it from the fleet
+/// rather than vetoing its verbs, which is why core's config layer refuses a
+/// `Command` name in that list in the first place.
+///
+/// Wildcard-free, so a sixth [`Intent`] stops this compiling until someone has
+/// decided whether it carries a field.
+const fn field_of(intent: &Intent) -> Option<&String> {
+    match intent {
+        Intent::StartRecording | Intent::StopRecording | Intent::PauseRecording => None,
+        Intent::SetMetadata { field, .. } | Intent::SetSetting { field, .. } => Some(field),
+    }
+}
+
+/// Refuse the whole submission if any target declares this field switched off.
+///
+/// **All or nothing, across every member.** A group write that skipped the
+/// members which disable the field would be a silent partial: the caller gets a
+/// `202` naming fewer writes than there are members, and nothing in the response
+/// says that a recorder was left out on purpose. That is the same failure
+/// [`Barrier::FailBatch`] defaults against, arriving by a different route, and
+/// the answer is the same — refuse, name the members, and let the caller address
+/// the ones it meant individually.
+///
+/// Only the **declared** veto is consulted; see [`Rejection::FieldDisabled`] for
+/// why the inferred one is not.
+///
+/// The field name needs no normalizing: the routes above put it through
+/// `normalize_field` on the way into the [`Intent`], and a catalog's
+/// `disabled_fields` is canonical because core's config layer canonicalized it
+/// at load. Both sides are therefore already the spelling `Query::name` uses.
+///
+/// [`Barrier::FailBatch`]: sismatic_api_types::Barrier::FailBatch
+async fn reject_disabled_field(
+    catalog: &dyn DeviceCatalog,
+    targets: &[DeviceId],
+    intent: &Intent,
+) -> Result<(), ApiFailure> {
+    let Some(field) = field_of(intent) else {
+        return Ok(());
+    };
+
+    let mut refusing = Vec::new();
+    for target in targets {
+        // A target absent from the catalog is not this function's problem: the
+        // entry points already established every id resolves, and inventing a
+        // refusal for one that does not would turn a `404` into a `409`.
+        if let Some(device) = catalog.device(target).await
+            && device.disabled_fields.iter().any(|name| name == field)
+        {
+            refusing.push(device.id);
+        }
+    }
+
+    if refusing.is_empty() {
+        return Ok(());
+    }
+    Err(ApiFailure::Rejected {
+        rejection: Rejection::FieldDisabled,
+        message: format!(
+            "`{field}` is disabled in the devices file for {}; no part of this write was \
+             recorded. Remove it from that device's `disabled_fields`, or address the \
+             other devices individually.",
+            refusing.join(", ")
+        ),
+    })
+}
+
 /// [`submit`] from a `/v1/writes/devices` route: the id must name a device, and one
 /// write is recorded.
 ///
@@ -293,7 +368,16 @@ async fn submit_device(
 
     // No group, so no rendezvous and no barrier: one device acting alone is
     // already in unison with itself.
-    submit(port, stamp, vec![device], None, intent, idempotency_key).await
+    submit(
+        catalog,
+        port,
+        stamp,
+        vec![device],
+        None,
+        intent,
+        idempotency_key,
+    )
+    .await
 }
 
 /// [`submit`] from a `/v1/writes/groups` route: the id must name a device group, and
@@ -321,7 +405,16 @@ async fn submit_group(
     // Resolved rather than re-derived: `group_members` already established that
     // this id names one, so the summary is present.
     let summary = catalog.group(&group).await;
-    submit(port, stamp, targets, summary, intent, idempotency_key).await
+    submit(
+        catalog,
+        port,
+        stamp,
+        targets,
+        summary,
+        intent,
+        idempotency_key,
+    )
+    .await
 }
 
 /// `POST /v1/writes/devices/{id}/recording/start` — begin a recording on one

@@ -11,7 +11,7 @@
 use sismatic_store::outbox::WriteLog;
 use sismatic_store_memory::MemoryOutbox;
 
-use crate::{ANNEX, ATRIUM, GROUP, SCOPE, get, post, put, spawn_over};
+use crate::{ANNEX, ATRIUM, GROUP, SCOPE, get, post, put, spawn_disabling, spawn_over};
 
 /// A two-member device group, so a submission expands into something worth
 /// counting.
@@ -359,4 +359,83 @@ async fn a_member_that_has_been_asked_nothing_is_an_empty_list_not_an_omission()
     assert_eq!(body["members"][0]["writes"].as_array().unwrap().len(), 1);
     assert_eq!(body["members"][1]["device"], ANNEX);
     assert_eq!(body["members"][1]["writes"].as_array().unwrap().len(), 0);
+}
+
+// ---- a field one member will not answer --------------------------------
+
+/// All or nothing. One member disabling the field refuses the whole group
+/// write, and — the part that matters — records *nothing*: a `202` naming one
+/// write where the group has two would be a silent partial, which is the failure
+/// `Barrier::FailBatch` already defaults against.
+#[tokio::test]
+async fn a_group_setting_write_is_refused_whole_when_one_member_disables_the_field() {
+    let (address, outbox) = spawn_disabling(&[ATRIUM, ANNEX], &[(ANNEX, &["STREAM_2_NAME"])]);
+
+    let (status, _, body) = put(
+        &address,
+        &format!("/groups/{GROUP}/settings/STREAM_2_NAME"),
+        "Hall B",
+    )
+    .await;
+
+    assert_eq!(status, 409);
+    assert_eq!(body["rejection"], "field_disabled");
+    assert_eq!(body["code"], "conflict");
+    assert!(
+        body["error"].as_str().expect("error").contains(ANNEX),
+        "the refusal must name the member that refused: {body}"
+    );
+
+    // The member that *would* have accepted it has nothing queued either.
+    for member in [ATRIUM, ANNEX] {
+        let queued = sismatic_store::outbox::WriteLog::writes_for(&outbox, member.to_owned())
+            .await
+            .expect("the write log");
+        assert!(queued.is_empty(), "{member} should have no queued write");
+    }
+}
+
+/// The same field on a group where nobody disables it is admitted, so the test
+/// above is showing a veto rather than a broken route.
+#[tokio::test]
+async fn a_group_setting_write_is_admitted_when_no_member_disables_the_field() {
+    let (address, _) = spawn_over(&[ATRIUM, ANNEX]);
+
+    let (status, _, body) = put(
+        &address,
+        &format!("/groups/{GROUP}/settings/STREAM_2_NAME"),
+        "Hall B",
+    )
+    .await;
+
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["writes"].as_array().expect("writes").len(), 2);
+}
+
+/// A veto on one field says nothing about another. The refusal has to be about
+/// the field the URL names, not about the device having any veto at all.
+#[tokio::test]
+async fn a_veto_on_one_field_does_not_refuse_a_write_to_another() {
+    let (address, _) = spawn_disabling(&[ATRIUM, ANNEX], &[(ANNEX, &["STREAM_2_NAME"])]);
+
+    let (status, _, body) = put(
+        &address,
+        &format!("/groups/{GROUP}/settings/TIMEZONE"),
+        "Europe/Vienna",
+    )
+    .await;
+
+    assert_eq!(status, 202, "{body}");
+}
+
+/// A recording verb names no field, so a device's `disabled_fields` cannot
+/// refuse one. `STARTRECORDING` is a verb rather than a field, and core's config
+/// layer will not accept it in that list to begin with.
+#[tokio::test]
+async fn a_veto_never_refuses_a_recording_command() {
+    let (address, _) = spawn_disabling(&[ATRIUM, ANNEX], &[(ANNEX, &["STREAM_2_NAME"])]);
+
+    let (status, _, body) = post(&address, &format!("/groups/{GROUP}/recording/start")).await;
+
+    assert_eq!(status, 202, "{body}");
 }

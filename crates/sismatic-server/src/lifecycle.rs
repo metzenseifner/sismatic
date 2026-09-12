@@ -621,6 +621,7 @@ mod tests {
             retain: Retention::Age(Duration::from_secs(3_600)),
             cleanup,
             max_memory: None,
+            cleanup_on_remove: false,
         }
     }
 
