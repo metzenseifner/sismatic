@@ -131,6 +131,9 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    use crate::devices::config::Uuid;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -159,7 +162,12 @@ mod tests {
                 sis_keepalive: None,
                 eager_retry: None,
                 cold_backoff: None,
+                uuid: Uuid::nil(),
+                disabled_fields: BTreeSet::new(),
+                auto_disable_after: 0,
+                self_heal: None,
             })
+            .map(DeviceConfig::derive_uuid)
             .collect()
     }
 

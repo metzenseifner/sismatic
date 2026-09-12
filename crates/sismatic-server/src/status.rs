@@ -69,9 +69,10 @@ const fn to_dto(connectivity: Connectivity) -> ConnectionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
-    use sismatic_core::devices::config::DeviceConfig;
+    use sismatic_core::devices::config::{DeviceConfig, Uuid};
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::transport::fake::FakeTransport;
 
@@ -88,7 +89,12 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     fn registry_status(ids: &[&str]) -> RegistryStatus {

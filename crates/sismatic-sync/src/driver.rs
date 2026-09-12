@@ -692,7 +692,9 @@ mod tests {
     // The wire `RecordingState`, not core's: `observe` takes what
     // `dto::state_to_dto` produces.
     use sismatic_api_types::{DeviceId, Read, RecordingState, WriteId, WriteRecord};
-    use sismatic_core::devices::config::DeviceConfig;
+    use std::collections::BTreeSet;
+
+    use sismatic_core::devices::config::{DeviceConfig, Uuid};
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::connector::{ConnectError, Connector};
     use sismatic_core::devices::transport::Transport;
@@ -788,7 +790,15 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            // Inference off: none of these tests is about it, and a fixture
+            // that opted in would take a field out of the schedule mid-test on
+            // the strength of a scripted refusal.
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     /// A registry of one device whose every connection replays firmware replies.

@@ -342,6 +342,9 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use std::collections::BTreeSet;
+
+    use crate::devices::config::Uuid;
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::Transport;
     use crate::devices::transport::fake::FakeTransport;
@@ -370,7 +373,12 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     fn port_query() -> Instruction {

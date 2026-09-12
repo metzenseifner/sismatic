@@ -145,6 +145,7 @@ async fn keep_warm(device: Arc<Device>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -178,7 +179,12 @@ mod tests {
             // Gated hard, to prove these tasks dial *through* the gate: with
             // `probe` swapped back to `run`, the cold-side tests below stall.
             cold_backoff: Some(Duration::from_secs(3600)),
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     /// Poll `cond` until it holds, or panic after ~2s. Lets a spawned SIS keepalive

@@ -19,7 +19,9 @@ use russh::server::{self, Auth, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tokio::net::TcpListener;
 
-use sismatic_core::devices::config::DeviceConfig;
+use std::collections::BTreeSet;
+
+use sismatic_core::devices::config::{DeviceConfig, Uuid};
 use sismatic_core::devices::connector::{ConnectError, Connector};
 use sismatic_core::devices::device::Device;
 use sismatic_core::devices::transport::ssh::RusshConnector;
@@ -86,7 +88,12 @@ impl SimulatedSmp {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 }
 
