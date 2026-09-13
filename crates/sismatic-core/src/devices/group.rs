@@ -81,6 +81,18 @@ impl DeviceGroup {
         self.devices.iter().map(|d| d.id().to_string()).collect()
     }
 
+    /// The member devices themselves, in group order.
+    ///
+    /// Distinct from [`member_ids`](Self::member_ids) in the one way that
+    /// matters after a reload: an id says *which* recorder a group addresses,
+    /// and these say *through which handle*. A group built over devices that
+    /// have since been replaced still reports the same ids while pointing at
+    /// connections nothing else uses, so the ids cannot tell a rebuilt group
+    /// from a stale one and these can.
+    pub fn members(&self) -> &[Arc<Device>] {
+        &self.devices
+    }
+
     /// How many devices are in the group.
     pub fn len(&self) -> usize {
         self.devices.len()

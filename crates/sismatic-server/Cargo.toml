@@ -74,6 +74,12 @@ sismatic-intent-relay.workspace = true
 # `sync` for the oneshot the end-to-end test shuts `run` down with — the library
 # itself takes shutdown as a plain future and needs no channel of its own.
 tokio = { workspace = true, features = ["sync"] }
+# `testing` for `FakeTransport` and `CountingConnector`, which the `status` and
+# `fleet` tests build registries over. Stated here rather than relied on: the
+# same feature is switched on by other crates' dev-dependencies, so a workspace
+# build unified it in and these tests compiled — but `cargo test -p
+# sismatic-server` alone did not, which is exactly when someone reaches for it.
+sismatic-core = { workspace = true, features = ["testing"] }
 # The config-scope tests state a `ConfigPatch` as the JSON a caller would send,
 # rather than as a struct literal: what the API accepts is the bytes, and a
 # literal would skip the very `deny_unknown_fields` and optionality the wire

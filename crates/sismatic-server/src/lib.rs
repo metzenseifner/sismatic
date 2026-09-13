@@ -27,6 +27,7 @@
 //! same connection.
 pub mod configuration;
 pub mod dynamic;
+pub mod fleet;
 pub mod lifecycle;
 pub mod status;
 pub mod telemetry;
@@ -181,6 +182,19 @@ pub async fn run(
         sismatic_intent_relay::RelayConfig { poll: wiring.drain },
     );
 
+    // The fleet as something that can change, and the one path allowed to
+    // change it. Built after the two task sets it will own and before the sync
+    // driver, because every subscriber has to exist before the first `apply`:
+    // a `watch` receiver created afterwards reads the current generation with
+    // no `changed()` behind it, and would sleep through the change that made it.
+    let fleet = fleet::LiveFleet::new(Arc::clone(&registry));
+    let fleet_tasks = fleet::spawn(
+        Arc::clone(&registry),
+        intent_relay,
+        keepalive,
+        fleet.subscribe(),
+    );
+
     // Started before the poll loops that fill the store, so a process restarting
     // into a long retention window enforces it on the first tick rather than
     // after the first interval of fresh writes.
@@ -197,6 +211,12 @@ pub async fn run(
             // reads after a `PATCH` are then one path, so a setting cannot work
             // at startup and quietly not apply later.
             fields: wiring.schedule,
+            // A second subscriber on the same generation channel the fleet
+            // reconciler watches. The driver is not driven *by* the reconciler
+            // because it owns a supervisor of its own — its loops move with the
+            // schedule as well as with the fleet — so both subscribe and neither
+            // learns about the fleet through the other.
+            fleet: fleet.subscribe(),
             // Both reconciliation paths are wired, and they close different
             // gaps. The relay re-reads the state immediately before a metadata
             // write, which is the one intent the freeze protects. This hook
@@ -220,11 +240,6 @@ pub async fn run(
         () = shutdown => stop_http(handle, serving).await,
     };
 
-    // Aborted before the drain, not after: keeping connections warm is pointless
-    // once we are on the way out, and a keepalive probe starting now would only
-    // add an SSH exchange for the drain below to wait behind.
-    drop(keepalive);
-
     // Stopped first among the tasks, and it is the one whose order does not
     // matter: nothing waits on a sweep, and the data it would have deleted is
     // about to go with the process. Stopping it here keeps it from competing for
@@ -236,7 +251,13 @@ pub async fn run(
     // every accepted write reach its device before the process exits.
     // Draining sync first would only add poll traffic the relay then queues
     // behind.
-    intent_relay.shutdown().await;
+    //
+    // The relay and the keepalive now go together, because the fleet reconciler
+    // owns them both. It stops the keepalive before the drain for the reason
+    // this function used to: keeping connections warm is pointless on the way
+    // out, and a probe starting now would only add an SSH exchange for the
+    // drain to wait behind.
+    fleet_tasks.shutdown().await;
 
     // Instrumented by the driver itself (`sync_shutdown`), which is where the
     // number of loops being drained is known.

@@ -820,12 +820,12 @@ fn fingerprint(config: &DeviceConfig) -> Uuid {
         buf.extend_from_slice(bytes);
     }
 
-    /// An optional duration as its seconds, distinguishing `None` from `Some(0)`
-    /// even though the resolver cannot currently produce the latter.
-    fn put_opt_secs(buf: &mut Vec<u8>, value: Option<Duration>) {
+    /// An optional duration, distinguishing `None` from `Some(0)` even though
+    /// the resolver cannot currently produce the latter.
+    fn put_opt_duration(buf: &mut Vec<u8>, value: Option<Duration>) {
         match value {
             None => put(buf, b"-"),
-            Some(d) => put(buf, &d.as_secs().to_le_bytes()),
+            Some(d) => put(buf, &d.as_nanos().to_le_bytes()),
         }
     }
 
@@ -835,12 +835,12 @@ fn fingerprint(config: &DeviceConfig) -> Uuid {
     put(&mut buf, &config.port.to_le_bytes());
     put(&mut buf, config.username.as_bytes());
     put(&mut buf, config.password.expose_secret().as_bytes());
-    put(&mut buf, &config.connect_timeout.as_secs().to_le_bytes());
-    put(&mut buf, &config.exchange_timeout.as_secs().to_le_bytes());
+    put(&mut buf, &config.connect_timeout.as_nanos().to_le_bytes());
+    put(&mut buf, &config.exchange_timeout.as_nanos().to_le_bytes());
     put(&mut buf, &[u8::from(config.eager)]);
-    put_opt_secs(&mut buf, config.sis_keepalive);
-    put_opt_secs(&mut buf, config.eager_retry);
-    put_opt_secs(&mut buf, config.cold_backoff);
+    put_opt_duration(&mut buf, config.sis_keepalive);
+    put_opt_duration(&mut buf, config.eager_retry);
+    put_opt_duration(&mut buf, config.cold_backoff);
     // Iterated from a `BTreeSet`, so the order is the set's and not the file's:
     // two devices that disable the same fields in a different order are one
     // device, which is what makes an operator's reordering a no-op.
@@ -852,7 +852,7 @@ fn fingerprint(config: &DeviceConfig) -> Uuid {
         put(&mut buf, field.as_bytes());
     }
     put(&mut buf, &config.auto_disable_after.to_le_bytes());
-    put_opt_secs(&mut buf, config.self_heal);
+    put_opt_duration(&mut buf, config.self_heal);
 
     Uuid::new_v5(&DEVICE_NAMESPACE, &buf)
 }
@@ -1739,6 +1739,33 @@ devices = ["room-5"]
                     [[device]]\nid = \"b\"\nhost = \"10.0.0.7\"\n";
         let devices = from_toml_str(text).unwrap().devices;
         assert_ne!(devices[0].uuid, devices[1].uuid);
+    }
+
+    /// Durations are fingerprinted at full precision, not truncated to seconds.
+    ///
+    /// A regression test for a real collision: hashing `as_secs()` made every
+    /// sub-second timeout identical, so two devices differing only below a
+    /// second shared a UUID and the registry read them as the same device —
+    /// leaving the replacement's tasks bound to the old handle. Nothing in a
+    /// *file* can produce a sub-second timeout (`connect_secs` is whole
+    /// seconds), which is exactly why this went unnoticed: it is reachable only
+    /// by constructing a [`DeviceConfig`] directly, which is public API and is
+    /// what every test in the workspace does.
+    #[test]
+    fn two_timeouts_under_a_second_apart_are_two_devices() {
+        let base = one_device("", "").unwrap();
+        let quick = DeviceConfig {
+            connect_timeout: Duration::from_millis(500),
+            ..base.clone()
+        }
+        .derive_uuid();
+        let quicker = DeviceConfig {
+            connect_timeout: Duration::from_millis(900),
+            ..base
+        }
+        .derive_uuid();
+
+        assert_ne!(quick.uuid, quicker.uuid);
     }
 
     /// A length-prefixed encoding, stated as the property it buys: two devices

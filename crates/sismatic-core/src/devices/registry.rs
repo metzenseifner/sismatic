@@ -13,13 +13,38 @@
 //! namespace (the config layer guarantees they never collide), so [`target`]
 //! resolves either kind from a single id.
 //!
+//! # A fleet that changes while it runs
+//!
+//! [`apply`] replaces the device and group set in place, and the whole of its
+//! design is one comparison: a [`DeviceConfig`]'s
+//! [`uuid`](DeviceConfig::uuid) is derived from its every field, so two configs
+//! with the same UUID *are* the same device and there is nothing to do. That is
+//! what makes a reload cheap — a file re-read that changed one recorder leaves
+//! the other thirty-nine holding the SSH sessions they already had, rather than
+//! every device in the fleet redialing to apply a change to one of them.
+//!
+//! A device is immutable, so a device whose configuration moved is not mutated
+//! but *replaced*: a new [`Device`], a new connection, a new UUID. What crosses
+//! from the old one to the new is the learned veto set (see [`AutoDisabled`]),
+//! because that is evidence about the recorder at that address and not about the
+//! configuration used to reach it — a device replaced for a changed
+//! `connect_secs` is the same unit with the same missing license.
+//!
+//! Removal is cooperative, as cancellation is everywhere else here. Dropping a
+//! device from the map does not reach into the callers already holding an
+//! `Arc<Device>` — a poll loop mid-exchange finishes it against the device it
+//! has. What removal guarantees is that no *new* lookup finds it.
+//!
 //! [`target`]: Registry::target
+//! [`apply`]: Registry::apply
+//! [`AutoDisabled`]: super::auto_disabled::AutoDisabled
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
-use super::config::{DeviceConfig, GroupConfig};
+use super::config::{DeviceConfig, GroupConfig, Resolved};
 use super::connector::Connector;
 use super::device::Device;
 use super::group::DeviceGroup;
@@ -31,10 +56,67 @@ pub enum Target {
     Group(Arc<DeviceGroup>),
 }
 
+/// What one pass of [`Registry::apply`] did.
+///
+/// Ids rather than counts, because every consumer of this needs the names: the
+/// sync supervisor restarts loops for them, the relay stops a task per removed
+/// device, and the composition root cancels their queued writes. A count would
+/// make each of those re-derive the diff this already computed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryChange {
+    /// Ids that did not exist before, sorted.
+    pub added: Vec<String>,
+    /// Ids that existed with a different configuration, sorted. Each is a new
+    /// [`Device`] with a new connection; the old one is dropped.
+    pub replaced: Vec<String>,
+    /// Ids that no longer appear in the applied config, sorted.
+    pub removed: Vec<String>,
+    /// How many devices were left exactly as they were — the number that
+    /// *kept their warm connection*, which is the figure worth logging after a
+    /// reload.
+    pub unchanged: usize,
+}
+
+impl RegistryChange {
+    /// Whether the applied config asked for nothing the registry was not
+    /// already holding.
+    #[must_use]
+    pub fn is_nothing(&self) -> bool {
+        self.added.is_empty() && self.replaced.is_empty() && self.removed.is_empty()
+    }
+
+    /// Every id whose `Arc<Device>` is no longer the one the registry hands
+    /// out — the devices whose running tasks have to be stopped, and for the
+    /// replaced ones restarted.
+    #[must_use]
+    pub fn invalidated(&self) -> Vec<String> {
+        let mut ids = self.replaced.clone();
+        ids.extend(self.removed.iter().cloned());
+        ids.sort();
+        ids
+    }
+}
+
 /// A lookup table of devices and the groups layered over them.
 pub struct Registry {
     devices: DashMap<String, Arc<Device>>,
     groups: DashMap<String, Arc<DeviceGroup>>,
+    /// Kept so [`apply`](Registry::apply) can build a device without being
+    /// handed one. Every device in a registry shares it, which is what makes
+    /// the connector a property of the fleet rather than of a device.
+    connector: Arc<dyn Connector>,
+    /// Serializes reconciliation against itself.
+    ///
+    /// The `DashMap`s make each individual insert and remove safe; this makes
+    /// the *diff* safe, which is a different claim. Two concurrent `apply`s
+    /// reading the same "before" state would each decide against a fleet that
+    /// no longer exists by the time they write, and the loser's decisions would
+    /// be silently wrong rather than merely late.
+    ///
+    /// A `std::sync::Mutex` because nothing under it awaits: building a
+    /// `Device` is a struct literal, and no I/O happens until something runs an
+    /// instruction on it.
+    reconcile: Mutex<()>,
 }
 
 impl Registry {
@@ -62,20 +144,124 @@ impl Registry {
             devices.insert(id, device);
         }
 
-        let groups = DashMap::new();
+        let registry = Self {
+            devices,
+            groups: DashMap::new(),
+            connector,
+            reconcile: Mutex::new(()),
+        };
+        registry.rebuild_groups(group_configs);
+        registry
+    }
+
+    /// Make the registry match `resolved`, and report what moved.
+    ///
+    /// The diff is by [`DeviceConfig::uuid`], which is derived from every field
+    /// of a device's configuration — so this compares two `u128`s per id rather
+    /// than walking eleven fields, and it cannot forget one. A device whose UUID
+    /// is unchanged is left strictly alone: the same `Arc<Device>`, the same
+    /// connection, not even a lock taken.
+    ///
+    /// A device whose UUID moved is replaced rather than mutated, because a
+    /// `DeviceConfig` is immutable. Its learned veto set is carried into the
+    /// replacement (see [`Device::with_auto_disabled`]), so a config edit does
+    /// not make the fleet re-discover, at `auto_disable_after` refused
+    /// exchanges per field, everything it already knew about that recorder.
+    ///
+    /// Groups are rebuilt wholesale rather than diffed. A group holds
+    /// `Arc<Device>` handles, so any replacement invalidates every group that
+    /// contains it, and a group is an id and a vector of `Arc` clones — cheaper
+    /// to rebuild than to work out which ones needed it.
+    ///
+    /// The `resolved` argument is a whole [`Resolved`] rather than the two
+    /// vectors, because its invariants are what make this safe to apply: ids are
+    /// unique across devices *and* groups, and every group member names a
+    /// device present in the same value. Taking the pieces separately would let
+    /// a caller assemble a pair that `resolve_config` would have refused.
+    pub fn apply(&self, resolved: Resolved) -> RegistryChange {
+        let _guard = self
+            .reconcile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Resolved { devices, groups } = resolved;
+        let mut change = RegistryChange::default();
+        let desired: BTreeMap<String, DeviceConfig> = devices
+            .into_iter()
+            .map(|config| (config.id.clone(), config))
+            .collect();
+
+        // Taken before the map is consumed below; this is what says which of
+        // the *currently* registered devices the applied config no longer
+        // mentions.
+        let desired_ids: std::collections::BTreeSet<String> = desired.keys().cloned().collect();
+
+        for (id, config) in desired {
+            match self.devices.get(&id).map(|d| Arc::clone(d.value())) {
+                // Same configuration, so same device. Nothing is touched — this
+                // is the case a reload is almost entirely made of, and the
+                // reason it does not cost the fleet its connections.
+                Some(existing) if existing.config().uuid == config.uuid => {
+                    change.unchanged += 1;
+                }
+                Some(existing) => {
+                    let replacement = Device::with_auto_disabled(
+                        config,
+                        Arc::clone(&self.connector),
+                        Arc::clone(existing.auto_disabled()),
+                    );
+                    self.devices.insert(id.clone(), Arc::new(replacement));
+                    change.replaced.push(id);
+                }
+                None => {
+                    let device = Device::new(config, Arc::clone(&self.connector));
+                    self.devices.insert(id.clone(), Arc::new(device));
+                    change.added.push(id);
+                }
+            }
+        }
+
+        // Collected before removing, rather than removing while iterating: a
+        // `DashMap` iterator holds shard locks, and `remove` inside one is the
+        // shape that deadlocks.
+        let stale: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|entry| !desired_ids.contains(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for id in stale {
+            self.devices.remove(&id);
+            change.removed.push(id);
+        }
+
+        change.added.sort();
+        change.replaced.sort();
+        change.removed.sort();
+
+        self.rebuild_groups(groups);
+        change
+    }
+
+    /// Replace every group with one built over the devices now registered.
+    ///
+    /// A member that does not resolve is skipped rather than panicking, the
+    /// same contract [`build`](Self::build) has and for the same reason: a
+    /// [`Resolved`] guarantees every member names a device, so a miss is
+    /// impossible and defending against it is cheaper than proving it.
+    fn rebuild_groups(&self, group_configs: Vec<GroupConfig>) {
+        self.groups.clear();
         for group in group_configs {
             let members = group
                 .device_ids
                 .iter()
-                .filter_map(|id| devices.get(id).map(|d| Arc::clone(d.value())))
+                .filter_map(|id| self.devices.get(id).map(|d| Arc::clone(d.value())))
                 .collect();
-            groups.insert(
+            self.groups.insert(
                 group.id.clone(),
                 Arc::new(DeviceGroup::new(group.id, members)),
             );
         }
-
-        Self { devices, groups }
     }
 
     /// The device with this id, or `None` if no device has it. This looks up
@@ -271,6 +457,180 @@ mod tests {
             Some(Target::Group(_))
         ));
         assert!(registry.target("nope").is_none());
+    }
+
+    // ---- applying a new fleet ---------------------------------------------
+
+    fn resolved(devices: Vec<DeviceConfig>, groups: Vec<GroupConfig>) -> Resolved {
+        Resolved { devices, groups }
+    }
+
+    /// `example_configs`, with `id`'s `connect_timeout` moved — the smallest
+    /// edit that mints a different device.
+    fn with_retimed(id: &str) -> Vec<DeviceConfig> {
+        example_configs()
+            .into_iter()
+            .map(|config| {
+                if config.id == id {
+                    DeviceConfig {
+                        connect_timeout: Duration::from_secs(30),
+                        ..config
+                    }
+                    .derive_uuid()
+                } else {
+                    config
+                }
+            })
+            .collect()
+    }
+
+    /// The property a reload rests on: re-applying the same configuration
+    /// touches nothing, so the fleet keeps every SSH session it holds.
+    #[test]
+    fn re_applying_the_same_config_changes_nothing() {
+        let registry = registry_over(1);
+        let before = registry.device("atrium-101").expect("configured");
+
+        let change = registry.apply(resolved(example_configs(), vec![]));
+
+        assert!(change.is_nothing(), "{change:?}");
+        assert_eq!(change.unchanged, 2);
+        assert!(
+            Arc::ptr_eq(&before, &registry.device("atrium-101").unwrap()),
+            "an unchanged device must be the very same handle, warm connection and all"
+        );
+    }
+
+    #[test]
+    fn a_changed_device_is_replaced_and_the_others_are_left_alone() {
+        let registry = registry_over(1);
+        let untouched = registry.device("annex-far").expect("configured");
+        let before = registry.device("atrium-101").expect("configured");
+
+        let change = registry.apply(resolved(with_retimed("atrium-101"), vec![]));
+
+        assert_eq!(change.replaced, vec!["atrium-101"]);
+        assert_eq!(change.unchanged, 1, "the edit was to one device only");
+        assert!(change.added.is_empty() && change.removed.is_empty());
+
+        let after = registry.device("atrium-101").unwrap();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "a changed device is replaced"
+        );
+        assert_eq!(after.config().connect_timeout, Duration::from_secs(30));
+        assert!(
+            Arc::ptr_eq(&untouched, &registry.device("annex-far").unwrap()),
+            "one device's edit must not cost another its connection"
+        );
+    }
+
+    /// The reason a replacement is not simply a fresh device: what was learned
+    /// is evidence about the recorder at that address, and re-learning it costs
+    /// `auto_disable_after` refused exchanges per field.
+    #[test]
+    fn a_replaced_device_keeps_what_was_learned_about_it() {
+        let registry = registry_over(1);
+        let before = registry.device("atrium-101").expect("configured");
+        // Two refusals at a threshold of two: the field is now vetoed.
+        before.auto_disabled().refused("STREAM_2_NAME", 2, None);
+        before.auto_disabled().refused("STREAM_2_NAME", 2, None);
+        assert!(before.auto_disabled().veto("STREAM_2_NAME").is_some());
+
+        registry.apply(resolved(with_retimed("atrium-101"), vec![]));
+
+        let after = registry.device("atrium-101").unwrap();
+        assert!(
+            after.auto_disabled().veto("STREAM_2_NAME").is_some(),
+            "the replacement must inherit the learned veto"
+        );
+        assert!(
+            Arc::ptr_eq(before.auto_disabled(), after.auto_disabled()),
+            "and share the very set, so what it learns next is not forked"
+        );
+    }
+
+    #[test]
+    fn devices_are_added_and_removed() {
+        let registry = registry_over(1);
+
+        let mut fleet = example_configs();
+        fleet.retain(|config| config.id != "annex-far");
+        fleet.push(
+            DeviceConfig {
+                id: "new-wing".into(),
+                ..example_configs().remove(0)
+            }
+            .derive_uuid(),
+        );
+
+        let change = registry.apply(resolved(fleet, vec![]));
+
+        assert_eq!(change.added, vec!["new-wing"]);
+        assert_eq!(change.removed, vec!["annex-far"]);
+        assert_eq!(change.unchanged, 1);
+        assert!(
+            registry.device("annex-far").is_none(),
+            "removed from lookup"
+        );
+        assert!(registry.device("new-wing").is_some());
+        assert_eq!(registry.len(), 2);
+    }
+
+    /// A removed device takes its learned set with it: the id is gone, and what
+    /// was recorded was about that id.
+    #[test]
+    fn a_removed_and_re_added_device_starts_over() {
+        let registry = registry_over(1);
+        let before = registry.device("annex-far").expect("configured");
+        before.auto_disabled().refused("STREAM_2_NAME", 1, None);
+        assert!(before.auto_disabled().veto("STREAM_2_NAME").is_some());
+        drop(before);
+
+        let mut fleet = example_configs();
+        fleet.retain(|config| config.id != "annex-far");
+        registry.apply(resolved(fleet, vec![]));
+        registry.apply(resolved(example_configs(), vec![]));
+
+        let readded = registry.device("annex-far").expect("back again");
+        assert_eq!(
+            readded.auto_disabled().veto("STREAM_2_NAME"),
+            None,
+            "a device removed from the fleet leaves nothing behind"
+        );
+    }
+
+    /// A group holds `Arc<Device>` handles, so a replacement it contains would
+    /// leave it addressing a device the registry no longer hands out.
+    #[test]
+    fn groups_are_rebuilt_over_the_devices_that_replaced_their_members() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let registry = Registry::build(example_configs(), group_config(), connector);
+
+        registry.apply(resolved(with_retimed("atrium-101"), group_config()));
+
+        let group = registry.group("everywhere").expect("still configured");
+        let current = registry.device("atrium-101").unwrap();
+        assert!(
+            group
+                .members()
+                .iter()
+                .any(|member| Arc::ptr_eq(member, &current)),
+            "the group must address the device the registry now hands out"
+        );
+    }
+
+    #[test]
+    fn applying_a_config_with_no_devices_empties_the_registry() {
+        let registry = registry_over(1);
+        let change = registry.apply(resolved(vec![], vec![]));
+
+        assert_eq!(change.removed, vec!["annex-far", "atrium-101"]);
+        assert_eq!(change.unchanged, 0);
+        assert!(registry.is_empty());
+        assert!(registry.group_ids().is_empty());
     }
 
     #[tokio::test]
