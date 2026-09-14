@@ -150,13 +150,18 @@ silently did nothing.
 itself a valid `PATCH` body. So read-modify-write is safe to script: fetch it,
 change one number, send it back, and nothing you did not touch moves.
 
-**What cannot change.** `http` and `devices_config_path` are reported and not
-editable — one is the socket the server is already bound to, the other names the
-file the device registry and its SSH sessions were built from. Naming either at
-the value it already has is accepted (that is what keeps the whole document a
-valid patch); changing one is a `409` saying a restart is what applies it. Note
-also that the devices file's *contents* are read once at startup: a device added
-to it arrives with a restart and by nothing else.
+**What cannot change.** `http` and both paths under `inventory` are reported and
+not editable — one is the socket the server is already bound to, the others name
+the files the device registry and its SSH sessions were built from and may
+already be written to. Naming any of them at the value it already has is
+accepted (that is what keeps the whole document a valid patch); changing one is a
+`409` saying a restart is what applies it.
+
+Their *contents* are a different matter. `POST /v1/inventory/config/reset`
+re-reads `inventory.config_path` and adopts it wholesale, and the `/v1/inventory`
+routes change the fleet without touching any file — so a device no longer needs a
+restart to arrive. Whether such a change outlives the process depends on
+`inventory.runtime_config_path`; see the inventory section.
 
 **A patch is not written to disk.** It changes the running process, and the file
 stays the single source of truth — so a `PATCH` is an override that lasts until
@@ -185,7 +190,7 @@ The reload answers:
 | --- | --- |
 | `200` | Applied. The body is every setting as it now stands. |
 | `400` | The file parsed but a value could not be applied. Nothing was reloaded. |
-| `409` | `http` or `devices_config_path` moved. Those need a restart, so nothing was reloaded — roll the deployment. |
+| `409` | `http` or an `inventory` path moved. Those need a restart, so nothing was reloaded — roll the deployment. |
 | `500` | The file could not be read or parsed. The server keeps running under the settings it had. |
 
 The `409` is the one worth automating around: it is the ConfigMap telling you

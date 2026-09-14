@@ -198,6 +198,40 @@ impl MemoryStore {
         entries
     }
 
+    /// Drop everything recorded for `device`, and report how many entries went.
+    ///
+    /// For a device leaving the fleet, under the deployment's
+    /// `store.cleanup_on_remove`. It is an inherent method rather than a port
+    /// because the composition root is holding this adapter anyway — the same
+    /// arrangement [`set_budget`](Self::set_budget) uses, and for the same
+    /// reason: a port would have to be implemented by a durable backend that
+    /// does not exist yet, to serve one caller that already has the concrete
+    /// type.
+    ///
+    /// Deliberately *not* on [`Lifecycle`]. That port
+    /// is retention — what stops being recorded as it ages — and is driven by a
+    /// sweeper on a timer. This is driven by an operator removing a recorder,
+    /// which is a different caller on a different clock, which is the whole
+    /// argument that module gives for being a third port in the first place.
+    ///
+    /// Idempotent: a device with nothing stored is a no-op reporting zero, so a
+    /// removal path need not ask first.
+    pub fn forget_device(&self, device: &str) -> u64 {
+        // `latest` first, because its bytes have to be known before the ledger
+        // can be told about them, and removing it is what makes them knowable.
+        let dropped_latest = self
+            .latest
+            .remove(device)
+            .map(|(_, fields)| fields.values().map(latest_bytes).sum::<u64>())
+            .unwrap_or_default();
+
+        let slots = self.ledger.forget(device, dropped_latest);
+        // The history map goes whole rather than entry by entry: every slot this
+        // returned named this device, so there is nothing left in it to keep.
+        self.history.remove(device);
+        slots.len() as u64
+    }
+
     /// Remove the entries `slots` names, front-first, from the series they
     /// belong to.
     ///
@@ -398,6 +432,31 @@ impl Books {
         self.queue = kept;
         taken
     }
+
+    /// Claim every slot belonging to `device`, settling `history_bytes` for
+    /// them.
+    ///
+    /// The same shape as [`take_expired`](Self::take_expired) over a different
+    /// predicate, and deliberately not generalized into one function taking a
+    /// closure: the two are read for different reasons — one is retention, one
+    /// is a device leaving the fleet — and a shared helper would put the *why*
+    /// at the call site where a reader of the books cannot see it.
+    fn take_device(&mut self, device: &str) -> Vec<Slot> {
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.queue.len());
+
+        for slot in std::mem::take(&mut self.queue) {
+            if slot.device == device {
+                self.history_bytes = self.history_bytes.saturating_sub(slot.bytes);
+                taken.push(slot);
+            } else {
+                kept.push_back(slot);
+            }
+        }
+
+        self.queue = kept;
+        taken
+    }
 }
 
 impl Ledger {
@@ -428,6 +487,18 @@ impl Ledger {
     fn expire(&self, before: &Timestamp) -> Vec<Slot> {
         let mut books = self.books.lock().expect("ledger poisoned");
         books.take_expired(before)
+    }
+
+    /// Claim every history slot belonging to `device`, and account for the
+    /// `latest` bytes going with them.
+    ///
+    /// Both halves under one lock for the reason [`admit`](Self::admit) puts its
+    /// two halves there: they are one event, and settling them apart would leave
+    /// a moment where the books describe a device that is half gone.
+    fn forget(&self, device: &str, latest_bytes: u64) -> Vec<Slot> {
+        let mut books = self.books.lock().expect("ledger poisoned");
+        books.restate_latest(0, latest_bytes);
+        books.take_device(device)
     }
 }
 
@@ -1154,6 +1225,67 @@ mod tests {
         assert!(usage.over_budget(), "and it is still over");
         // ...and the store did not spin trying: one entry in, one evicted.
         assert_eq!(usage.evicted, 1);
+    }
+
+    // ---- a device leaving the fleet --------------------------------------
+
+    /// A device leaving the fleet, under `store.cleanup_on_remove`. Both halves
+    /// go — the latest snapshot and the history — and the books settle for both,
+    /// which is what stops a purge from leaving the byte estimate describing
+    /// reads that no longer exist.
+    #[tokio::test]
+    async fn forgetting_a_device_drops_its_reads_and_settles_the_books() {
+        let store = MemoryStore::default();
+        for (device, field, n) in [
+            ("goner", "TITLE", 1),
+            ("goner", "FIRMWARE", 2),
+            ("keeper", "TITLE", 3),
+        ] {
+            store
+                .upsert_latest(read(device, field, n, "2026-07-23T14:00:00Z"))
+                .await
+                .expect("seeding");
+        }
+        let before = Lifecycle::usage(&store).await.expect("usage");
+
+        let dropped = store.forget_device("goner");
+
+        assert_eq!(dropped, 2, "one history entry per field");
+        assert!(
+            store
+                .latest_all("goner".to_owned())
+                .await
+                .expect("reading")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .latest_all("keeper".to_owned())
+                .await
+                .expect("reading")
+                .len(),
+            1,
+            "another device's reads are not this device's to drop"
+        );
+
+        let after = Lifecycle::usage(&store).await.expect("usage");
+        assert_eq!(after.entries, 1, "one history entry left, keeper's");
+        assert!(
+            after.bytes < before.bytes,
+            "the estimate must fall with the reads: {before:?} -> {after:?}"
+        );
+    }
+
+    /// Idempotent, so a removal path need not ask whether anything was stored.
+    #[tokio::test]
+    async fn forgetting_a_device_with_nothing_stored_is_a_no_op() {
+        let store = MemoryStore::default();
+        assert_eq!(store.forget_device("nobody"), 0);
+        assert_eq!(
+            Lifecycle::usage(&store).await.expect("usage").bytes,
+            0,
+            "and must not drive the estimate negative"
+        );
     }
 
     // ---- expiry ----------------------------------------------------------

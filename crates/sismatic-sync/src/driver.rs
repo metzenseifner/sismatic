@@ -61,14 +61,70 @@
 //! first tick fires immediately — and what it buys is that the hot path stays a
 //! ticker and an SSH exchange.
 //!
-//! Cancellation is per field, through a token that is a child of the driver's
-//! own, so stopping one field cannot outlive it and stopping the driver stops
-//! them all. Both are cooperative: a loop being re-timed finishes its current
-//! exchange under the old interval before it goes.
+//! Cancellation is per `(field, device)`, through a token that is a child of
+//! the driver's own, so stopping one loop cannot outlive the driver and stopping
+//! the driver stops them all. Both are cooperative: a loop being re-timed
+//! finishes its current exchange under the old interval before it goes.
 //!
 //! A deployment with nothing to say still fits: [`fixed`] is a schedule with no
 //! sender behind it, and a supervisor that finds the sender gone stops listening
 //! and keeps polling what it has.
+//!
+//! # A fleet that changes under the loops
+//!
+//! The device set moves too, on a second channel — [`SyncConfig::fleet`], a
+//! generation counter whose value is never read, because the supervisor holds
+//! the registry and all the channel has to say is *look again*. [`fixed_fleet`]
+//! is its counterpart to [`fixed`].
+//!
+//! This is why the running loops are keyed by `(field, device)` and not by field
+//! alone. When every device polled the same fields, a field was the smallest
+//! thing a change could be about, and one token per field was one cancel per
+//! change instead of one per device. A fleet that can gain a recorder breaks
+//! that: under the coarser key the only way to give the new device its loops is
+//! to cancel and respawn every field on every device, and since a restarted
+//! ticker fires immediately, adding one recorder to a wildcard schedule makes
+//! the whole fleet run forty-odd exchanges back to back. At the finer grain the
+//! loops that were already right are not touched at all.
+//!
+//! It also needs one thing a device *id* cannot provide. A device is immutable,
+//! so an edited one is replaced: same id, quite possibly the same interval, and
+//! an `Arc<Device>` the registry no longer hands out — a private connection and
+//! a stale copy of the `disabled_fields` that were just edited. So each running
+//! loop records the [`uuid`] of the config it was started against, and [`act`]
+//! compares that first. That is what makes "this device's veto changed" reach
+//! the poll loops at all.
+//!
+//! [`uuid`]: sismatic_core::devices::config::DeviceConfig::uuid
+//!
+//! # Fields a device will not answer
+//!
+//! The schedule is fleet-wide and support is per device, so the two compose by
+//! subtraction: what a device is actually polled for is the schedule minus that
+//! device's vetoes. The veto is one-directional — a device can only remove — so
+//! nothing here has to arbitrate between the two, and a `PATCH /v1/config` can
+//! never turn on a field a recorder cannot answer.
+//!
+//! The two halves of the veto are enforced in two different places, and the
+//! asymmetry is not an accident:
+//!
+//! * **Declared** (`disabled_fields`) is known before anything starts, so
+//!   [`Loops::start`] simply starts no loop for that `(device, field)`. It costs
+//!   nothing at all — no task, no ticker, no wake-up.
+//! * **Inferred** (`auto_disable_after` consecutive refusals) cannot be known
+//!   before polling, and a device with `self_heal_secs` set needs the loop to
+//!   *stay* in order to retry. So it is enforced inside [`poll_loop`], which
+//!   checks the veto before the exchange and skips it. That costs a timer
+//!   wake-up per tick and saves the SSH round trip, which is the trade the whole
+//!   feature is about. With `self_heal_secs` unset there is no retry to perform,
+//!   so the loop ends itself rather than waking forever to do nothing.
+//!
+//! This crate is also the only place that *counts* refusals, and that is what
+//! makes "a hand-issued write must not disable a field for the fleet" true by
+//! construction rather than by convention: counting requires repetition, and
+//! this is what repeats. Enforcement is the other way round — `Device::run`
+//! checks the veto for every caller — so once a field is off, nothing asks for
+//! it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -77,6 +133,8 @@ use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use sismatic_api_types::{Read, Timestamp};
+use sismatic_core::devices::auto_disabled::Refusal;
+use sismatic_core::devices::config::Uuid;
 use sismatic_core::devices::device::{Device, DeviceError};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::protocol::Value;
@@ -115,6 +173,18 @@ pub struct SyncConfig {
     /// supervisor that is busy. A deployment with a fixed schedule passes
     /// [`fixed`].
     pub fields: watch::Receiver<Vec<FieldSchedule>>,
+    /// Where a *device set* change is announced.
+    ///
+    /// A generation counter rather than the fleet itself, and the value is never
+    /// read: the supervisor holds the `Arc<Registry>` already, so all this has
+    /// to carry is "look again". That is also what makes a [`watch`]'s lossiness
+    /// free here — three device changes arriving faster than the supervisor
+    /// wakes collapse into one reconcile against the same final fleet, which is
+    /// the right answer rather than a tolerated approximation.
+    ///
+    /// A deployment whose fleet is fixed for the life of the process passes
+    /// [`fixed_fleet`].
+    pub fleet: watch::Receiver<u64>,
     /// Where to report an observed recording state, if anything is listening.
     ///
     /// `None` is the shape every consumer had before the write side existed:
@@ -151,6 +221,17 @@ impl std::fmt::Debug for SyncConfig {
 #[must_use]
 pub fn fixed(fields: Vec<FieldSchedule>) -> watch::Receiver<Vec<FieldSchedule>> {
     watch::channel(fields).1
+}
+
+/// A fleet that will never change: no sender, so the supervisor learns on its
+/// first `changed()` that nothing can announce a device change and stops asking.
+///
+/// [`fixed`]'s counterpart, and the shape every caller had before the device set
+/// could move — `sismatic-cli`, this crate's own tests, and any deployment that
+/// builds its registry once and leaves it alone.
+#[must_use]
+pub fn fixed_fleet() -> watch::Receiver<u64> {
+    watch::channel(0).1
 }
 
 /// One field's polling schedule: what to ask for, and how often to ask.
@@ -232,6 +313,7 @@ async fn supervise(
 ) {
     let SyncConfig {
         mut fields,
+        mut fleet,
         reconciler,
     } = cfg;
 
@@ -250,57 +332,64 @@ async fn supervise(
         running: BTreeMap::new(),
     };
 
-    // `borrow_and_update` rather than `borrow`, so a schedule published between
-    // this line and the first `changed()` below is not applied twice.
-    let initial = fields.borrow_and_update().clone();
+    // `borrow_and_update` rather than `borrow`, so a value published between this
+    // line and the first `changed()` below is not applied twice.
+    let mut schedule = fields.borrow_and_update().clone();
+    fleet.borrow_and_update();
 
-    // Announced once per field rather than once per (device, field): a disabled
-    // field is a property of the config, and repeating it per device would say
-    // the same thing as many times as there are devices. Only at startup — after
-    // that a field being switched off is a *change*, and `Loops::reconcile` says
-    // so as one.
-    for field in initial.iter().filter(|f| f.interval.is_none()) {
+    // Announced once per field rather than once per (device, field): a field
+    // nobody polls is a property of the schedule, and repeating it per device
+    // would say the same thing as many times as there are devices. Only at
+    // startup — after that a field being switched off is a *change*, and
+    // `Loops::reconcile` says so as one.
+    for field in schedule.iter().filter(|f| f.interval.is_none()) {
         info!(
             field = field.name,
             "polling disabled for this field; no loop started"
         );
     }
 
-    loops.reconcile(&initial);
-    info!(tasks = loops.tasks.len(), "sync driver started");
+    let initial = loops.reconcile(&schedule);
+    info!(
+        tasks = loops.tasks.len(),
+        declined = initial.declined,
+        "sync driver started"
+    );
 
-    // Whether there is still anyone who could publish a schedule. A closed
-    // channel is not a failure: it is a deployment whose schedule was decided
-    // once — see `fixed` — and the answer to it is to stop asking rather than to
-    // spin on a `changed()` that returns immediately forever.
-    let mut watching = true;
+    // Whether there is still anyone who could publish. A closed channel is not a
+    // failure: it is a deployment whose schedule — or whose fleet — was decided
+    // once (see `fixed` and `fixed_fleet`), and the answer to it is to stop
+    // asking rather than to spin on a `changed()` that returns immediately
+    // forever. The two are tracked apart because a deployment can reasonably
+    // have one and not the other.
+    let mut watching_fields = true;
+    let mut watching_fleet = true;
 
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
-            changed = fields.changed(), if watching => match changed {
+            changed = fields.changed(), if watching_fields => match changed {
                 Ok(()) => {
-                    let next = fields.borrow_and_update().clone();
-                    let change = loops.reconcile(&next);
-                    if change.is_nothing() {
-                        // The schedule was republished with nothing new in it —
-                        // a `PATCH` that named a field at the interval it
-                        // already had, or a reload of an unchanged file. Worth a
-                        // line, because "the request landed and changed nothing"
-                        // is otherwise indistinguishable from a request that
-                        // never arrived.
-                        debug!("a schedule was published that changes no poll loop");
-                    } else {
-                        info!(
-                            started = change.started,
-                            stopped = change.stopped,
-                            retimed = change.retimed,
-                            tasks = loops.tasks.len(),
-                            "the poll schedule changed"
-                        );
-                    }
+                    schedule = fields.borrow_and_update().clone();
+                    report(loops.reconcile(&schedule), &loops, "the poll schedule changed");
                 }
-                Err(_) => watching = false,
+                Err(_) => watching_fields = false,
+            },
+            changed = fleet.changed(), if watching_fleet => match changed {
+                Ok(()) => {
+                    // The value is a generation counter and is deliberately not
+                    // read: what it says is "look again", and the registry is
+                    // what gets looked at. That is also why losing intermediate
+                    // values costs nothing — three device changes collapsing
+                    // into one wake-up reconcile against the same final fleet.
+                    fleet.borrow_and_update();
+                    // Against the schedule already in force. Re-borrowing
+                    // `fields` here would apply a pending schedule change on the
+                    // fleet's wake-up and leave its own arm reporting a no-op,
+                    // attributing the change to the wrong event in the log.
+                    report(loops.reconcile(&schedule), &loops, "the device fleet changed");
+                }
+                Err(_) => watching_fleet = false,
             },
         }
     }
@@ -309,6 +398,28 @@ async fn supervise(
     // Cancelled above — every loop's token is a child of it — so this waits on
     // loops that are already on their way out.
     while loops.tasks.join_next().await.is_some() {}
+}
+
+/// Log what a reconcile did, at a level that follows whether it did anything.
+///
+/// A pass that moves nothing is `debug`, because "the request landed and changed
+/// nothing" is otherwise indistinguishable from a request that never arrived —
+/// but it is not news, and both a republished schedule and a device edit that
+/// misses this driver entirely can produce one.
+fn report(change: Change, loops: &Loops, what: &'static str) {
+    if change.is_nothing() {
+        debug!(what, "a change was published that moves no poll loop");
+    } else {
+        info!(
+            started = change.started,
+            stopped = change.stopped,
+            retimed = change.retimed,
+            rebound = change.rebound,
+            declined = change.declined,
+            tasks = loops.tasks.len(),
+            what
+        );
+    }
 }
 
 /// The poll loops that are running, and everything needed to start another.
@@ -320,14 +431,53 @@ struct Loops {
     /// the fleet and no per-field token can outlive the driver.
     cancel: CancellationToken,
     tasks: JoinSet<()>,
-    /// One entry per field with loops running: what they are ticking at, and the
-    /// token that stops just that field across every device.
+    /// One entry per running loop, keyed by `(field, device id)`.
     ///
-    /// Keyed by field rather than by `(device, field)` because the schedule is:
-    /// every device polls the same fields, so a field is the smallest thing a
-    /// change can be about, and one token per field is one cancel per change
-    /// rather than one per device.
-    running: BTreeMap<String, (Duration, CancellationToken)>,
+    /// Keyed by the pair rather than by field alone, which it was until the
+    /// fleet could change while the process runs. When every device polled the
+    /// same fields, a field *was* the smallest thing a change could be about,
+    /// and one token per field was one cancel per change rather than one per
+    /// device. Adding a single recorder breaks that: under the coarser key the
+    /// only way to give it loops is to cancel and respawn every field across
+    /// the whole fleet, which — on a wildcard schedule — makes every device run
+    /// forty-odd exchanges back to back because each restarted ticker fires
+    /// immediately.
+    ///
+    /// At this grain the loops that were already right are not touched at all,
+    /// so adding a device costs exactly that device's loops and nothing else
+    /// changes phase. The price is a token per pair rather than per field, which
+    /// is a `CancellationToken` — an `Arc` and an atomic — per running loop that
+    /// already owns a task and a ticker.
+    running: BTreeMap<Key, Running>,
+}
+
+/// What identifies one poll loop: the field it polls and the device it polls.
+type Key = (String, String);
+
+/// A running loop, and what it was started against.
+struct Running {
+    interval: Duration,
+    /// The [`uuid`] of the device config this loop was started for.
+    ///
+    /// Carried because a device id is not enough to decide whether a loop is
+    /// still correct. A device is immutable, so an edited one is *replaced*: the
+    /// id is unchanged, the interval may be unchanged, and the `Arc<Device>` the
+    /// loop is holding is one the registry no longer hands out — pointed at a
+    /// connection nobody else will ever use, and carrying the old
+    /// `disabled_fields`. Comparing UUIDs is what catches that; comparing
+    /// intervals cannot.
+    ///
+    /// [`uuid`]: sismatic_core::devices::config::DeviceConfig::uuid
+    device: Uuid,
+    cancel: CancellationToken,
+}
+
+/// What a `(field, device)` pair should be running, as a value the pure decision
+/// below can compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wanted {
+    interval: Duration,
+    device: Uuid,
 }
 
 /// What one pass of [`Loops::reconcile`] did, for the line it logs.
@@ -335,14 +485,32 @@ struct Loops {
 struct Change {
     started: usize,
     stopped: usize,
+    /// Same device, different interval.
     retimed: usize,
+    /// Same id, different device — a replaced config. Counted apart from
+    /// `retimed` because the two have different causes and an operator reading
+    /// the line wants to know which happened: a re-timing came from the
+    /// schedule, a rebinding came from the fleet.
+    rebound: usize,
+    /// How many `(field, device)` pairs the schedule named and a device's
+    /// `disabled_fields` declined.
+    ///
+    /// Not a change — it is the same every pass until the fleet or the schedule
+    /// moves — but reported with them, because it is the number that explains
+    /// why `tasks` is smaller than fields × devices.
+    declined: usize,
 }
 
 impl Change {
-    /// Whether the published schedule asked for anything the loops were not
+    /// Whether the published value asked for anything the loops were not
     /// already doing.
+    ///
+    /// `declined` is excluded on purpose: a pass that started nothing, stopped
+    /// nothing and declined forty pairs did not *change* anything, and treating
+    /// it as a change would put an `info!` line in the log on every republished
+    /// schedule for as long as any device disables any field.
     fn is_nothing(self) -> bool {
-        self == Self::default()
+        self.started == 0 && self.stopped == 0 && self.retimed == 0 && self.rebound == 0
     }
 }
 
@@ -359,49 +527,90 @@ impl Loops {
             }
         }
 
-        // Every field either list mentions. A field that has left the schedule
-        // has to be visited too — it is the one whose loops must stop — and it
-        // appears in `running` alone. Owned rather than borrowed, because the
-        // pass below mutates the very map half of these names came from.
-        let named: BTreeSet<String> = schedule
-            .iter()
-            .map(|f| f.name.clone())
+        // The fleet as it stands, read once. `Registry::devices` allocates a
+        // vector of handles, and reading it per field would do that once per
+        // field for an answer that cannot change inside one pass.
+        let fleet: BTreeMap<String, Arc<Device>> = self
+            .registry
+            .devices()
+            .into_iter()
+            .map(|device| (device.id().to_owned(), device))
+            .collect();
+
+        let (wanted, declined) = wanted_loops(schedule, &fleet);
+
+        // Every pair either side mentions. A pair that has left — because its
+        // field left the schedule, or its device left the fleet — has to be
+        // visited too, and it appears in `running` alone. Owned rather than
+        // borrowed, because the pass below mutates the very map half of these
+        // came from.
+        let named: BTreeSet<Key> = wanted
+            .keys()
+            .cloned()
             .chain(self.running.keys().cloned())
             .collect();
 
-        let mut change = Change::default();
-        for field in &named {
-            let field = field.as_str();
-            let wanted = schedule
-                .iter()
-                .find(|f| f.name == field)
-                .and_then(|f| f.interval);
-            let running = self.running.get(field).map(|(interval, _)| *interval);
+        let mut change = Change {
+            declined,
+            ..Change::default()
+        };
+        for key in &named {
+            let (field, device_id) = (key.0.as_str(), key.1.as_str());
+            let want = wanted.get(key).copied();
+            let current = self.running.get(key).map(|running| Wanted {
+                interval: running.interval,
+                device: running.device,
+            });
 
-            match act(running, wanted) {
+            match act(current, want) {
                 Action::Leave => {}
                 Action::Stop => {
-                    self.stop(field);
+                    self.stop(key);
                     change.stopped += 1;
-                    info!(field, "polling stopped for this field");
+                    debug!(field, device = device_id, "polling stopped for this pair");
                 }
+                // `act` returns these three only when `want` is `Some`, and the
+                // device is in `fleet` because that is where `want` came from.
                 Action::Start => {
-                    // `act` returns `Start` only when `wanted` is `Some`.
-                    if let Some(interval) = wanted {
-                        self.start(field, interval);
+                    if let Some(want) = want
+                        && let Some(device) = fleet.get(device_id)
+                    {
+                        self.start(key, device, want);
                         change.started += 1;
-                        info!(field, interval_secs = interval.as_secs(), "polling started");
+                        debug!(
+                            field,
+                            device = device_id,
+                            interval_secs = want.interval.as_secs(),
+                            "polling started"
+                        );
                     }
                 }
                 Action::Retime => {
-                    if let Some(interval) = wanted {
-                        self.stop(field);
-                        self.start(field, interval);
+                    if let Some(want) = want
+                        && let Some(device) = fleet.get(device_id)
+                    {
+                        self.stop(key);
+                        self.start(key, device, want);
                         change.retimed += 1;
-                        info!(
+                        debug!(
                             field,
-                            interval_secs = interval.as_secs(),
+                            device = device_id,
+                            interval_secs = want.interval.as_secs(),
                             "polling re-timed"
+                        );
+                    }
+                }
+                Action::Rebind => {
+                    if let Some(want) = want
+                        && let Some(device) = fleet.get(device_id)
+                    {
+                        self.stop(key);
+                        self.start(key, device, want);
+                        change.rebound += 1;
+                        debug!(
+                            field,
+                            device = device_id,
+                            "polling rebound to a replaced device"
                         );
                     }
                 }
@@ -410,50 +619,104 @@ impl Loops {
         change
     }
 
-    /// Start one loop per device for `field`, under a token of its own.
-    fn start(&mut self, field: &str, interval: Duration) {
-        let token = self.cancel.child_token();
-        for device in self.registry.devices() {
-            self.tasks.spawn(poll_loop(
-                device,
-                field.to_owned(),
-                self.write.clone(),
-                // Cloning an `Option<Arc<_>>` is a refcount bump when present
-                // and nothing when absent.
-                self.reconciler.clone(),
-                interval,
-                token.clone(),
-            ));
-        }
-        self.running.insert(field.to_owned(), (interval, token));
+    /// Start one loop for one `(field, device)` pair, under a token of its own.
+    fn start(&mut self, key: &Key, device: &Arc<Device>, want: Wanted) {
+        let cancel = self.cancel.child_token();
+        self.tasks.spawn(poll_loop(
+            Arc::clone(device),
+            key.0.clone(),
+            self.write.clone(),
+            // Cloning an `Option<Arc<_>>` is a refcount bump when present and
+            // nothing when absent.
+            self.reconciler.clone(),
+            want.interval,
+            cancel.clone(),
+        ));
+        self.running.insert(
+            key.clone(),
+            Running {
+                interval: want.interval,
+                device: want.device,
+                cancel,
+            },
+        );
     }
 
-    /// Signal every loop polling `field` to stop, and forget them.
+    /// Signal one pair's loop to stop, and forget it.
     ///
     /// It does not *wait*: cancellation is cooperative, so a loop midway through
     /// an SSH exchange finishes it, and blocking the supervisor on that would
-    /// hold up every other field in the same change — including the one this
-    /// field is being re-timed to. The tasks are reaped at the next reconcile,
-    /// or drained at shutdown.
-    fn stop(&mut self, field: &str) {
-        if let Some((_, token)) = self.running.remove(field) {
-            token.cancel();
+    /// hold up every other pair in the same change — including the one this pair
+    /// is being re-timed to. The tasks are reaped at the next reconcile, or
+    /// drained at shutdown.
+    fn stop(&mut self, key: &Key) {
+        if let Some(running) = self.running.remove(key) {
+            running.cancel.cancel();
         }
     }
 }
 
-/// What a schedule entry means for the loops that may be running the field.
+/// Every `(field, device)` pair that should have a loop, and how many the
+/// devices declined.
+///
+/// Free-standing and taking the fleet as an argument rather than reading
+/// `self.registry`, so the expansion — the place the fleet-wide schedule and the
+/// per-device veto actually meet — is testable over values, with no registry, no
+/// connector and no runtime.
+///
+/// This is where the *declared* veto is applied, and the inferred one is not.
+/// The asymmetry is the point. A field named in `disabled_fields` is known
+/// unsupported before anything starts, so the cheapest thing is to start
+/// nothing: no task, no ticker, no wake-up. A field that might yet be *inferred*
+/// unsupported has to be polled to become so, and one that has been inferred
+/// still needs its loop when `self_heal_secs` is set, because the loop is what
+/// performs the retry. So the inferred veto is enforced inside the loop instead
+/// — see [`poll_loop`].
+fn wanted_loops(
+    schedule: &[FieldSchedule],
+    fleet: &BTreeMap<String, Arc<Device>>,
+) -> (BTreeMap<Key, Wanted>, usize) {
+    let mut wanted = BTreeMap::new();
+    let mut declined = 0usize;
+
+    for entry in schedule {
+        // `None` is *never*: the field stays listed and no loop is started.
+        let Some(interval) = entry.interval else {
+            continue;
+        };
+        for (id, device) in fleet {
+            if device.config().disabled_fields.contains(&entry.name) {
+                declined += 1;
+                continue;
+            }
+            wanted.insert(
+                (entry.name.clone(), id.clone()),
+                Wanted {
+                    interval,
+                    device: device.config().uuid,
+                },
+            );
+        }
+    }
+    (wanted, declined)
+}
+
+/// What the wanted state means for the loop that may be running a pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
-    /// Nothing to do: running at the right interval, or absent from both.
+    /// Nothing to do: running against the right device at the right interval,
+    /// or absent from both.
     Leave,
     /// Not running and wanted.
     Start,
-    /// Running and no longer wanted — dropped from the schedule, or set to
-    /// never, which are the same thing to a loop.
+    /// Running and no longer wanted — the field left the schedule or was set to
+    /// never, the device left the fleet, or the device now declines the field.
+    /// All four are the same thing to a loop.
     Stop,
-    /// Running at the wrong interval.
+    /// Running against the right device at the wrong interval.
     Retime,
+    /// Running against a device the registry no longer hands out.
+    Rebind,
 }
 
 /// The whole of the diff, as one total function over what is running and what is
@@ -462,15 +725,25 @@ enum Action {
 /// Pure, and separated from the effects for the reason [`step`] is: the decision
 /// is the part with cases worth stating, and stated here it is testable without
 /// a runtime, a registry or a device.
-const fn act(running: Option<Duration>, wanted: Option<Duration>) -> Action {
+///
+/// The device is compared *before* the interval, and that order is the whole
+/// reason [`Running::device`] exists. A replaced device usually keeps its
+/// interval — an operator editing `disabled_fields` or a password is not
+/// touching the schedule — so a comparison that looked at the interval first
+/// would answer [`Leave`](Action::Leave) and leave the loop holding an
+/// `Arc<Device>` that nothing else references: a private connection, and a stale
+/// copy of the very `disabled_fields` the edit changed.
+const fn act(running: Option<Wanted>, wanted: Option<Wanted>) -> Action {
     match (running, wanted) {
         (None, None) => Action::Leave,
         (None, Some(_)) => Action::Start,
         (Some(_), None) => Action::Stop,
-        // `Duration` has no `const` equality, so the comparison is spelled out
-        // on the one field that decides it.
         (Some(now), Some(next)) => {
-            if now.as_nanos() == next.as_nanos() {
+            if now.device.as_u128() != next.device.as_u128() {
+                Action::Rebind
+            // `Duration` has no `const` equality, so the comparison is spelled
+            // out on the one field that decides it.
+            } else if now.interval.as_nanos() == next.interval.as_nanos() {
                 Action::Leave
             } else {
                 Action::Retime
@@ -512,17 +785,102 @@ async fn poll_loop(
     // first failed poll read as the onset it is.
     let mut health = Health::Up;
 
+    // Read once: a device is immutable, so neither of these can move under the
+    // loop. A device whose policy changed is a *different* device, and the
+    // supervisor will have replaced this loop along with it.
+    let threshold = device.config().auto_disable_after;
+    let self_heal = device.config().self_heal;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = ticker.tick() => {
+                // The inferred veto, checked before the exchange rather than
+                // enforced by it. `Device::run` would refuse this anyway — that
+                // is the guarantee every caller inherits — but going through it
+                // would cost an error to build, classify and log on every tick
+                // of a field nobody expects to answer. This is a set lookup.
+                if let Some(retry_in) = device.auto_disabled().veto(&field) {
+                    match retry_in {
+                        Some(retry_in) => debug!(
+                            device = device.id(),
+                            field,
+                            retry_in_secs = retry_in.as_secs(),
+                            "skipping a poll of an auto-disabled field"
+                        ),
+                        // Unreachable in practice: a veto with no retry stops
+                        // the loop below rather than letting it tick forever.
+                        // Handled anyway, because "the loop that was supposed
+                        // to stop did not" should cost a log line, not an
+                        // exchange per tick.
+                        None => debug!(
+                            device = device.id(),
+                            field, "skipping a poll of a permanently disabled field"
+                        ),
+                    }
+                    continue;
+                }
+
                 let outcome = device.run(&instruction).await;
+
+                // Count the answer *before* anything else looks at it. Only a
+                // repeating caller can observe "consecutive", so this loop is
+                // the only place in the system that counts — see `AutoDisabled`.
+                if let Err(err) = &outcome
+                    && err.is_refusal()
+                {
+                    match device.auto_disabled().refused(&field, threshold, self_heal) {
+                        Refusal::Counted { refusals } => debug!(
+                            device = device.id(),
+                            field,
+                            refusals,
+                            threshold,
+                            "the device refused this field"
+                        ),
+                        Refusal::Disabled { refusals } => match self_heal {
+                            Some(wait) => info!(
+                                device = device.id(),
+                                field,
+                                refusals,
+                                retry_in_secs = wait.as_secs(),
+                                "auto-disabling this field after consecutive refusals; \
+                                 it will be tried again"
+                            ),
+                            None => info!(
+                                device = device.id(),
+                                field,
+                                refusals,
+                                "auto-disabling this field after consecutive refusals; \
+                                 add it to this device's `disabled_fields` to make it \
+                                 permanent, or set `self_heal_secs` to retry it"
+                            ),
+                        },
+                        Refusal::Still => {}
+                    }
+                } else if outcome.is_ok() && device.auto_disabled().answered(&field) {
+                    info!(
+                        device = device.id(),
+                        field, "an auto-disabled field answered again and is no longer disabled"
+                    );
+                }
 
                 // The whole logging decision, taken by a pure function over
                 // (previous state, this poll) before anything is emitted.
                 let (next, report) = step(health, Contact::of(&outcome));
                 health = next;
                 announce(report, device.id(), &field, outcome.as_ref().err());
+
+                // A field that will never be retried has no future work, so the
+                // loop ends rather than waking forever to do nothing — the same
+                // reasoning as the unknown-field case above. With `self_heal`
+                // set the loop must stay: it *is* the retry mechanism.
+                if self_heal.is_none() && device.auto_disabled().veto(&field).is_some() {
+                    info!(
+                        device = device.id(),
+                        field, "poll loop stopped: this field is auto-disabled with no retry"
+                    );
+                    return;
+                }
 
                 // Every condition as one combinator chain producing "the thing to report", or
                 // `None`. The effect stays outside the pipeline, so the `.await` is visible.
@@ -614,10 +972,27 @@ enum Health {
 enum Contact {
     /// The device answered.
     Reached,
+    /// The device answered, and the answer was *no*.
+    ///
+    /// Distinguished from [`Reached`](Contact::Reached) because there is no
+    /// value to store, and from [`Failed`](Contact::Failed) because the device
+    /// is demonstrably up: a refusal is a complete exchange on a healthy
+    /// channel. Folding it into `Failed` — which is what this did before the
+    /// veto existed — is what left every unanswerable field of every device
+    /// reading `Down` forever, a state that was true of the *field* and false
+    /// of everything an operator uses that word for.
+    Refused,
     /// We tried to reach it and could not.
     Failed,
     /// We did not try: core's cold gate is shut. See [`DeviceError::Cold`].
     Gated,
+    /// We did not try: the field is vetoed on this device.
+    ///
+    /// Reachable only by a race — the loop checks the veto before the exchange
+    /// — but it is a state the type must carry, because `Device::run` can
+    /// return it and a match that did not handle it would have to be a
+    /// wildcard, which is the thing this enum exists to avoid.
+    Vetoed,
 }
 
 impl Contact {
@@ -627,6 +1002,8 @@ impl Contact {
         match outcome {
             Ok(_) => Contact::Reached,
             Err(DeviceError::Cold { .. }) => Contact::Gated,
+            Err(DeviceError::Disabled { .. }) => Contact::Vetoed,
+            Err(err) if err.is_refusal() => Contact::Refused,
             Err(DeviceError::Connect(_) | DeviceError::Command(_)) => Contact::Failed,
         }
     }
@@ -644,11 +1021,15 @@ enum Report {
     Ongoing,
     /// It can again.
     Recovery,
+    /// The device answered and said no. Not a health transition in either
+    /// direction — it is reported so a refusal is visible at all, since the
+    /// counting that follows one is at `debug`.
+    Refusal,
 }
 
 /// The state machine, as one total function over `Health × Contact`.
 ///
-/// Six cases, all written out, so the policy is readable as a table rather than
+/// Ten cases, all written out, so the policy is readable as a table rather than
 /// inferred from control flow — and testable without a device, a clock, a task,
 /// or a log subscriber, since it touches none of them.
 ///
@@ -657,6 +1038,21 @@ enum Report {
 /// gate is downstream of a failed dial that some other loop has already
 /// announced. That is what collapses an outage from one warning per
 /// `(device, field)` to one per device.
+///
+/// [`Refused`](Contact::Refused) is the entry that changed when the field veto
+/// arrived, and it is worth saying why in a table rather than in a commit
+/// message. `Health` answers one question — *is this read current or stale* —
+/// and a refusal makes it neither: the device is up, the exchange completed, and
+/// there is simply no value. Treating it as `Failed` (as this did before) put a
+/// device that is answering perfectly into `Down` on every field it declines,
+/// and left it there permanently, because nothing about an unlicensed feature
+/// ever recovers. So a refusal moves `Health` in neither direction and is
+/// reported on its own terms. What *does* eventually act on it is the refusal
+/// count, which is not a health question.
+///
+/// [`Vetoed`](Contact::Vetoed) is silent for the same reason at the other end:
+/// we did not ask, so we learned nothing, so there is nothing to report and
+/// nothing to move.
 const fn step(before: Health, contact: Contact) -> (Health, Report) {
     match (before, contact) {
         (Health::Up, Contact::Reached) => (Health::Up, Report::Silent),
@@ -665,6 +1061,8 @@ const fn step(before: Health, contact: Contact) -> (Health, Report) {
         (Health::Down, Contact::Reached) => (Health::Up, Report::Recovery),
         (Health::Down, Contact::Failed) => (Health::Down, Report::Ongoing),
         (Health::Down, Contact::Gated) => (Health::Down, Report::Ongoing),
+        (health, Contact::Refused) => (health, Report::Refusal),
+        (health, Contact::Vetoed) => (health, Report::Silent),
     }
 }
 
@@ -681,6 +1079,12 @@ fn announce(report: Report, device: &str, field: &str, error: Option<&DeviceErro
         Report::Onset => warn!(device, field, error, "polling this field started failing"),
         Report::Ongoing => debug!(device, field, error, "polling this field is still failing"),
         Report::Recovery => info!(device, field, "polling this field recovered"),
+        // `debug`, not `warn`: a refusal repeats at the tick rate for as long as
+        // the device declines the field, which is the same volume argument
+        // `Ongoing` is held to. The events bounded by something an operator
+        // cares about — the count reaching the threshold, the field healing —
+        // are announced by the loop at `info`.
+        Report::Refusal => debug!(device, field, error, "the device refused this field"),
     }
 }
 
@@ -692,11 +1096,16 @@ mod tests {
     // The wire `RecordingState`, not core's: `observe` takes what
     // `dto::state_to_dto` produces.
     use sismatic_api_types::{DeviceId, Read, RecordingState, WriteId, WriteRecord};
-    use sismatic_core::devices::config::DeviceConfig;
+    use std::collections::BTreeSet;
+
+    use sismatic_core::devices::auto_disabled::VetoSource;
+    use sismatic_core::devices::config::{DeviceConfig, Resolved, Uuid};
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::connector::{ConnectError, Connector};
+    use sismatic_core::devices::controller::ControllerError;
     use sismatic_core::devices::transport::Transport;
-    use sismatic_core::devices::transport::fake::FakeTransport;
+    use sismatic_core::devices::transport::fake::{Exhausted, FakeTransport};
+    use sismatic_core::protocol::SisError;
     use sismatic_store::outbox::{Claim, Outcome, WriteDrain};
     use sismatic_store::{WriteError, WriteStore};
 
@@ -788,7 +1197,15 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            // Inference off: none of these tests is about it, and a fixture
+            // that opted in would take a field out of the schedule mid-test on
+            // the strength of a scripted refusal.
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     /// A registry of one device whose every connection replays firmware replies.
@@ -843,6 +1260,7 @@ mod tests {
                     name: "RUNNING_STATE".to_owned(),
                     interval: Some(Duration::from_millis(10)),
                 }]),
+                fleet: fixed_fleet(),
                 reconciler: Some(reconciler.clone()),
             },
         );
@@ -874,6 +1292,7 @@ mod tests {
                     name: "FIRMWARE".to_owned(),
                     interval: Some(Duration::from_millis(10)),
                 }]),
+                fleet: fixed_fleet(),
                 reconciler: Some(reconciler.clone()),
             },
         );
@@ -911,6 +1330,7 @@ mod tests {
                         interval: Some(Duration::from_millis(10)),
                     },
                 ]),
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -940,6 +1360,7 @@ mod tests {
                     name: "FIRMWARE".to_owned(),
                     interval: None,
                 }]),
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -955,23 +1376,255 @@ mod tests {
 
     // ---- a schedule that changes ------------------------------------------
 
-    /// The diff, as a table. Six cases over two `Option`s, all written out, for
-    /// the reason [`step`]'s table is: this is where a re-timing that silently
-    /// did nothing — or a field that was started twice — would come from, and
-    /// none of it needs a device to check.
+    /// The diff, as a table, for the reason [`step`]'s table is: this is where a
+    /// re-timing that silently did nothing — or a pair that was started twice —
+    /// would come from, and none of it needs a device to check.
     #[test]
     fn the_diff_is_a_table() {
-        let five = Some(Duration::from_secs(5));
-        let ten = Some(Duration::from_secs(10));
+        let one = Uuid::from_u128(1);
+        let at = |secs, device| {
+            Some(Wanted {
+                interval: Duration::from_secs(secs),
+                device,
+            })
+        };
 
         assert_eq!(act(None, None), Action::Leave);
-        assert_eq!(act(None, five), Action::Start);
-        assert_eq!(act(five, None), Action::Stop);
-        assert_eq!(act(five, five), Action::Leave);
-        assert_eq!(act(five, ten), Action::Retime);
+        assert_eq!(act(None, at(5, one)), Action::Start);
+        assert_eq!(act(at(5, one), None), Action::Stop);
+        assert_eq!(act(at(5, one), at(5, one)), Action::Leave);
+        assert_eq!(act(at(5, one), at(10, one)), Action::Retime);
         // A field dropped from the schedule and a field set to never are the
         // same instruction to a loop, and reach `act` as the same argument.
-        assert_eq!(act(ten, None), Action::Stop);
+        assert_eq!(act(at(10, one), None), Action::Stop);
+    }
+
+    /// The case the coarser key could not express, and the reason a running loop
+    /// records which device it was started against. A replaced device usually
+    /// keeps its interval — editing `disabled_fields` or a password does not
+    /// touch the schedule — so a diff that compared intervals alone would answer
+    /// `Leave` and strand the loop on a handle the registry no longer hands out.
+    #[test]
+    fn a_replaced_device_rebinds_even_at_an_unchanged_interval() {
+        let before = Some(Wanted {
+            interval: Duration::from_secs(5),
+            device: Uuid::from_u128(1),
+        });
+        let after = Some(Wanted {
+            interval: Duration::from_secs(5),
+            device: Uuid::from_u128(2),
+        });
+
+        assert_eq!(act(before, after), Action::Rebind);
+        // And a device change outranks an interval change, because the handle
+        // being wrong is the more serious of the two and both are fixed by the
+        // same stop-and-start.
+        assert_eq!(
+            act(
+                before,
+                Some(Wanted {
+                    interval: Duration::from_secs(10),
+                    device: Uuid::from_u128(2),
+                })
+            ),
+            Action::Rebind
+        );
+    }
+
+    // ---- expanding a fleet-wide schedule over a per-device veto ------------
+
+    fn fleet_of(configs: Vec<DeviceConfig>) -> BTreeMap<String, Arc<Device>> {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 8])
+        }));
+        configs
+            .into_iter()
+            .map(|config| {
+                let id = config.id.clone();
+                (
+                    id,
+                    Arc::new(Device::new(
+                        config,
+                        Arc::clone(&connector) as Arc<dyn Connector>,
+                    )),
+                )
+            })
+            .collect()
+    }
+
+    fn every(secs: u64, names: &[&str]) -> Vec<FieldSchedule> {
+        names
+            .iter()
+            .map(|name| FieldSchedule {
+                name: (*name).to_owned(),
+                interval: Some(Duration::from_secs(secs)),
+            })
+            .collect()
+    }
+
+    /// The expansion, over values: the fleet-wide schedule crossed with the
+    /// fleet, minus each device's declared veto.
+    #[test]
+    fn the_wanted_set_is_the_schedule_crossed_with_the_fleet_minus_the_vetoes() {
+        let fleet = fleet_of(vec![
+            device_config("plain"),
+            config_disabling("licensed", &["STREAM_2_NAME"]),
+        ]);
+        let (wanted, declined) = wanted_loops(&every(5, &["FIRMWARE", "STREAM_2_NAME"]), &fleet);
+
+        let mut keys: Vec<_> = wanted.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                ("FIRMWARE".to_owned(), "licensed".to_owned()),
+                ("FIRMWARE".to_owned(), "plain".to_owned()),
+                ("STREAM_2_NAME".to_owned(), "plain".to_owned()),
+            ],
+            "the vetoed pair, and only it, should be absent"
+        );
+        assert_eq!(declined, 1);
+    }
+
+    /// A field at `None` is *never*: it stays listed and expands to nothing, so
+    /// it contributes no loops and is not counted as declined either — nobody
+    /// refused it, the schedule simply does not ask for it.
+    #[test]
+    fn a_field_set_to_never_expands_to_no_pairs() {
+        let fleet = fleet_of(vec![device_config("plain")]);
+        let schedule = vec![FieldSchedule {
+            name: "FIRMWARE".into(),
+            interval: None,
+        }];
+        let (wanted, declined) = wanted_loops(&schedule, &fleet);
+
+        assert!(wanted.is_empty());
+        assert_eq!(declined, 0, "a field nobody polls was not declined");
+    }
+
+    /// The whole point of keying by the pair: adding a device must not disturb
+    /// the loops already running. Under the old per-field key the only way to
+    /// give the new device its loops was to cancel and respawn every field
+    /// across the fleet.
+    #[tokio::test]
+    async fn adding_a_device_starts_only_that_devices_loops() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 64])
+        }));
+        let registry = Arc::new(Registry::build(
+            vec![device_config("first")],
+            vec![],
+            connector,
+        ));
+        let (fleet_tx, fleet_rx) = watch::channel(0u64);
+
+        let handle = spawn(
+            Arc::clone(&registry),
+            Arc::new(RecordingStore::default()),
+            SyncConfig {
+                fields: fixed(every(60, &["FIRMWARE", "UNIT_NAME"])),
+                fleet: fleet_rx,
+                reconciler: None,
+            },
+        );
+        // Two fields on one device.
+        wait_for(|| registry.len() == 1).await;
+
+        registry.apply(Resolved {
+            devices: vec![device_config("first"), device_config("second")],
+            groups: vec![],
+        });
+        fleet_tx.send_replace(1);
+
+        // The new device's two loops appear; the first device's two are never
+        // stopped, so nothing it holds is disturbed.
+        wait_for(|| registry.device("second").is_some()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        handle.shutdown().await;
+    }
+
+    /// Removing a device stops exactly its loops, and a fleet change reconciles
+    /// against the schedule already in force rather than re-reading one.
+    #[tokio::test]
+    async fn removing_a_device_stops_its_loops_and_leaves_the_rest() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 64])
+        }));
+        let registry = Arc::new(Registry::build(
+            vec![device_config("keeper"), device_config("goner")],
+            vec![],
+            connector,
+        ));
+        let (fleet_tx, fleet_rx) = watch::channel(0u64);
+
+        let handle = spawn(
+            Arc::clone(&registry),
+            Arc::new(RecordingStore::default()),
+            SyncConfig {
+                fields: fixed(every(60, &["FIRMWARE"])),
+                fleet: fleet_rx,
+                reconciler: None,
+            },
+        );
+        wait_for(|| registry.len() == 2).await;
+
+        registry.apply(Resolved {
+            devices: vec![device_config("keeper")],
+            groups: vec![],
+        });
+        fleet_tx.send_replace(1);
+
+        wait_for(|| registry.device("goner").is_none()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // A supervisor that failed to stop the departed device's loop would
+        // still be holding it here, and the drain would wait on it.
+        tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("the loops should drain");
+    }
+
+    /// A device that gains a `disabled_fields` entry at runtime is a *replaced*
+    /// device, so its loop for that field must stop — not merely be vetoed
+    /// inside a loop that keeps ticking.
+    #[tokio::test]
+    async fn a_device_that_gains_a_veto_loses_that_fields_loop() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 64])
+        }));
+        let registry = Arc::new(Registry::build(
+            vec![device_config("edited")],
+            vec![],
+            connector,
+        ));
+        let (fleet_tx, fleet_rx) = watch::channel(0u64);
+        let store = Arc::new(RecordingStore::default());
+
+        let handle = spawn(
+            Arc::clone(&registry),
+            store.clone(),
+            SyncConfig {
+                fields: fixed(every(60, &["FIRMWARE"])),
+                fleet: fleet_rx,
+                reconciler: None,
+            },
+        );
+        wait_for(|| !store.fields().is_empty()).await;
+
+        let change = registry.apply(Resolved {
+            devices: vec![config_disabling("edited", &["FIRMWARE"])],
+            groups: vec![],
+        });
+        assert_eq!(
+            change.replaced,
+            vec!["edited"],
+            "editing disabled_fields mints a different device"
+        );
+        fleet_tx.send_replace(1);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("the loops should drain");
     }
 
     /// The property the whole supervisor exists for: a field can be re-timed
@@ -995,6 +1648,7 @@ mod tests {
             store.clone(),
             SyncConfig {
                 fields,
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -1033,6 +1687,7 @@ mod tests {
             store.clone(),
             SyncConfig {
                 fields,
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -1076,6 +1731,7 @@ mod tests {
             store.clone(),
             SyncConfig {
                 fields,
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -1120,6 +1776,7 @@ mod tests {
             store.clone(),
             SyncConfig {
                 fields,
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );
@@ -1236,6 +1893,365 @@ mod tests {
         assert_eq!(Contact::of(&Ok(Value::Port(22023))), Contact::Reached);
     }
 
+    // ---- fields a device will not answer ----------------------------------
+
+    /// A refusal is the device *answering*, so it must not move the health
+    /// machine. Before the veto existed this classified as `Failed`, which put
+    /// a perfectly reachable recorder into `Down` on every field it declines and
+    /// left it there forever — nothing about an unlicensed feature recovers.
+    #[test]
+    fn a_refusal_classifies_apart_from_a_failure() {
+        let refused = Err(DeviceError::Command(ControllerError::Rejected {
+            instruction: "STREAM_2_NAME".into(),
+            error: SisError { code: 13 },
+        }));
+        assert_eq!(Contact::of(&refused), Contact::Refused);
+        assert!(
+            refused.as_ref().unwrap_err().is_refusal(),
+            "core and this crate must agree on what a refusal is"
+        );
+    }
+
+    /// ...and the machine leaves health where it found it, in both directions.
+    #[test]
+    fn a_refusal_moves_the_health_machine_in_neither_direction() {
+        use Contact::*;
+        use Report::*;
+
+        assert_eq!(step(Health::Up, Refused), (Health::Up, Refusal));
+        assert_eq!(step(Health::Down, Refused), (Health::Down, Refusal));
+
+        // A device refusing one field is still up, so a later *failure* on that
+        // field is a fresh onset rather than something a refusal already
+        // swallowed.
+        assert_eq!(
+            reports([Reached, Refused, Refused, Failed]),
+            vec![Silent, Refusal, Refusal, Onset]
+        );
+    }
+
+    /// We did not ask, so we learned nothing, so nothing is reported and
+    /// nothing moves.
+    #[test]
+    fn a_vetoed_poll_is_silent_and_leaves_health_alone() {
+        let vetoed = Err(DeviceError::Disabled {
+            field: "STREAM_2_NAME".into(),
+            source: VetoSource::Declared,
+            retry_in: None,
+        });
+        assert_eq!(Contact::of(&vetoed), Contact::Vetoed);
+        assert_eq!(
+            step(Health::Down, Contact::Vetoed),
+            (Health::Down, Report::Silent),
+            "a veto must not be read as a recovery"
+        );
+        assert!(
+            !vetoed.as_ref().unwrap_err().is_refusal(),
+            "the device said nothing; we did"
+        );
+    }
+
+    /// A device config with a declared veto over `fields`.
+    fn config_disabling(id: &str, fields: &[&str]) -> DeviceConfig {
+        DeviceConfig {
+            disabled_fields: fields.iter().map(|f| (*f).to_owned()).collect(),
+            ..device_config(id)
+        }
+        .derive_uuid()
+    }
+
+    /// The cheap half of the veto: a declared field costs no task at all, so a
+    /// device that disables it is never even dialed.
+    #[tokio::test]
+    async fn a_declared_veto_starts_no_loop_and_opens_no_connection() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 8])
+        }));
+        let opens = connector.opens_handle();
+        let registry = Arc::new(Registry::build(
+            vec![config_disabling("vetoed", &["FIRMWARE"])],
+            vec![],
+            connector,
+        ));
+        let store = Arc::new(RecordingStore::default());
+
+        let handle = spawn(
+            registry,
+            store.clone(),
+            SyncConfig {
+                fields: fixed(vec![FieldSchedule {
+                    name: "FIRMWARE".into(),
+                    interval: Some(Duration::from_millis(10)),
+                }]),
+                fleet: fixed_fleet(),
+                reconciler: None,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        handle.shutdown().await;
+
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "a declared veto must not cost a dial"
+        );
+        assert!(
+            store.fields().is_empty(),
+            "and must store nothing for that field"
+        );
+    }
+
+    /// The same schedule on a device that declares nothing still runs, so the
+    /// test above is showing a veto rather than a broken fixture.
+    #[tokio::test]
+    async fn a_device_without_the_veto_still_polls_the_same_field() {
+        let (registry, opens) = registry_of_one();
+        let store = Arc::new(RecordingStore::default());
+
+        let handle = spawn(
+            registry,
+            store.clone(),
+            SyncConfig {
+                fields: fixed(vec![FieldSchedule {
+                    name: "FIRMWARE".into(),
+                    interval: Some(Duration::from_millis(10)),
+                }]),
+                fleet: fixed_fleet(),
+                reconciler: None,
+            },
+        );
+        wait_for(|| !store.fields().is_empty()).await;
+        handle.shutdown().await;
+
+        assert!(opens.load(Ordering::SeqCst) > 0);
+    }
+
+    /// Enforcement is core's and applies to every caller, not just to the poll
+    /// loops — which is what stops a relay dispatch or a CLI call from asking
+    /// for a field the fleet has switched off.
+    #[tokio::test]
+    async fn a_declared_veto_refuses_a_direct_call_too() {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([FIRMWARE_REPLY; 8])
+        }));
+        let opens = connector.opens_handle();
+        let registry = Registry::build(
+            vec![config_disabling("vetoed", &["FIRMWARE"])],
+            vec![],
+            connector,
+        );
+        let device = registry.device("vetoed").expect("configured");
+
+        let err = device
+            .run(&Query::Firmware.instruction())
+            .await
+            .expect_err("the field is vetoed");
+        assert!(
+            matches!(
+                err,
+                DeviceError::Disabled {
+                    source: VetoSource::Declared,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            0,
+            "a veto is decided before anything is dialed"
+        );
+    }
+
+    /// `device_config`, with the inference turned on and an optional self-heal
+    /// window.
+    fn config_inferring(id: &str, after: u32, self_heal: Option<Duration>) -> DeviceConfig {
+        DeviceConfig {
+            auto_disable_after: after,
+            self_heal,
+            ..device_config(id)
+        }
+        .derive_uuid()
+    }
+
+    /// A registry over `configs` whose every device refuses every exchange.
+    ///
+    /// `Exhausted::Stall` behind an ample script: a refusal does not discard the
+    /// connection (that is the point of `ControllerError::Rejected`), so one
+    /// transport serves the whole test, and a script that ran out would end the
+    /// polling for its own reasons and let a broken veto pass.
+    fn refusing_registry(configs: Vec<DeviceConfig>) -> Arc<Registry> {
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads(["E13\r\n"; 512]).on_exhausted(Exhausted::Stall)
+        }));
+        Arc::new(Registry::build(configs, vec![], connector))
+    }
+
+    /// Start polling `FIRMWARE` fast enough that a hundred milliseconds is many
+    /// ticks.
+    fn poll_firmware(registry: Arc<Registry>, store: DynWriteStore) -> SyncHandle {
+        spawn(
+            registry,
+            store,
+            SyncConfig {
+                fields: fixed(vec![FieldSchedule {
+                    name: "FIRMWARE".into(),
+                    interval: Some(Duration::from_millis(5)),
+                }]),
+                fleet: fixed_fleet(),
+                reconciler: None,
+            },
+        )
+    }
+
+    /// How many refusals have been *counted* for `field`, which is one per
+    /// exchange: `AutoDisabled::refused` increments even once the veto is armed,
+    /// so a count that stops growing is an exchange that stopped happening.
+    fn refusals_of(device: &Device, field: &str) -> u32 {
+        device
+            .auto_disabled()
+            .snapshot()
+            .into_iter()
+            .find(|f| f.name == field)
+            .map_or(0, |f| f.refusals)
+    }
+
+    /// The feature, end to end: a device that keeps saying no stops being asked.
+    ///
+    /// The assertion is that the count *stops*, not merely that a flag is set.
+    /// A veto that was recorded but still polled every tick would satisfy any
+    /// test written against the learned set's `disabled` alone, and would leave
+    /// the exchange this exists to remove exactly where it was.
+    #[tokio::test]
+    async fn repeated_refusals_auto_disable_the_field_and_stop_the_exchanges() {
+        let registry = refusing_registry(vec![config_inferring("refuser", 2, None)]);
+        let device = registry.device("refuser").expect("configured");
+        let store = Arc::new(RecordingStore::default());
+
+        let handle = poll_firmware(Arc::clone(&registry), store.clone());
+        wait_for(|| device.auto_disabled().veto("FIRMWARE").is_some()).await;
+        let at_veto = refusals_of(&device, "FIRMWARE");
+        // Many more ticks at a 5ms interval, had any been taken.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        handle.shutdown().await;
+
+        assert_eq!(
+            at_veto, 2,
+            "the threshold is two consecutive refusals, so the veto arms on the second"
+        );
+        assert_eq!(
+            refusals_of(&device, "FIRMWARE"),
+            at_veto,
+            "nothing may be asked of a field once it is auto-disabled"
+        );
+        assert!(
+            store.fields().is_empty(),
+            "a refusal carries no value to store"
+        );
+    }
+
+    /// With `self_heal_secs` unset the loop has no future work, so it ends
+    /// rather than waking forever to skip an exchange it will never make.
+    #[tokio::test]
+    async fn a_veto_with_no_retry_ends_the_poll_loop() {
+        let registry = refusing_registry(vec![config_inferring("refuser", 1, None)]);
+        let device = registry.device("refuser").expect("configured");
+
+        let handle = poll_firmware(Arc::clone(&registry), Arc::new(RecordingStore::default()));
+        wait_for(|| device.auto_disabled().veto("FIRMWARE").is_some()).await;
+
+        // A stopped loop is one `shutdown` has nothing to wait for. A loop still
+        // parked on its ticker would also drain quickly, so this is a guard
+        // against the loop having wedged rather than a proof it ended — which
+        // the count above is.
+        tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("the loops should drain");
+    }
+
+    /// The inference is opt-out: at zero nothing is counted, so a device that
+    /// refuses forever keeps being asked forever — the behavior before this
+    /// existed, and the one a deployment that wants only declared vetoes gets.
+    ///
+    /// Two devices under one schedule, because the assertion is about *absence*:
+    /// `strict` is the control arm that proves the loops ran at all, so a
+    /// version of this that polled nothing cannot pass by doing nothing.
+    #[tokio::test]
+    async fn a_threshold_of_zero_never_auto_disables() {
+        let registry = refusing_registry(vec![
+            config_inferring("strict", 2, None),
+            config_inferring("never", 0, None),
+        ]);
+        let strict = registry.device("strict").expect("configured");
+        let never = registry.device("never").expect("configured");
+
+        let handle = poll_firmware(Arc::clone(&registry), Arc::new(RecordingStore::default()));
+        wait_for(|| strict.auto_disabled().veto("FIRMWARE").is_some()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.shutdown().await;
+
+        assert_eq!(
+            never.auto_disabled().veto("FIRMWARE"),
+            None,
+            "nothing should have been inferred at a threshold of zero"
+        );
+        assert!(
+            never.auto_disabled().snapshot().is_empty(),
+            "and nothing should have been recorded either"
+        );
+    }
+
+    /// `self_heal_secs` end to end: a field that was auto-disabled is tried
+    /// again once its window closes, and an answer puts it back in service.
+    ///
+    /// The device refuses twice and answers thereafter, which is the shape of a
+    /// license applied in the field without a restart — the case the setting
+    /// exists for. Real time rather than a paused clock, because what is being
+    /// tested is that the *poll loop* performs the retry, and pausing the clock
+    /// would stop the very ticker doing it.
+    #[tokio::test]
+    async fn a_self_healing_field_is_retried_and_comes_back() {
+        let mut script = vec!["E13\r\n", "E13\r\n"];
+        script.extend(["2.11\r\n"; 64]);
+        let connector = Arc::new(CountingConnector::new(move || {
+            FakeTransport::with_reads(script.clone()).on_exhausted(Exhausted::Stall)
+        }));
+        let registry = Arc::new(Registry::build(
+            vec![config_inferring(
+                "healer",
+                2,
+                Some(Duration::from_millis(60)),
+            )],
+            vec![],
+            connector,
+        ));
+        let device = registry.device("healer").expect("configured");
+        let store = Arc::new(RecordingStore::default());
+
+        let handle = poll_firmware(Arc::clone(&registry), store.clone());
+
+        wait_for(|| device.auto_disabled().veto("FIRMWARE").is_some()).await;
+        assert!(
+            store.fields().is_empty(),
+            "nothing has answered yet, so nothing should be stored"
+        );
+
+        // The loop is still ticking — that is what the window costs, and what
+        // performs the retry — so the field comes back with no further help.
+        wait_for(|| !store.fields().is_empty()).await;
+        handle.shutdown().await;
+
+        assert_eq!(
+            device.auto_disabled().veto("FIRMWARE"),
+            None,
+            "an answer clears the veto"
+        );
+        assert!(
+            device.auto_disabled().snapshot().is_empty(),
+            "and clears the count with it, so the next refusal starts afresh"
+        );
+    }
+
     /// A connector that refuses every dial, counting the attempts.
     struct RefusingConnector {
         attempts: Arc<AtomicUsize>,
@@ -1289,6 +2305,7 @@ mod tests {
                         })
                         .collect(),
                 ),
+                fleet: fixed_fleet(),
                 reconciler: None,
             },
         );

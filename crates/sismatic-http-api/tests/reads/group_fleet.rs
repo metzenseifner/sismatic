@@ -50,10 +50,13 @@ const AT: &str = "2026-07-23T14:00:00Z";
 fn catalog() -> MemoryCatalog {
     let device = |id: &str| DeviceSummary {
         id: id.to_owned(),
+        uuid: format!("00000000-0000-0000-0000-{:012x}", id.len()),
         host: "10.0.0.7".to_owned(),
         port: 22023,
         eager: false,
         status: ConnectionStatus::Unknown,
+        disabled_fields: Vec::new(),
+        auto_disabled_fields: Vec::new(),
     };
     let group = |id: &str, members: &[&str]| GroupSummary {
         id: id.to_owned(),

@@ -81,6 +81,18 @@ impl DeviceGroup {
         self.devices.iter().map(|d| d.id().to_string()).collect()
     }
 
+    /// The member devices themselves, in group order.
+    ///
+    /// Distinct from [`member_ids`](Self::member_ids) in the one way that
+    /// matters after a reload: an id says *which* recorder a group addresses,
+    /// and these say *through which handle*. A group built over devices that
+    /// have since been replaced still reports the same ids while pointing at
+    /// connections nothing else uses, so the ids cannot tell a rebuilt group
+    /// from a stale one and these can.
+    pub fn members(&self) -> &[Arc<Device>] {
+        &self.devices
+    }
+
     /// How many devices are in the group.
     pub fn len(&self) -> usize {
         self.devices.len()
@@ -131,6 +143,9 @@ impl DeviceGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    use crate::devices::config::Uuid;
     use std::time::Duration;
 
     use crate::devices::config::DeviceConfig;
@@ -157,7 +172,12 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     fn device(id: &str, connector: Arc<dyn Connector>) -> Arc<Device> {

@@ -58,6 +58,20 @@ config = "0.15.25"
 # beside it are not.
 humantime.workspace = true
 serde.workspace = true
+# Rendering the devices document for `GET /v1/inventory/config/export` and for
+# the state file behind `inventory.state_path`. Serializers, not parsers — core
+# owns the reading half, and these are the writing half it deliberately does not
+# have: `Password` has no `Serialize` impl, so an export builds its own shape and
+# a credential can only be written out when one is asked for.
+#
+# The same three formats `config::load` dispatches on, so every export can be
+# saved under an extension the loader reads back. `serde-saphyr` is the crate
+# core already reads YAML with, named here for the serializer half — its
+# `serialize` feature is on by default, so this edge costs nothing new in the
+# dependency graph.
+toml.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 # The store sweeper's cooperative shutdown, the same `CancellationToken` the
 # sync driver and the intent relay stop on. The sweeper lives here rather than
@@ -74,6 +88,12 @@ sismatic-intent-relay.workspace = true
 # `sync` for the oneshot the end-to-end test shuts `run` down with — the library
 # itself takes shutdown as a plain future and needs no channel of its own.
 tokio = { workspace = true, features = ["sync"] }
+# `testing` for `FakeTransport` and `CountingConnector`, which the `status` and
+# `fleet` tests build registries over. Stated here rather than relied on: the
+# same feature is switched on by other crates' dev-dependencies, so a workspace
+# build unified it in and these tests compiled — but `cargo test -p
+# sismatic-server` alone did not, which is exactly when someone reaches for it.
+sismatic-core = { workspace = true, features = ["testing"] }
 # The config-scope tests state a `ConfigPatch` as the JSON a caller would send,
 # rather than as a struct literal: what the API accepts is the bytes, and a
 # literal would skip the very `deny_unknown_fields` and optionality the wire

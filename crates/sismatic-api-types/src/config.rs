@@ -34,10 +34,11 @@
 //!
 //! # What cannot change while the process runs
 //!
-//! [`ConfigDocument::http`] and [`ConfigDocument::devices_config_path`] are
-//! reported and are not editable: the first is the socket the server is already
-//! bound to, and the second names the file the device registry — with its live
-//! SSH sessions — was built from. Both are carried by [`ConfigPatch`] anyway,
+//! [`ConfigDocument::http`] and both paths under
+//! [`ConfigDocument::inventory`] are reported and are not editable: the first is
+//! the socket the server is already bound to, and the other two name files the
+//! device registry — with its live SSH sessions — was built from and may already
+//! be writing. All three are carried by [`ConfigPatch`] anyway,
 //! and that is deliberate. A patch that *names* one at the value already in
 //! force is a no-op, so the round trip above still holds for the whole document;
 //! a patch that would change one is refused, naming the setting and saying that
@@ -68,11 +69,68 @@ pub struct ConfigDocument {
     /// listener would drop every connection in flight, so a change here needs a
     /// restart.
     pub http: HttpSettings,
-    /// The devices file this server's registry was built from. Reported, not
-    /// editable, and note what that does *not* say: the file's contents are read
-    /// once at startup, so a device added to it — under this path or any other —
-    /// reaches the fleet by a restart and by nothing else.
-    pub devices_config_path: String,
+    /// Where the fleet comes from, and where runtime changes to it go.
+    pub inventory: InventorySettings,
+}
+
+/// The two files the device set is read from and written to.
+///
+/// A section of its own rather than two top-level keys, because they are one
+/// subject and are read together: which document describes the fleet depends on
+/// whether the second exists. `devices_config_path` sat at the top level alone
+/// and said nothing about the other, which is how a reader came to believe the
+/// first was the only answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct InventorySettings {
+    /// The devices file this server's registry was built from.
+    ///
+    /// Reported, not editable: pointing it somewhere else mid-run would leave
+    /// the fleet described by one document and the server persisting to another.
+    /// Changing *which* file is a restart.
+    ///
+    /// Its *contents* are not read once, though. A device added to this file
+    /// reaches the fleet through `POST /v1/inventory/config/reset`, which
+    /// re-reads it and adopts it wholesale — and the `/v1/inventory` scope can
+    /// change the fleet without touching the file at all.
+    #[cfg_attr(feature = "openapi", schema(example = "/etc/sismatic/devices.toml"))]
+    pub config_path: String,
+    /// Where runtime changes to the fleet are persisted, or `null` when they are
+    /// not.
+    ///
+    /// `null` is the default, and it is what makes
+    /// [`config_path`](Self::config_path) unambiguously authoritative: with
+    /// nothing persisted, a restart returns to exactly what that file says.
+    ///
+    /// Set, this file **wins at startup** — the devices file is not read at all
+    /// — which is what lets a fleet edited through `/v1/inventory` survive a
+    /// restart, and also what makes an edit to the devices file appear to do
+    /// nothing until a reset adopts it. Reported here so that "why did my edit
+    /// not take" has an answer a caller can fetch.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = "/var/lib/sismatic/devices.state.toml")
+    )]
+    pub runtime_config_path: Option<String>,
+}
+
+/// The inventory section of a [`ConfigPatch`].
+///
+/// Both keys are fixed until the process restarts, so this section exists only
+/// so a document round trips as a patch: naming either at the value already in
+/// force is a no-op, and changing one is refused by name. Leaving them out of
+/// the patch type instead would turn that mistake into a schema error about an
+/// unknown field, which says nothing about what to do next.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InventoryPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config_path: Option<String>,
 }
 
 /// The poll schedule: one entry per field, each with its own frequency.
@@ -190,7 +248,11 @@ pub struct ConfigPatch {
     /// a setting that cannot change is carried by the patch type at all.
     pub http: Option<HttpSettings>,
     /// Accepted only at the value already in force.
-    pub devices_config_path: Option<String>,
+    /// Both fixed until the process restarts. Carried so the document round
+    /// trips as a patch; naming either at the value already in force is a no-op,
+    /// and changing one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<InventoryPatch>,
 }
 
 /// A change to the poll schedule.
@@ -263,7 +325,10 @@ impl ConfigDocument {
                 max_attempts: Some(self.intent_relay.max_attempts),
             }),
             http: Some(self.http.clone()),
-            devices_config_path: Some(self.devices_config_path.clone()),
+            inventory: Some(InventoryPatch {
+                config_path: Some(self.inventory.config_path.clone()),
+                runtime_config_path: self.inventory.runtime_config_path.clone(),
+            }),
         }
     }
 }
@@ -294,7 +359,10 @@ mod tests {
                 host: "127.0.0.1".to_owned(),
                 port: 8080,
             },
-            devices_config_path: "/etc/sismatic/devices.toml".to_owned(),
+            inventory: InventorySettings {
+                config_path: "/etc/sismatic/devices.toml".to_owned(),
+                runtime_config_path: None,
+            },
         }
     }
 

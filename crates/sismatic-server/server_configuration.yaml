@@ -1,4 +1,21 @@
-devices_config_path: devices.yaml
+# Where the fleet comes from, and where runtime changes to it go.
+#
+# `config_path` is the devices file, relative to this file's directory. Its
+# contents are not read once: `POST /v1/inventory/config/reset` re-reads it, and
+# the `/v1/inventory` routes can change the fleet without touching it at all.
+#
+# `runtime_config_path` is commented out, which is the default and the one most
+# deployments want: with nothing persisted, the devices file is unambiguously
+# authoritative and a restart returns to exactly what it says.
+#
+# Uncomment it to make a fleet edited through the API survive a restart — and
+# know what that buys. The file then *wins at startup*, so an edit to
+# `devices.yaml` has no effect until a reset adopts it; the server warns on every
+# startup that loads from it, naming both paths. It also carries device
+# credentials, necessarily, since it exists to be loadable.
+inventory:
+  config_path: devices.yaml
+  # runtime_config_path: devices.state.yaml
 
 intent_relay:
   poll_ms: 250

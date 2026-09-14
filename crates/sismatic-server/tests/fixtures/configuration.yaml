@@ -1,7 +1,6 @@
-# Fixture for tests/server_checks.rs. `devices_config_path` is relative, so it
-# only resolves if paths are anchored to this file's directory rather than to
-# the test process's working directory.
-devices_config_path: devices.toml
+# Fixture for tests/server_checks.rs. Both paths under `inventory` are relative,
+# so they only resolve if paths are anchored to this file's directory rather than
+# to the test process's working directory.
 
 # All three cases, on purpose: the bare name inherits `interval_secs`, the
 # table overrides it, and `0` turns a field off while leaving it written down.
@@ -23,6 +22,30 @@ store:
   retain: 2 weeks
   cleanup_interval: 1h
   max_memory: 512MiB
+
+# Where the fleet comes from, and where runtime changes to it go. `config_path`
+# is the devices file; `runtime_config_path` is where changes made through
+# `/v1/inventory` are written. Both relative, both anchored to this file's
+# directory.
+#
+# `runtime_config_path` is unset in most deployments, and that default is the
+# safe one: with nothing persisted, `config_path` is unambiguously authoritative
+# and a restart returns to exactly what it says. Setting it is what makes a
+# device added through `POST /v1/inventory/devices` survive a restart — and it
+# has two consequences worth knowing before turning it on:
+#
+#   * This file wins at startup once it exists. An edit to the devices file then
+#     has no effect until `POST /v1/inventory/config/reset` adopts it. The
+#     server warns you on every startup that it will load from state, naming both paths.
+#   * Security warning: The file bears device credentials.
+#     Its location and file mode are yours to choose accordingly.
+#
+# The extension picks the format, from the same three `config_path` accepts — so
+# this one is written as YAML and reads back through the same loader. The two
+# need not match: a TOML devices file and a YAML runtime file is fine.
+inventory:
+  config_path: devices.toml
+  runtime_config_path: devices.runtime.state.yaml
 
 http:
   host: 0.0.0.0
