@@ -957,15 +957,19 @@ fn render(
             .collect(),
     };
 
+    // One arm per format core's loader dispatches on, so an export can always be
+    // saved under an extension that reads it back. Wildcard-free: a fourth
+    // format is a build error here rather than a route that answers 200 with
+    // something nobody can load.
     let rendered = match query.format {
         ExportFormat::Toml => toml::to_string_pretty(&document).map_err(|e| e.to_string()),
         ExportFormat::Json => serde_json::to_string_pretty(&document).map_err(|e| e.to_string()),
-        // No YAML *serializer* in this workspace — `serde-saphyr` reads and does
-        // not write — and JSON is a subset of YAML 1.2, so a JSON rendering is a
-        // valid YAML document that the loader's YAML path parses unchanged. It
-        // is not idiomatic YAML, which is the honest cost of not adding a
-        // dependency for one route's output format.
-        ExportFormat::Yaml => serde_json::to_string_pretty(&document).map_err(|e| e.to_string()),
+        // The serializer half of the crate core reads YAML with, so the two ends
+        // of a round trip are one implementation's idea of the format. It
+        // rendered as JSON until now — valid YAML 1.2, since JSON is a subset,
+        // but not YAML anyone would want to edit, which is the whole point of
+        // asking for YAML.
+        ExportFormat::Yaml => serde_saphyr::to_string(&document).map_err(|e| e.to_string()),
     };
     rendered.map_err(|e| InventoryRefusal::Source(format!("rendering the devices document: {e}")))
 }
@@ -1778,12 +1782,21 @@ mod tests {
         assert!(!plain.contains("STREAM_2_NAME"), "{plain}");
     }
 
-    /// The JSON rendering is also the YAML one — JSON is a subset of YAML 1.2 —
-    /// so both load through core's YAML path. Pinned because it is the one
-    /// format whose serializer is not its own.
+    /// YAML is rendered by the serializer half of the crate core reads YAML
+    /// with, so both ends of a round trip are one implementation's idea of the
+    /// format.
+    ///
+    /// Asserted as *block* YAML and not merely as something that parses. It
+    /// rendered as JSON until this route grew a real serializer — valid YAML
+    /// 1.2, since JSON is a subset, and useless for the thing an operator asks
+    /// for YAML to do, which is edit it.
     #[tokio::test]
-    async fn a_yaml_export_loads_through_the_yaml_parser() {
+    async fn a_yaml_export_is_block_yaml_and_loads_back() {
         let (fleet, ..) = live(&["atrium"], false);
+        fleet
+            .add_group(group_write(Some("room"), &["atrium"]))
+            .await
+            .expect("the group");
 
         let exported = fleet
             .export(&ExportQuery {
@@ -1793,9 +1806,24 @@ mod tests {
             .await
             .expect("the export");
 
+        assert!(
+            !exported.trim_start().starts_with('{'),
+            "a JSON rendering is valid YAML and is not what was asked for:\n{exported}"
+        );
+        assert!(
+            exported.contains("\n- id: atrium"),
+            "block sequences and mappings, not flow ones:\n{exported}"
+        );
+
         let reloaded = sismatic_core::devices::config::from_yaml_str(&exported)
-            .expect("a YAML export must load");
+            .expect("a YAML export must load through core's YAML path");
         assert_eq!(reloaded.devices.len(), 1);
+        assert_eq!(reloaded.groups.len(), 1, "groups travel too");
+        assert_eq!(
+            reloaded.devices[0].uuid,
+            fleet.registry().device("atrium").unwrap().config().uuid,
+            "and the fleet that loads back is the same fleet"
+        );
     }
 
     // ---- reset and persistence -------------------------------------------
@@ -1947,6 +1975,39 @@ mod tests {
             written.contains("extron"),
             "the state file carries credentials, because it exists to be loadable"
         );
+        let _ = std::fs::remove_file(&state);
+    }
+
+    /// A state file's *extension* chooses its format, and every format it can
+    /// choose has to load back — this is the one path where a serializer that
+    /// rendered something unparseable would fail silently, at the next restart,
+    /// with the fleet already gone.
+    #[tokio::test]
+    async fn a_yaml_state_file_round_trips() {
+        let state = std::env::temp_dir().join(format!(
+            "sismatic-state-{}-{:?}.yaml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&state);
+        let (fleet, ..) = live_on_disk(&["first"], &["first"], Some(state.clone()));
+
+        fleet
+            .add_group(group_write(Some("room"), &["first"]))
+            .await
+            .expect("the group");
+
+        let written = std::fs::read_to_string(&state).expect("the state file");
+        assert!(
+            !written.trim_start().starts_with('{'),
+            "a `.yaml` state file should be YAML:\n{written}"
+        );
+        // Through `load_raw`, which is what startup actually calls — so this
+        // asserts the extension dispatch as well as the format.
+        let reloaded = sismatic_core::devices::config::load_raw(&state)
+            .expect("persisted state must load through the same path startup uses");
+        assert_eq!(reloaded.devices.len(), 1);
+        assert_eq!(reloaded.groups.len(), 1);
         let _ = std::fs::remove_file(&state);
     }
 

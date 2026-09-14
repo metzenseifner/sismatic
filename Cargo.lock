@@ -3268,6 +3268,7 @@ dependencies = [
  "config",
  "humantime",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "sismatic-api-types",
  "sismatic-core",
