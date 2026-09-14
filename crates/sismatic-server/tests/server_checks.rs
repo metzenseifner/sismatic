@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
-use sismatic_core::devices::config::{self, Resolved};
+use sismatic_core::devices::config::{self, RawConfig};
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_server::configuration::{
     CONFIG_PATH_ENV, ConfigSource, FieldConfig, Overrides, ServerConfig, SyncConfig, env_source,
@@ -315,6 +315,7 @@ fn test_source() -> ConfigSource {
 fn test_config(host: &str, port: u16) -> ServerConfig {
     ServerConfig {
         devices_config_path: PathBuf::from("unused-by-run.toml"),
+        inventory: Default::default(),
         // A relay over a fleet of no devices starts no tasks, so the numbers
         // here only have to be startable: a zero poll would panic the ticker.
         intent_relay: sismatic_server::configuration::IntentRelayConfig {
@@ -344,6 +345,7 @@ fn test_config(host: &str, port: u16) -> ServerConfig {
             retain: Retention::Age(Duration::from_secs(3_600)),
             cleanup: Some(Duration::from_millis(10)),
             max_memory: Some(64 * 1024 * 1024),
+            cleanup_on_remove: false,
         },
         http: sismatic_server::configuration::HttpConfig {
             host: host.to_owned(),
@@ -364,7 +366,7 @@ async fn run_starts_and_shuts_down_without_touching_the_filesystem() {
     run(
         test_config("127.0.0.1", 0),
         test_source(),
-        Resolved::default(),
+        RawConfig::default(),
         std::future::ready(()),
     )
     .await
@@ -400,7 +402,7 @@ async fn run_serves_the_health_check_on_the_configured_port() {
     let server = tokio::spawn(run(
         test_config("127.0.0.1", port),
         test_source(),
-        Resolved::default(),
+        RawConfig::default(),
         async {
             // A dropped sender resolves this too, so a failing test tears the
             // server down rather than hanging.
@@ -451,7 +453,7 @@ async fn a_patch_changes_the_settings_the_running_server_reports() {
     let server = tokio::spawn(run(
         test_config("127.0.0.1", port),
         test_source(),
-        Resolved::default(),
+        RawConfig::default(),
         async {
             let _ = shutdown.await;
         },

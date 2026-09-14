@@ -3278,6 +3278,7 @@ dependencies = [
  "sismatic-sync",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "tracing-bunyan-formatter",
  "tracing-log 0.2.0",

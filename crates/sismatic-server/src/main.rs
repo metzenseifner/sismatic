@@ -77,9 +77,10 @@ use sismatic_server::telemetry::{get_subscriber, init_subscriber};
 
 use clap::{CommandFactory, Parser};
 use sismatic_core::devices::config;
-use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides};
+use sismatic_core::devices::config::RawConfig;
+use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides, ServerConfig};
 use sismatic_server::run;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 #[derive(Parser, Debug)]
 #[command(version, author="Jonathan L. Komar", about, long_about = None)]
@@ -182,12 +183,7 @@ async fn main() -> Result<(), std::io::Error> {
         .load()
         .unwrap_or_else(|e| panic!("reading server config {}: {e}", source.path.display()));
 
-    let devices = config::load(&cfg.devices_config_path).unwrap_or_else(|e| {
-        panic!(
-            "loading devices config {}: {e}",
-            cfg.devices_config_path.display()
-        )
-    });
+    let devices = load_device_set(&cfg);
 
     run(cfg, source, devices, shutdown_signal()).await
 }
@@ -208,6 +204,47 @@ async fn main() -> Result<(), std::io::Error> {
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.expect("ctrl-c handler");
     info!("ctrl-c received");
+}
+
+/// The device set this process starts with: the persisted state if there is
+/// any, otherwise the devices file.
+///
+/// The document as written, not the resolved fleet — the server keeps it so a
+/// device added at runtime inherits `[defaults]` exactly as one in the file
+/// does, and resolution happens once inside `run`.
+///
+/// # The one thing worth being loud about
+///
+/// When `inventory.state_path` names a file that exists, it **wins**, and the
+/// devices file is not read at all. That is what makes a fleet edited through
+/// the API survive a restart, and it is also the most confusing state this
+/// server can be in: an operator edits the devices file, restarts, and nothing
+/// changes.
+///
+/// So it is a `warn!` and not an `info!`, it names both paths, and it names the
+/// route that undoes it. A log line is a poor substitute for the surprise not
+/// happening — which is why the setting is unset by default, and why a
+/// deployment that never turns it on can never reach this branch.
+fn load_device_set(cfg: &ServerConfig) -> RawConfig {
+    if let Some(state) = &cfg.inventory.state_path
+        && state.exists()
+    {
+        warn!(
+            state_path = %state.display(),
+            devices_config_path = %cfg.devices_config_path.display(),
+            "loading the device set from persisted runtime state; the devices file is \
+             NOT being read. POST /v1/inventory/reset adopts it again"
+        );
+        return config::load_raw(state)
+            .unwrap_or_else(|e| panic!("loading persisted device state {}: {e}", state.display()));
+    }
+
+    config::load_raw(&cfg.devices_config_path).unwrap_or_else(|e| {
+        panic!(
+            "loading devices config {}: {e}",
+            cfg.devices_config_path.display()
+        )
+    })
 }
 
 #[cfg(test)]

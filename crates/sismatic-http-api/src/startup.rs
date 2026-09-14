@@ -20,8 +20,8 @@
 use std::net::TcpListener;
 
 use actix_web::dev::Server;
-use actix_web::{App, HttpServer, web};
-use sismatic_api_types::{FieldCatalog, WritesCatalog};
+use actix_web::{App, HttpResponse, HttpServer, web};
+use sismatic_api_types::{ApiError, ErrorCode, FieldCatalog, WritesCatalog};
 use sismatic_store::catalog::{DeviceCatalog, DynDeviceCatalog};
 use sismatic_store::group::{DynGroupState, GroupState};
 use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit, WriteLog, WriteSubmit};
@@ -31,15 +31,17 @@ use sismatic_store::{DynReadStore, ReadStore};
 use crate::config::{DynLiveConfig, LiveConfig};
 use crate::handlers::target::{CONFIG, INVENTORY, READS, WRITES};
 use crate::handlers::{
-    field_catalog, field_history, group_field_history, list_devices, list_fields, list_fleet,
-    list_fleet_groups, list_group_fields, list_group_writes, list_groups, list_writes,
-    patch_config, pause_group_recording, pause_recording, read_config,
+    add_device, export_devices, field_catalog, field_history, group_field_history, list_devices,
+    list_fields, list_fleet, list_fleet_groups, list_group_fields, list_group_writes, list_groups,
+    list_writes, patch_config, pause_group_recording, pause_recording, read_config,
     read_desired_recording_state, read_device, read_field, read_group,
-    read_group_desired_recording_state, read_group_field, read_write, reload_config,
-    set_group_metadata, set_group_setting, set_metadata, set_setting, start_group_recording,
-    start_recording, stop_group_recording, stop_recording, writes_catalog,
+    read_group_desired_recording_state, read_group_field, read_write, reload_config, remove_device,
+    replace_device, reset_devices, set_group_metadata, set_group_setting, set_metadata,
+    set_setting, start_group_recording, start_recording, stop_group_recording, stop_recording,
+    writes_catalog,
 };
 use crate::health_check;
+use crate::inventory::{DynLiveInventory, LiveInventory};
 use crate::openapi::{
     Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
 };
@@ -90,6 +92,13 @@ pub struct Ports {
     /// config, the channels the poll loops read their schedule from, and the
     /// file the whole document came from. See [`crate::config`].
     pub config: DynLiveConfig,
+    /// The configured device set, changed while the server runs.
+    ///
+    /// The second port whose adapter can only be the composition root, and kept
+    /// apart from [`catalog`](Self::catalog) deliberately: that one answers what
+    /// exists and every read route holds it, this one changes what exists and
+    /// one scope does. See [`crate::inventory`].
+    pub inventory: DynLiveInventory,
     /// Every field a read can be asked for, projected from core's query
     /// catalog. Served by `GET /v1/reads`.
     pub fields: FieldCatalog,
@@ -146,6 +155,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
         log,
         group_state,
         config,
+        inventory,
         fields,
         writes,
     } = ports;
@@ -160,6 +170,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     let log: web::Data<dyn WriteLog> = web::Data::from(log);
     let group_state: web::Data<dyn GroupState> = web::Data::from(group_state);
     let config: web::Data<dyn LiveConfig> = web::Data::from(config);
+    let inventory: web::Data<dyn LiveInventory> = web::Data::from(inventory);
     // `Data::new` here and not `Data::from`: the stamp arrives owned, because
     // the composition root has no reason to keep a handle to it. The two
     // instruction catalogs arrive owned for the same reason — they are values
@@ -179,6 +190,24 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
         // worker — hence the `Data` handle built *outside* the closure. Building
         // it inside would give each worker its own store.
         App::new()
+            // Every route that takes a body shares one refusal, and it is the
+            // error envelope rather than actix's plain text. Without this a
+            // malformed body is the only failure in the whole API that answers
+            // something a client cannot parse — so a caller handling errors
+            // uniformly has to special-case exactly the case it is least likely
+            // to have tested.
+            //
+            // `BadRequest` and not `BadInstruction`: that code classifies an
+            // unknown *name* in a URL, and this is a body that would not
+            // deserialize. See `ErrorCode`.
+            .app_data(web::JsonConfig::default().error_handler(|err, _| {
+                let body = ApiError::coded(ErrorCode::BadRequest, err.to_string());
+                actix_web::error::InternalError::from_response(
+                    err,
+                    HttpResponse::BadRequest().json(body),
+                )
+                .into()
+            }))
             .app_data(store.clone())
             .app_data(catalog.clone())
             .app_data(status.clone())
@@ -186,6 +215,7 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             .app_data(log.clone())
             .app_data(group_state.clone())
             .app_data(config.clone())
+            .app_data(inventory.clone())
             .app_data(stamp.clone())
             .app_data(fields.clone())
             .app_data(writes.clone())
@@ -365,10 +395,25 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             // `/devices/{id}/…` so the bare `{id}` resource cannot be
                             // tried against a longer path first. `/devices` last of the
                             // three, because it is the shortest.
+                            // Before `/devices/{id}`, which would otherwise
+                            // match `export` as an id. The literal has to win,
+                            // and actix tries services in registration order.
                             .service(
-                                web::resource("/devices/{id}").route(web::get().to(read_device)),
+                                web::resource("/devices/export")
+                                    .route(web::get().to(export_devices)),
                             )
-                            .service(web::resource("/devices").route(web::get().to(list_devices)))
+                            .service(web::resource("/reset").route(web::post().to(reset_devices)))
+                            .service(
+                                web::resource("/devices/{id}")
+                                    .route(web::get().to(read_device))
+                                    .route(web::put().to(replace_device))
+                                    .route(web::delete().to(remove_device)),
+                            )
+                            .service(
+                                web::resource("/devices")
+                                    .route(web::get().to(list_devices))
+                                    .route(web::post().to(add_device)),
+                            )
                             .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
                             .service(web::resource("/groups").route(web::get().to(list_groups))),
                     )

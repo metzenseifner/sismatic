@@ -596,7 +596,12 @@ async fn the_error_envelope_is_documented_where_it_can_be_returned() {
             "metadata_frozen",
             "already_recording",
             "already_paused",
-            "not_recording"
+            "not_recording",
+            // The one that is not about recording state: a field the devices
+            // file switches off for the target. It is in the same enum because
+            // it shares the status and the axis — which precondition refused —
+            // and apart from the other four in that waiting will never clear it.
+            "field_disabled"
         ]),
         "got {rejection}"
     );

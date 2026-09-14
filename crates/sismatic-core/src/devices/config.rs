@@ -523,15 +523,29 @@ impl std::error::Error for ConfigError {}
 /// (`toml`, `json`, `yaml`) is enabled.
 #[cfg(any(feature = "toml", feature = "yaml", feature = "json"))]
 pub fn load(path: impl AsRef<Path>) -> Result<Resolved, ConfigError> {
+    resolve_config(load_raw(path)?)
+}
+
+/// [`load`], stopping one step short: the document as written, with no default
+/// folded in and nothing validated beyond its syntax.
+///
+/// For the caller that has to *amend* the document rather than only run it. A
+/// device added at runtime inherits `[defaults]` exactly as one in the file
+/// does, and the only way to guarantee that is to put the amended [`RawConfig`]
+/// back through [`resolve_config`] — so the raw form has to survive startup.
+#[cfg(any(feature = "toml", feature = "yaml", feature = "json"))]
+pub fn load_raw(path: impl AsRef<Path>) -> Result<RawConfig, ConfigError> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
     match path.extension().and_then(|e| e.to_str()) {
         #[cfg(feature = "toml")]
-        Some("toml") => from_toml_str(&text),
+        Some("toml") => toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string())),
         #[cfg(feature = "yaml")]
-        Some("yaml") | Some("yml") => from_yaml_str(&text),
+        Some("yaml") | Some("yml") => {
+            serde_saphyr::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))
+        }
         #[cfg(feature = "json")]
-        Some("json") => from_json_str(&text),
+        Some("json") => serde_json::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string())),
         other => Err(ConfigError::UnsupportedFormat(
             other.unwrap_or("").to_string(),
         )),
@@ -867,71 +881,83 @@ fn require<T>(device: &str, field: &'static str, value: Option<T>) -> Result<T, 
 
 // ---- raw deserialization mirror of the file ------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+/// The file as written, before any default is folded in.
+///
+/// Public, fields and all, because the composition root holds one for the life
+/// of the process: a device added at runtime has to inherit `[defaults]` exactly
+/// as a device in the file does, and the only way to guarantee that is to put
+/// the amended document back through [`resolve_config`] — the one function that
+/// enforces every invariant a [`Resolved`] promises. A parallel "add one device"
+/// path would be a second place for duplicate ids, group membership and unknown
+/// field names to be checked, and a second place for one of them to be forgotten.
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
     #[serde(default)]
-    defaults: Defaults,
+    pub defaults: Defaults,
     #[serde(default, alias = "device", alias = "devices")]
-    devices: Vec<RawDevice>,
+    pub devices: Vec<RawDevice>,
     #[serde(default, alias = "group", alias = "groups")]
-    groups: Vec<RawGroup>,
+    pub groups: Vec<RawGroup>,
 }
 
 /// Every field is optional: a default only applies where a device omits it.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Defaults {
-    port: Option<u16>,
-    username: Option<String>,
-    password: Option<Password>,
-    connect_secs: Option<u64>,
-    exchange_secs: Option<u64>,
-    eager: Option<bool>,
-    sis_keepalive_secs: Option<u64>,
-    eager_retry_secs: Option<u64>,
-    cold_backoff_secs: Option<u64>,
-    /// Inherited whole or not at all — see the note in [`resolve`]. `Option`
-    /// rather than a defaulted `Vec` precisely so "the device wrote an empty
-    /// list" and "the device wrote nothing" stay distinguishable, which is what
-    /// lets one licensed unit opt out of a fleet-wide veto.
-    disabled_fields: Option<Vec<String>>,
-    auto_disable_after: Option<u32>,
-    self_heal_secs: Option<u64>,
+pub struct Defaults {
+    pub port: Option<u16>,
+    pub username: Option<String>,
+    pub password: Option<Password>,
+    pub connect_secs: Option<u64>,
+    pub exchange_secs: Option<u64>,
+    pub eager: Option<bool>,
+    pub sis_keepalive_secs: Option<u64>,
+    pub eager_retry_secs: Option<u64>,
+    pub cold_backoff_secs: Option<u64>,
+    /// Inherited whole or not at all, unlike every scalar key above: a device
+    /// that writes its own list *replaces* this one rather than adding to it.
+    ///
+    /// `Option` rather than a defaulted `Vec` precisely so "the device wrote an
+    /// empty list" and "the device wrote nothing" stay distinguishable, which is
+    /// what lets one licensed unit opt out of a fleet-wide veto with
+    /// `disabled_fields = []`.
+    pub disabled_fields: Option<Vec<String>>,
+    pub auto_disable_after: Option<u32>,
+    pub self_heal_secs: Option<u64>,
 }
 
 /// A device as written: `id` and `host` are required, the rest may inherit.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawDevice {
-    id: String,
-    host: String,
-    port: Option<u16>,
-    username: Option<String>,
-    password: Option<Password>,
-    connect_secs: Option<u64>,
-    exchange_secs: Option<u64>,
-    eager: Option<bool>,
-    sis_keepalive_secs: Option<u64>,
-    eager_retry_secs: Option<u64>,
-    cold_backoff_secs: Option<u64>,
-    disabled_fields: Option<Vec<String>>,
-    auto_disable_after: Option<u32>,
-    self_heal_secs: Option<u64>,
+pub struct RawDevice {
+    pub id: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub username: Option<String>,
+    pub password: Option<Password>,
+    pub connect_secs: Option<u64>,
+    pub exchange_secs: Option<u64>,
+    pub eager: Option<bool>,
+    pub sis_keepalive_secs: Option<u64>,
+    pub eager_retry_secs: Option<u64>,
+    pub cold_backoff_secs: Option<u64>,
+    pub disabled_fields: Option<Vec<String>>,
+    pub auto_disable_after: Option<u32>,
+    pub self_heal_secs: Option<u64>,
 }
 
 /// A group as written: an `id`, the ids of the member devices, and how the
 /// rendezvous behaves. Nothing here inherits from `[defaults]`; a group is a
 /// name over existing devices plus a policy of its own, and a fleet-wide
 /// default barrier would be a claim about device groups this file cannot make.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawGroup {
-    id: String,
-    devices: Vec<String>,
+pub struct RawGroup {
+    pub id: String,
+    pub devices: Vec<String>,
     /// Unset means "derive it from the members" — see [`GroupConfig::barrier_timeout`].
-    barrier_timeout_secs: Option<u64>,
-    barrier: Option<RawBarrier>,
+    pub barrier_timeout_secs: Option<u64>,
+    pub barrier: Option<RawBarrier>,
 }
 
 /// The barrier policy as spelled in a config file.
@@ -944,7 +970,7 @@ struct RawGroup {
 /// fallback to the default.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum RawBarrier {
+pub enum RawBarrier {
     Fail,
     DispatchReady,
 }

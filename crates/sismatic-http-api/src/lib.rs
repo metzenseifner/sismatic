@@ -120,12 +120,14 @@
 
 pub mod config;
 pub mod handlers;
+pub mod inventory;
 pub mod openapi;
 pub mod stamp;
 pub mod startup;
 
 pub use config::{ConfigRefusal, DynLiveConfig, LiveConfig};
 pub use handlers::health_check;
+pub use inventory::{DynLiveInventory, InventoryRefusal, LiveInventory};
 pub use openapi::ApiDoc;
 pub use stamp::Stamp;
 pub use startup::{Ports, run};

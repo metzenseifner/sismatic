@@ -41,7 +41,9 @@ use sismatic_api_types::{
     Barrier as ApiBarrier, ConnectionStatus, DeviceSummary, FieldCatalog, GroupSummary,
     InstructionSummary, Timestamp, WritesCatalog,
 };
-use sismatic_core::devices::config::{Barrier, DeviceConfig, GroupConfig, Resolved};
+use sismatic_core::devices::config::{
+    Barrier, DeviceConfig, GroupConfig, RawConfig, resolve_config,
+};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
@@ -73,12 +75,25 @@ use crate::status::RegistryStatus;
 /// value is what starts the tasks, and the source is what
 /// `POST /v1/config/reload` reads again — see [`dynamic`] for the whole of how a
 /// change travels from a request to a running loop.
+/// `devices` is the devices document *as written*, not the resolved fleet.
+///
+/// Resolution happens here, once, because the raw form has to survive startup:
+/// a device added through `POST /v1/inventory/devices` inherits `[defaults]`
+/// exactly as one in the file does, and the only way to guarantee that is to
+/// amend this document and put it back through the one function that resolves
+/// it. See [`fleet::LiveFleet`].
 pub async fn run(
     cfg: ServerConfig,
     source: ConfigSource,
-    devices: Resolved,
+    devices: RawConfig,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), std::io::Error> {
+    let resolved = resolve_config(devices.clone()).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("resolving the devices config: {e}"),
+        )
+    })?;
     // The budget is handed to the store rather than to the sweeper, because it
     // is enforced on the write path: a cap that only held at sweep time would
     // give a burst the whole interval to exhaust the machine. What the sweeper
@@ -114,6 +129,13 @@ pub async fn run(
     // published down a channel. Concrete rather than narrowed because there is
     // no narrowing to do: this is the composition root reaching an adapter it
     // built, not a handler being handed a capability. See `dynamic`.
+    // A seventh handle on the store and a sixth on the outbox, for the *other*
+    // adapter that needs verbs no port carries: a device leaving the fleet has a
+    // queue to cancel and, depending on `cleanup_on_remove`, reads to drop. Taken
+    // before `LiveSettings::new` consumes its own pair.
+    let store_handle = store.clone();
+    let outbox_handle = outbox.clone();
+
     let (settings, wiring) = LiveSettings::new(&cfg, source, store, outbox);
     let settings: DynLiveConfig = Arc::new(settings);
 
@@ -122,14 +144,18 @@ pub async fn run(
     // this is the only place both shapes are in scope. `DeviceSummary` has no
     // `username` or `password` field at all, so there is nothing to redact —
     // see `sismatic_api_types::device`.
-    let catalog: DynDeviceCatalog = Arc::new(MemoryCatalog::new(
-        devices.devices.iter().map(summarize).collect(),
-        devices.groups.iter().map(summarize_group).collect(),
-    ));
+    let catalog = MemoryCatalog::new(
+        resolved.devices.iter().map(summarize).collect(),
+        resolved.groups.iter().map(summarize_group).collect(),
+    );
+    // Cloned rather than re-derived: the inventory adapter keeps the catalog in
+    // step with the fleet as devices come and go, and the two must be handles on
+    // one object or the read routes would serve a fleet that no longer exists.
+    let catalog_port: DynDeviceCatalog = Arc::new(catalog.clone());
 
     let registry = Arc::new(Registry::build(
-        devices.devices,
-        devices.groups,
+        resolved.devices,
+        resolved.groups,
         Arc::new(RusshConnector),
     ));
 
@@ -137,6 +163,23 @@ pub async fn run(
     // answer changes without anything being written, which is the whole reason
     // it is a port of its own rather than a field the catalog could fill.
     let status: DynDeviceStatus = Arc::new(RegistryStatus::new(Arc::clone(&registry)));
+
+    // The fleet as something that can change, and the one path allowed to
+    // change it. Built here because the HTTP surface takes it as a port, and
+    // *before* anything subscribes: a `watch` receiver created after a change
+    // reads the current generation with no `changed()` behind it, and would
+    // sleep through the very change that made it. Every subscriber below is
+    // therefore made from this value, not from a later one.
+    let live_fleet = Arc::new(fleet::LiveFleet::new(fleet::Wiring {
+        registry: Arc::clone(&registry),
+        document: devices,
+        catalog,
+        outbox: outbox_handle,
+        store: store_handle,
+        cleanup_on_remove: cfg.store.cleanup_on_remove,
+        devices_path: cfg.devices_config_path.clone(),
+        state_path: cfg.inventory.state_path.clone(),
+    }));
 
     // Bound and built before anything is *started*, so the one failure that is
     // likely here — the port is taken — is reported by a process that has
@@ -147,12 +190,13 @@ pub async fn run(
         listener,
         Ports {
             store: read,
-            catalog,
+            catalog: catalog_port,
             status,
             submit,
             log,
             group_state,
             config: settings,
+            inventory: Arc::clone(&live_fleet) as sismatic_http_api::DynLiveInventory,
             // The instruction catalog projected the same way the device set was
             // a few lines up, and for the same reason: the read side may not
             // name a `Query` any more than it may name a `DeviceConfig`, so what
@@ -182,17 +226,11 @@ pub async fn run(
         sismatic_intent_relay::RelayConfig { poll: wiring.drain },
     );
 
-    // The fleet as something that can change, and the one path allowed to
-    // change it. Built after the two task sets it will own and before the sync
-    // driver, because every subscriber has to exist before the first `apply`:
-    // a `watch` receiver created afterwards reads the current generation with
-    // no `changed()` behind it, and would sleep through the change that made it.
-    let fleet = fleet::LiveFleet::new(Arc::clone(&registry));
     let fleet_tasks = fleet::spawn(
         Arc::clone(&registry),
         intent_relay,
         keepalive,
-        fleet.subscribe(),
+        live_fleet.subscribe(),
     );
 
     // Started before the poll loops that fill the store, so a process restarting
@@ -216,7 +254,7 @@ pub async fn run(
             // because it owns a supervisor of its own — its loops move with the
             // schedule as well as with the fleet — so both subscribe and neither
             // learns about the fleet through the other.
-            fleet: fleet.subscribe(),
+            fleet: live_fleet.subscribe(),
             // Both reconciliation paths are wired, and they close different
             // gaps. The relay re-reads the state immediately before a metadata
             // write, which is the one intent the freeze protects. This hook
@@ -272,13 +310,24 @@ pub async fn run(
 /// nothing else it could truthfully say. The live value comes from
 /// [`RegistryStatus`] and is overlaid by the two device routes — which is why
 /// this is a second port rather than a field this function could fill.
-fn summarize(config: &DeviceConfig) -> DeviceSummary {
+pub(crate) fn summarize(config: &DeviceConfig) -> DeviceSummary {
     DeviceSummary {
         id: config.id.clone(),
+        uuid: config.uuid.to_string(),
         host: config.host.clone(),
         port: config.port,
         eager: config.eager,
         status: ConnectionStatus::Unknown,
+        // Configuration, so it belongs here: a declared veto is in the devices
+        // file and is knowable before anything connects. Sorted already — the
+        // config layer holds it in a `BTreeSet` — which is what lets a rendered
+        // page diff cleanly between requests.
+        disabled_fields: config.disabled_fields.iter().cloned().collect(),
+        // Observation, so it is *not* knowable here and is left empty for the
+        // device routes to overlay from `DeviceStatus`. The same split
+        // `status` above is subject to, and for the same reason: this function
+        // runs before the process has spoken to a device.
+        auto_disabled_fields: Vec::new(),
     }
 }
 
@@ -293,7 +342,7 @@ fn summarize(config: &DeviceConfig) -> DeviceSummary {
 /// same drift sentinel `sismatic_sync::dto` uses for the read direction.
 ///
 /// [`ApiBarrier`]: sismatic_api_types::Barrier
-fn summarize_group(config: &GroupConfig) -> GroupSummary {
+pub(crate) fn summarize_group(config: &GroupConfig) -> GroupSummary {
     GroupSummary {
         id: config.id.clone(),
         members: config.device_ids.clone(),

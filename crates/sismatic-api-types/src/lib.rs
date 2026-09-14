@@ -56,6 +56,7 @@ pub mod device;
 pub mod error;
 pub mod group;
 pub mod instruction;
+pub mod inventory;
 pub mod read;
 pub mod value;
 pub mod write;
@@ -77,7 +78,8 @@ pub use config::{
     StorePatch, StoreSettings, SyncPatch, SyncSettings,
 };
 pub use device::{
-    ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList, GroupSummary,
+    AutoDisabledField, ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList,
+    GroupSummary,
 };
 pub use error::{ApiError, ErrorCode, Health, ServiceStatus};
 pub use group::{
@@ -86,6 +88,7 @@ pub use group::{
     MemberDesiredRecordingState, MemberHistory, MemberState, MemberWrites,
 };
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
+pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, Removed};
 pub use read::{
     DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
 };

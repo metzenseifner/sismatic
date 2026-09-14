@@ -203,6 +203,14 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
     let http = raw.http.unwrap_or_default();
     let store = raw.store.unwrap_or_default();
 
+    let inventory = InventoryConfig {
+        state_path: raw
+            .inventory
+            .unwrap_or_default()
+            .state_path
+            .map(|path| base.join(path)),
+    };
+
     let devices_config_path = base.join(
         raw.devices_config_path
             .or(defaults.devices_config_path)
@@ -231,6 +239,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
 
     ServerConfig {
         devices_config_path,
+        inventory,
         intent_relay: IntentRelayConfig {
             poll: handle_poll(intent_relay.poll_ms.unwrap_or(DEFAULT_INTENT_RELAY_POLL_MS)),
             max_attempts: effective_attempts(
@@ -254,6 +263,7 @@ pub fn resolve_config(base: &Path, raw: RawServerConfig) -> ServerConfig {
                     .max_memory
                     .map_or(DEFAULT_MAX_MEMORY_BYTES, |bytes| bytes.0),
             ),
+            cleanup_on_remove: store.cleanup_on_remove.unwrap_or(false),
         },
         http: HttpConfig { host, port },
     }
@@ -423,6 +433,7 @@ pub struct RawServerConfig {
     pub devices_config_path: Option<String>,
     pub intent_relay: Option<RawIntentRelay>,
     pub sync: Option<RawSync>,
+    pub inventory: Option<RawInventory>,
     pub store: Option<RawStore>,
     pub http: Option<RawHttp>,
 }
@@ -451,6 +462,38 @@ pub struct RawIntentRelay {
     pub max_attempts: Option<u32>,
 }
 
+/// The `[inventory]` section as written.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawInventory {
+    /// Where to persist runtime changes to the device set. Absent means nowhere.
+    pub state_path: Option<PathBuf>,
+}
+
+/// How the fleet may be changed while the process runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InventoryConfig {
+    /// Where runtime changes to the device set are written, or `None` to keep
+    /// them in memory only.
+    ///
+    /// **Unset by default, and that default is load-bearing.** With nothing
+    /// persisted the devices file is unambiguously authoritative: a restart
+    /// returns to exactly what it says, and there is no second source of truth.
+    ///
+    /// Setting it makes the state file win at startup, which is the point — a
+    /// fleet edited through the API survives a restart — and also the hazard.
+    /// The failure it invites is silent: an operator edits the devices file,
+    /// restarts, and nothing changes, because a state file they had forgotten
+    /// about is shadowing it. The server says so at `warn!` on every startup
+    /// that loads from state, and `POST /v1/inventory/reset` is how the file is
+    /// made authoritative again.
+    ///
+    /// The file carries credentials, necessarily: it exists to be loadable, and
+    /// a device this process cannot authenticate to is one it cannot poll. The
+    /// path and its mode are the deployment's to choose accordingly.
+    pub state_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawSync {
@@ -468,7 +511,7 @@ pub struct RawSync {
 /// fallback table for values two sections might both want.
 ///
 /// The values carry their own units — `30d`, `512MiB` — where the rest of the
-/// document puts the unit in the key. See [`units`](crate::units) for why the
+/// document puts the unit in the key. See [`crate::units`] for why the
 /// two conventions coexist, and note that a bare integer still works at every
 /// key here, read as seconds and as bytes respectively.
 #[derive(Debug, Default, Deserialize)]
@@ -488,6 +531,9 @@ pub struct RawStore {
     /// [`sismatic_store::lifecycle`] — so it holds between cleanups, which is
     /// what makes it a cap rather than an average.
     pub max_memory: Option<RawBytes>,
+    /// Whether removing a device drops its recorded reads. Absent means `false`
+    /// — see [`StoreConfig::cleanup_on_remove`].
+    pub cleanup_on_remove: Option<bool>,
 }
 
 /// A duration as written: `1h 30min`, `5min`, or a bare number of seconds.
@@ -674,6 +720,8 @@ impl<'de> Deserialize<'de> for RawField {
 pub struct ServerConfig {
     /// Where the devices file lives, using the server config's directory as base.
     pub devices_config_path: PathBuf,
+    /// How the fleet may be changed while the process runs.
+    pub inventory: InventoryConfig,
     pub intent_relay: IntentRelayConfig,
     pub sync: SyncConfig,
     pub store: StoreConfig,
@@ -713,6 +761,11 @@ impl ServerConfig {
             devices_config_path: overrides
                 .devices_config_path
                 .unwrap_or(self.devices_config_path),
+            // No command-line flag reaches it either, and it is a path resolved
+            // against the config file's directory rather than the working one —
+            // so an override would have to re-anchor it, which is the very
+            // ambiguity `devices_config_path` above documents.
+            inventory: self.inventory,
             // No command-line flag reaches the relay, so it passes through
             // untouched — the same as `sync` and `store`.
             intent_relay: self.intent_relay,
@@ -764,6 +817,18 @@ pub struct StoreConfig {
     /// The store's byte budget, or `None` for unbounded
     /// (`max_memory: unlimited`).
     pub max_memory: Option<u64>,
+    /// Whether removing a device also drops the reads recorded for it.
+    ///
+    /// Off by default, and that is the safe direction: a device removed by
+    /// mistake can be added back and its history is still there, where a purge
+    /// cannot be undone. What it costs is orphaned series — which the retention
+    /// window expires on its own schedule anyway, so nothing accumulates
+    /// forever.
+    ///
+    /// It never touches the *write* log. A cancelled write stays readable at
+    /// `GET /v1/writes/{id}` whatever this says, because a caller polling one
+    /// has to be able to learn it was cancelled.
+    pub cleanup_on_remove: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -970,6 +1035,11 @@ pub fn patched(current: &ServerConfig, patch: &ConfigPatch) -> Result<ServerConf
 
     Ok(ServerConfig {
         devices_config_path: current.devices_config_path.clone(),
+        // Not patchable, for the reason `devices_config_path` beside it is not:
+        // it names a file this process has already read and may already have
+        // written, and pointing it somewhere else mid-run would leave two state
+        // files each describing a fleet nobody is running.
+        inventory: current.inventory.clone(),
         intent_relay: patched_relay(&current.intent_relay, patch.intent_relay.as_ref()),
         sync: patched_sync(&current.sync, patch.sync.as_ref())?,
         store: patched_store(&current.store, patch.store.as_ref())?,
@@ -1085,6 +1155,10 @@ fn patched_store(
             Some(text) => handle_budget(setting::<RawBytes>(text, "store.max_memory")?.0),
             None => current.max_memory,
         },
+        // Not patchable: it is a policy about *removal*, and the removal
+        // routes are not the config scope's. Carried forward so a `PATCH` that
+        // names the other three store settings leaves it where it was.
+        cleanup_on_remove: current.cleanup_on_remove,
     })
 }
 
@@ -1488,6 +1562,7 @@ mod tests {
             cfg,
             ServerConfig {
                 devices_config_path: PathBuf::from(DEFAULT_DEVICES_CONFIG_PATH),
+                inventory: InventoryConfig::default(),
                 intent_relay: IntentRelayConfig {
                     poll: Duration::from_millis(DEFAULT_INTENT_RELAY_POLL_MS),
                     max_attempts: DEFAULT_MAX_ATTEMPTS,
@@ -1500,6 +1575,7 @@ mod tests {
                     retain: Retention::Age(Duration::from_secs(DEFAULT_RETAIN_SECS)),
                     cleanup: Some(Duration::from_secs(DEFAULT_CLEANUP_INTERVAL_SECS)),
                     max_memory: Some(DEFAULT_MAX_MEMORY_BYTES),
+                    cleanup_on_remove: false,
                 },
                 http: HttpConfig {
                     host: DEFAULT_HOST.to_owned(),
@@ -1607,6 +1683,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(30 * 86_400)),
                 cleanup: Some(Duration::from_secs(3_600)),
                 max_memory: Some(512 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -1738,6 +1815,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(7 * 86_400)),
                 cleanup: Some(Duration::from_secs(600)),
                 max_memory: Some(2 * 1024 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -2390,6 +2468,7 @@ mod tests {
                 retain: Retention::Age(Duration::from_secs(30 * 86_400)),
                 cleanup: Some(Duration::from_secs(3_600)),
                 max_memory: Some(512 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }
@@ -2636,6 +2715,7 @@ mod shipped_config_check {
                 retain: super::Retention::Age(std::time::Duration::from_secs(24 * 60 * 60)),
                 cleanup: Some(std::time::Duration::from_secs(5 * 60)),
                 max_memory: Some(256 * 1024 * 1024),
+                cleanup_on_remove: false,
             }
         );
     }

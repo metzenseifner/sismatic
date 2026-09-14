@@ -23,7 +23,10 @@ pub mod writes;
 
 pub use config::{patch_config, read_config, reload_config};
 
-pub use devices::{list_devices, list_groups, read_device, read_group};
+pub use devices::{
+    add_device, export_devices, list_devices, list_groups, read_device, read_group, remove_device,
+    replace_device, reset_devices,
+};
 
 pub use fleet_group_reads::list_fleet_groups;
 

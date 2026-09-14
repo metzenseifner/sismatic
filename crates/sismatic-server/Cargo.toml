@@ -58,6 +58,17 @@ config = "0.15.25"
 # beside it are not.
 humantime.workspace = true
 serde.workspace = true
+# Rendering the devices document for `GET /v1/inventory/devices/export` and for
+# the state file behind `inventory.state_path`. Serializers, not parsers — core
+# owns the reading half, and these are the writing half it deliberately does not
+# have: `Password` has no `Serialize` impl, so an export builds its own shape and
+# a credential can only be written out when one is asked for.
+#
+# No YAML serializer: `serde-saphyr` reads and does not write, and JSON is a
+# subset of YAML 1.2, so the YAML format renders as JSON rather than adding a
+# dependency for one route's output.
+toml.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 # The store sweeper's cooperative shutdown, the same `CancellationToken` the
 # sync driver and the intent relay stop on. The sweeper lives here rather than
