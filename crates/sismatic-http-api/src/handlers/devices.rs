@@ -10,11 +10,24 @@
 //! POST   /devices           add a device
 //! PUT    /devices/{id}      replace one
 //! DELETE /devices/{id}      remove one
-//! GET    /devices/export    the running fleet as a devices file
-//! POST   /reset             discard runtime changes, adopt the file
 //! GET    /groups            every configured group
 //! GET    /groups/{id}       one group and the devices it addresses
+//! POST   /groups            add a group
+//! PUT    /groups/{id}       replace one
+//! DELETE /groups/{id}       remove one
+//!
+//! GET    /config/export     the running configuration as a devices file
+//! POST   /config/reset      discard runtime changes, adopt the file
 //! ```
+//!
+//! # Why the last two are `/config` and not `/devices`
+//!
+//! Because what they operate on is the *document*, not the device list. A
+//! devices file is `[defaults]`, `[[device]]` and `[[group]]` together, and both
+//! routes take all three: an export that left groups out would not load back as
+//! the same fleet, and a reset that restored only devices would leave groups
+//! describing a membership the file disagrees with. Naming them under
+//! `/devices` said otherwise.
 //!
 //! # The three that change things
 //!
@@ -83,7 +96,7 @@
 use actix_web::{HttpResponse, web};
 use sismatic_api_types::{
     ApiError, DeviceDetail, DeviceList, DeviceSummary, DeviceWrite, ExportQuery, GroupList,
-    GroupSummary, Removed,
+    GroupSummary, GroupWrite, Removed,
 };
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
@@ -303,12 +316,17 @@ pub async fn remove_device(
     Ok(web::Json(inventory.remove(&id).await?))
 }
 
-/// `GET /v1/inventory/devices/export` — the running fleet as a devices file.
+/// `GET /v1/inventory/config/export` — the running configuration as a devices
+/// file.
 ///
 /// The answer to what a runtime-mutable fleet costs: changes made through this
 /// scope are not written to the devices file, so without this there would be no
 /// way to get them back into one. The body is text in the format asked for, and
 /// saving it under that extension produces a file the loader reads unchanged.
+///
+/// It is the whole document — `[defaults]`, every `[[device]]` and every
+/// `[[group]]` — because that is what "loads back as the same fleet" requires.
+/// A group left out would take its members' ability to act together with it.
 ///
 /// **Credentials are omitted unless `include_secrets` is set**, so the default
 /// export is not directly loadable and that is deliberate: it lands in shell
@@ -323,7 +341,7 @@ pub async fn remove_device(
 /// where an inferred one costs a timer tick per interval.
 #[utoipa::path(
     get,
-    path = "/devices/export",
+    path = "/config/export",
     context_path = "/v1/inventory",
     tag = "inventory",
     params(ExportQuery),
@@ -337,7 +355,7 @@ pub async fn remove_device(
          body = ApiError),
     ),
 )]
-pub async fn export_devices(
+pub async fn export_config(
     inventory: web::Data<dyn LiveInventory>,
     query: web::Query<ExportQuery>,
 ) -> Result<HttpResponse, ApiFailure> {
@@ -357,7 +375,8 @@ pub async fn export_devices(
         .body(body))
 }
 
-/// `POST /v1/inventory/reset` — discard runtime changes and adopt the file.
+/// `POST /v1/inventory/config/reset` — discard runtime changes and adopt the
+/// file.
 ///
 /// Every add, replace and remove since startup is undone at once, and what is
 /// left is exactly what the devices file describes. The escape hatch for a fleet
@@ -372,7 +391,7 @@ pub async fn export_devices(
 /// it ended with so a caller can see what happened.
 #[utoipa::path(
     post,
-    path = "/reset",
+    path = "/config/reset",
     context_path = "/v1/inventory",
     tag = "inventory",
     responses(
@@ -384,7 +403,7 @@ pub async fn export_devices(
          body = ApiError),
     ),
 )]
-pub async fn reset_devices(
+pub async fn reset_config(
     inventory: web::Data<dyn LiveInventory>,
 ) -> Result<web::Json<DeviceList>, ApiFailure> {
     Ok(web::Json(inventory.reset().await?))
@@ -406,6 +425,102 @@ pub async fn list_groups(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<Gro
     web::Json(GroupList {
         groups: catalog.groups().await,
     })
+}
+
+/// `POST /v1/inventory/groups` — add a device group to the running fleet.
+///
+/// A group is a name over devices that already exist plus a policy for what
+/// happens when they cannot act together. Every member must resolve, and the id
+/// must be free in the namespace devices and groups share — both refused here
+/// rather than discovered at the first write addressed to it.
+#[utoipa::path(
+    post,
+    path = "/groups",
+    context_path = "/v1/inventory",
+    tag = "inventory",
+    request_body = GroupWrite,
+    responses(
+        (status = 201, description = "Added. The body is the group as the index \
+             now reports it, with the barrier timeout it resolved to. The \
+             `Location` header names its detail route.", body = GroupSummary),
+        (status = 400, description = "The body does not describe a group this \
+             server can build: no members, a member naming no device, or an \
+             unknown barrier policy.", body = ApiError),
+        (status = 409, description = "A device or group already has this id.",
+         body = ApiError),
+    ),
+)]
+pub async fn add_group(
+    inventory: web::Data<dyn LiveInventory>,
+    body: web::Json<GroupWrite>,
+) -> Result<HttpResponse, ApiFailure> {
+    let group = inventory.add_group(body.into_inner()).await?;
+    Ok(HttpResponse::Created()
+        .insert_header(("Location", format!("/v1/inventory/groups/{}", group.id)))
+        .json(group))
+}
+
+/// `PUT /v1/inventory/groups/{id}` — replace a device group wholesale.
+///
+/// `devices` replaces the membership entirely rather than adding to it, so
+/// removing a member is sending the list without it. The same replace-not-merge
+/// contract the device route has, and the one most likely to surprise here:
+/// there is no "add a member" verb because there is no partial update.
+#[utoipa::path(
+    put,
+    path = "/groups/{id}",
+    context_path = "/v1/inventory",
+    tag = "inventory",
+    params(("id" = String, Path, description = "Group id, as the index reports it.")),
+    request_body = GroupWrite,
+    responses(
+        (status = 200, description = "Replaced. The body is the group as it now \
+             stands.", body = GroupSummary),
+        (status = 400, description = "The body does not describe a group this \
+             server can build, or states an `id` that disagrees with the path.",
+         body = ApiError),
+        (status = 404, description = "No group has this id.", body = ApiError),
+    ),
+)]
+pub async fn replace_group(
+    inventory: web::Data<dyn LiveInventory>,
+    path: web::Path<String>,
+    body: web::Json<GroupWrite>,
+) -> Result<web::Json<GroupSummary>, ApiFailure> {
+    let id = path.into_inner();
+    Ok(web::Json(
+        inventory.replace_group(&id, body.into_inner()).await?,
+    ))
+}
+
+/// `DELETE /v1/inventory/groups/{id}` — take a device group out of the fleet.
+///
+/// Strands nothing, which is what makes it different from removing a device. A
+/// group owns no queue: a write addressed to one is expanded into per-device
+/// rows at submission, so what was accepted is owed to devices that still exist
+/// and still dispatches. What goes with the group is the record of what it was
+/// last told.
+///
+/// It is also the route that clears the way for a device removal, which is
+/// refused while any group still names the device.
+#[utoipa::path(
+    delete,
+    path = "/groups/{id}",
+    context_path = "/v1/inventory",
+    tag = "inventory",
+    params(("id" = String, Path, description = "Group id, as the index reports it.")),
+    responses(
+        (status = 204, description = "Removed. No body: unlike a device removal \
+             there is nothing that went with it worth counting."),
+        (status = 404, description = "No group has this id.", body = ApiError),
+    ),
+)]
+pub async fn remove_group(
+    inventory: web::Data<dyn LiveInventory>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiFailure> {
+    inventory.remove_group(&path.into_inner()).await?;
+    Ok(HttpResponse::NoContent().finish())
 }
 
 /// `GET /v1/inventory/groups/{id}` — one group and the devices it addresses.

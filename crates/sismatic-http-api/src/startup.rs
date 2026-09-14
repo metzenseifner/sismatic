@@ -31,14 +31,14 @@ use sismatic_store::{DynReadStore, ReadStore};
 use crate::config::{DynLiveConfig, LiveConfig};
 use crate::handlers::target::{CONFIG, INVENTORY, READS, WRITES};
 use crate::handlers::{
-    add_device, export_devices, field_catalog, field_history, group_field_history, list_devices,
-    list_fields, list_fleet, list_fleet_groups, list_group_fields, list_group_writes, list_groups,
-    list_writes, patch_config, pause_group_recording, pause_recording, read_config,
+    add_device, add_group, export_config, field_catalog, field_history, group_field_history,
+    list_devices, list_fields, list_fleet, list_fleet_groups, list_group_fields, list_group_writes,
+    list_groups, list_writes, patch_config, pause_group_recording, pause_recording, read_config,
     read_desired_recording_state, read_device, read_field, read_group,
     read_group_desired_recording_state, read_group_field, read_write, reload_config, remove_device,
-    replace_device, reset_devices, set_group_metadata, set_group_setting, set_metadata,
-    set_setting, start_group_recording, start_recording, stop_group_recording, stop_recording,
-    writes_catalog,
+    remove_group, replace_device, replace_group, reset_config, set_group_metadata,
+    set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
+    stop_group_recording, stop_recording, writes_catalog,
 };
 use crate::health_check;
 use crate::inventory::{DynLiveInventory, LiveInventory};
@@ -395,14 +395,16 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             // `/devices/{id}/…` so the bare `{id}` resource cannot be
                             // tried against a longer path first. `/devices` last of the
                             // three, because it is the shortest.
-                            // Before `/devices/{id}`, which would otherwise
-                            // match `export` as an id. The literal has to win,
-                            // and actix tries services in registration order.
+                            // The document routes. Under `/config` rather than
+                            // `/devices` because both take the whole thing —
+                            // defaults, devices and groups — and neither is
+                            // about the device list alone.
                             .service(
-                                web::resource("/devices/export")
-                                    .route(web::get().to(export_devices)),
+                                web::resource("/config/export").route(web::get().to(export_config)),
                             )
-                            .service(web::resource("/reset").route(web::post().to(reset_devices)))
+                            .service(
+                                web::resource("/config/reset").route(web::post().to(reset_config)),
+                            )
                             .service(
                                 web::resource("/devices/{id}")
                                     .route(web::get().to(read_device))
@@ -414,8 +416,17 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                                     .route(web::get().to(list_devices))
                                     .route(web::post().to(add_device)),
                             )
-                            .service(web::resource("/groups/{id}").route(web::get().to(read_group)))
-                            .service(web::resource("/groups").route(web::get().to(list_groups))),
+                            .service(
+                                web::resource("/groups/{id}")
+                                    .route(web::get().to(read_group))
+                                    .route(web::put().to(replace_group))
+                                    .route(web::delete().to(remove_group)),
+                            )
+                            .service(
+                                web::resource("/groups")
+                                    .route(web::get().to(list_groups))
+                                    .route(web::post().to(add_group)),
+                            ),
                     )
                     .service(
                         web::scope(CONFIG)

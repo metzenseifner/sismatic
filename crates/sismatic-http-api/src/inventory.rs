@@ -37,7 +37,9 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{DeviceSummary, DeviceWrite, ExportQuery, Removed};
+use sismatic_api_types::{
+    DeviceSummary, DeviceWrite, ExportQuery, GroupSummary, GroupWrite, Removed,
+};
 
 /// A convenient object-safe handle, as `DynLiveConfig` is.
 pub type DynLiveInventory = Arc<dyn LiveInventory>;
@@ -128,7 +130,39 @@ pub trait LiveInventory: Send + Sync {
     /// can always produce.
     async fn remove(&self, id: &str) -> Result<Removed, InventoryRefusal>;
 
-    /// Render the running fleet as a devices document.
+    /// Add a device group that does not exist yet.
+    ///
+    /// Every member must name a device that exists, and the id must be free in
+    /// the namespace devices and groups share. Both are the config layer's
+    /// rules, enforced by the same function that enforces them for the file.
+    async fn add_group(&self, group: GroupWrite) -> Result<GroupSummary, InventoryRefusal>;
+
+    /// Replace the group at `id` wholesale.
+    ///
+    /// The same replace-not-merge contract [`replace`](Self::replace) has, and
+    /// the one that matters most here: a body stating `devices` replaces the
+    /// membership entirely rather than adding to it, so removing a member is
+    /// sending the list without it.
+    async fn replace_group(
+        &self,
+        id: &str,
+        group: GroupWrite,
+    ) -> Result<GroupSummary, InventoryRefusal>;
+
+    /// Remove the group at `id`.
+    ///
+    /// Unlike removing a device this strands nothing: a group owns no queue of
+    /// its own — writes addressed to one are expanded into per-device rows at
+    /// submission — so the members keep whatever was accepted for them and it
+    /// still dispatches. What goes with the group is the record of what it was
+    /// last told, which is a statement about a group that no longer exists.
+    ///
+    /// This is also what makes a device removal's refusal actionable: a device
+    /// a group still names is refused, and this is the route that clears the
+    /// way.
+    async fn remove_group(&self, id: &str) -> Result<(), InventoryRefusal>;
+
+    /// Render the running configuration as a devices document.
     ///
     /// Text rather than a DTO, because the artifact *is* text: what makes this
     /// route useful is that its output can be saved under the right extension

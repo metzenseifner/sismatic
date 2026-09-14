@@ -22,9 +22,9 @@
 //!
 //! Alongside the write side it runs [`SisKeepalive`], core's keep-warm
 //! supervisor, which opens and holds a connection to every device the devices
-//! file marks `eager`. Without it those settings resolve into [`Resolved`] and
-//! are then read by nobody, and the first poll of every field races to open the
-//! same connection.
+//! file marks `eager`. Without it those settings resolve out of the devices
+//! document and are then read by nobody, and the first poll of every field
+//! races to open the same connection.
 pub mod configuration;
 pub mod dynamic;
 pub mod fleet;

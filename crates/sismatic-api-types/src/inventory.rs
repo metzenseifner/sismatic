@@ -25,7 +25,8 @@
 
 use serde::Deserialize;
 
-use crate::FieldName;
+use crate::write::Barrier;
+use crate::{DeviceId, FieldName};
 
 /// A device as a caller states it, for `POST /v1/inventory/devices` and
 /// `PUT /v1/inventory/devices/{id}`.
@@ -122,6 +123,53 @@ impl std::fmt::Debug for DeviceWrite {
             .field("disabled_fields", &self.disabled_fields)
             .finish_non_exhaustive()
     }
+}
+
+/// A device group as a caller states it, for `POST /v1/inventory/groups` and
+/// `PUT /v1/inventory/groups/{id}`.
+///
+/// The writable mirror of the devices file's `[[group]]` table. A group is only
+/// a name over devices plus a policy for what happens when they cannot act
+/// together — there is nothing else to state, which is why this is four keys
+/// where [`DeviceWrite`] is fourteen.
+///
+/// Every member must name a device that exists. A group is refused otherwise
+/// rather than created empty and filled in later: a group whose members are
+/// unresolvable is one a write can be addressed to and never dispatched from.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GroupWrite {
+    /// The id this group is addressed by. Shares one namespace with device ids,
+    /// so a group may not take an id a device already has.
+    ///
+    /// Absent on a `PUT`, where the URL already names it; stating it there and
+    /// disagreeing with the path is refused rather than silently resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "atrium-room"))]
+    pub id: Option<String>,
+    /// The member device ids, in the order the group should address them.
+    ///
+    /// Order is preserved rather than sorted: an operator writes `[atrium,
+    /// annex]` deliberately, and the read routes promise that sequence back.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub devices: Vec<DeviceId>,
+    /// How long a group write waits for every member to reach the head of its
+    /// queue. Omitted means the server derives it from the slowest member's
+    /// connect plus exchange timeouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 15))]
+    pub barrier_timeout_secs: Option<u64>,
+    /// What to do when that wait runs out. Omitted means `fail_batch`.
+    ///
+    /// The same [`Barrier`] the read routes report, spelled the same way the
+    /// devices file spells it — the three agree, so a group moves between the
+    /// file, a `PUT` and a `GET` without anyone translating. A typed enum rather
+    /// than a string, so an unaccepted value is refused by the extractor with
+    /// the accepted ones named, before any handler runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub barrier: Option<Barrier>,
 }
 
 /// What a `DELETE /v1/inventory/devices/{id}` did.

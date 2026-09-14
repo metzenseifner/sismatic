@@ -217,7 +217,7 @@ async fn the_read_routes_still_answer_on_the_same_paths() {
 async fn exporting_serves_the_document_with_a_loadable_filename() {
     let (address, inventory) = harness::spawn_with_inventory(harness::StatedInventory::default());
 
-    let response = reqwest::get(format!("{address}/v1/inventory/devices/export"))
+    let response = reqwest::get(format!("{address}/v1/inventory/config/export"))
         .await
         .expect("issuing the request");
 
@@ -247,7 +247,7 @@ async fn the_export_switches_reach_the_port() {
     let (address, inventory) = harness::spawn_with_inventory(harness::StatedInventory::default());
 
     let response = reqwest::get(format!(
-        "{address}/v1/inventory/devices/export\
+        "{address}/v1/inventory/config/export\
          ?format=json&promote_auto_disabled_fields_to_disabled_fields=true&include_secrets=true"
     ))
     .await
@@ -266,14 +266,16 @@ async fn the_export_switches_reach_the_port() {
     assert_eq!(inventory.calls(), ["export Json promote=true secrets=true"]);
 }
 
-/// `export` is a literal path segment, and it is registered before
-/// `/devices/{id}` so the parameterized route cannot swallow it. Without that
-/// ordering this request reads a device named "export".
+/// Export lives under `/config`, not `/devices`, because it renders the whole
+/// document — defaults, devices *and* groups. Under `/devices` it would also
+/// have had to out-rank `/devices/{id}`, which is a second reason the scope was
+/// wrong: a route whose correctness depends on registration order against an
+/// unrelated one is a route in the wrong place.
 #[tokio::test]
 async fn the_export_path_is_not_captured_as_a_device_id() {
     let (address, inventory) = harness::spawn_with_inventory(harness::StatedInventory::default());
 
-    let response = reqwest::get(format!("{address}/v1/inventory/devices/export"))
+    let response = reqwest::get(format!("{address}/v1/inventory/config/export"))
         .await
         .expect("issuing the request");
 
@@ -294,7 +296,7 @@ async fn the_export_path_is_not_captured_as_a_device_id() {
 async fn an_unknown_export_format_is_a_400() {
     let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::default());
 
-    let response = reqwest::get(format!("{address}/v1/inventory/devices/export?format=xml"))
+    let response = reqwest::get(format!("{address}/v1/inventory/config/export?format=xml"))
         .await
         .expect("issuing the request");
 
@@ -306,7 +308,8 @@ async fn resetting_reports_the_fleet_it_ended_with() {
     let (address, inventory) =
         harness::spawn_with_inventory(harness::StatedInventory::with(&["a", "b"]));
 
-    let (status, _, body) = crate::send(&address, reqwest::Method::POST, "/reset", None).await;
+    let (status, _, body) =
+        crate::send(&address, reqwest::Method::POST, "/config/reset", None).await;
 
     assert_eq!(status, 200);
     let ids: Vec<&str> = body["devices"]
@@ -317,4 +320,199 @@ async fn resetting_reports_the_fleet_it_ended_with() {
         .collect();
     assert_eq!(ids, ["a", "b"], "the fleet as the index now reports it");
     assert_eq!(inventory.calls(), ["reset"]);
+}
+
+// ---- groups ------------------------------------------------------------
+
+#[tokio::test]
+async fn adding_a_group_answers_201_with_its_detail_route() {
+    let (address, inventory) =
+        harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium", "annex"]));
+
+    let (status, location, body) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"id": "atrium-room", "devices": ["atrium", "annex"]}),
+    )
+    .await;
+
+    assert_eq!(status, 201);
+    assert_eq!(
+        location.as_deref(),
+        Some("/v1/inventory/groups/atrium-room")
+    );
+    assert_eq!(body["id"], "atrium-room");
+    // Member order is the operator's, not sorted: a group written
+    // `[atrium, annex]` addresses them in that sequence.
+    assert_eq!(
+        body["members"].as_array().expect("members"),
+        &vec![serde_json::json!("atrium"), serde_json::json!("annex")]
+    );
+    assert_eq!(inventory.calls(), ["add_group atrium-room"]);
+}
+
+/// A group id shares one namespace with device ids, so taking a device's id is
+/// a conflict rather than a new group.
+#[tokio::test]
+async fn a_group_taking_a_device_id_is_a_409() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium"]));
+
+    let (status, _, body) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"id": "atrium", "devices": ["atrium"]}),
+    )
+    .await;
+
+    assert_eq!(status, 409);
+    assert_eq!(body["code"], "conflict");
+}
+
+#[tokio::test]
+async fn adding_a_group_without_an_id_is_a_400() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium"]));
+
+    let (status, _, _) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"devices": ["atrium"]}),
+    )
+    .await;
+
+    assert_eq!(status, 400);
+}
+
+/// Replacing states the membership in full. There is no "add a member" verb,
+/// because there is no partial update — the same contract the device route has.
+#[tokio::test]
+async fn replacing_a_group_replaces_its_membership_wholesale() {
+    let (address, inventory) = harness::spawn_with_inventory(
+        harness::StatedInventory::with_groups(&["atrium", "annex"], &["atrium-room"]),
+    );
+
+    let (status, _, body) = put(
+        &address,
+        "/groups/atrium-room",
+        serde_json::json!({"devices": ["atrium"]}),
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["members"].as_array().expect("members"),
+        &vec![serde_json::json!("atrium")],
+        "the list sent is the list kept"
+    );
+    assert_eq!(inventory.calls(), ["replace_group atrium-room"]);
+}
+
+#[tokio::test]
+async fn replacing_a_group_that_does_not_exist_is_a_404() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::default());
+
+    let (status, _, body) = put(
+        &address,
+        "/groups/ghost",
+        serde_json::json!({"devices": []}),
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "unknown_device");
+}
+
+/// No body: unlike a device removal there is nothing that went with it worth
+/// counting, because a group owns no queue.
+#[tokio::test]
+async fn removing_a_group_answers_204() {
+    let (address, inventory) = harness::spawn_with_inventory(
+        harness::StatedInventory::with_groups(&["atrium"], &["atrium-room"]),
+    );
+
+    let response = reqwest::Client::new()
+        .delete(format!("{address}/v1/inventory/groups/atrium-room"))
+        .send()
+        .await
+        .expect("issuing the request");
+
+    assert_eq!(response.status().as_u16(), 204);
+    assert!(response.bytes().await.expect("body").is_empty());
+    assert_eq!(inventory.calls(), ["remove_group atrium-room"]);
+}
+
+#[tokio::test]
+async fn removing_a_group_that_does_not_exist_is_a_404() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::default());
+
+    let (status, _, body) = delete(&address, "/groups/ghost").await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["code"], "unknown_device");
+}
+
+/// The group read routes still answer on the same paths, so registering three
+/// verbs on one resource did not shadow the first.
+#[tokio::test]
+async fn the_group_read_routes_still_answer() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::default());
+
+    let (status, _) = crate::get(&address, "/groups").await;
+    assert_eq!(status, 200);
+}
+
+/// The barrier is a typed enum, so an unaccepted policy is refused by the
+/// extractor — with the accepted ones named, in the error envelope, before any
+/// handler runs.
+///
+/// The spellings are `snake_case` and are the devices file's too, so a group
+/// moves between the file, a `PUT` and a `GET` without anyone translating.
+#[tokio::test]
+async fn an_unaccepted_barrier_policy_is_a_400() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium"]));
+
+    let (status, _, body) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"id": "room", "devices": ["atrium"], "barrier": "failed"}),
+    )
+    .await;
+
+    assert_eq!(status, 400);
+    assert_eq!(body["code"], "bad_request");
+    let message = body["error"].as_str().expect("error");
+    assert!(
+        message.contains("fail_batch") && message.contains("dispatch_ready"),
+        "the refusal should name the accepted policies: {message}"
+    );
+}
+
+/// The kebab-case spelling the devices file used to accept is not a policy any
+/// more. Pinned so the change is a decision rather than something that quietly
+/// half-happened.
+#[tokio::test]
+async fn the_old_kebab_case_barrier_spelling_is_refused() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium"]));
+
+    let (status, _, _) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"id": "room", "devices": ["atrium"], "barrier": "dispatch-ready"}),
+    )
+    .await;
+
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_snake_case_barrier_policy_is_accepted() {
+    let (address, _) = harness::spawn_with_inventory(harness::StatedInventory::with(&["atrium"]));
+
+    let (status, _, _) = post(
+        &address,
+        "/groups",
+        serde_json::json!({"id": "room", "devices": ["atrium"], "barrier": "dispatch_ready"}),
+    )
+    .await;
+
+    assert_eq!(status, 201);
 }

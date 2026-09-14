@@ -67,7 +67,7 @@
 //! id = "room-5"
 //! devices = ["atrium-101", "annex-far"]
 //! barrier_timeout_secs = 15   # default: the slowest member's connect + exchange
-//! barrier = "fail"            # "fail" | "dispatch-ready"; default "fail"
+//! barrier = "fail_batch"      # "fail_batch" | "dispatch_ready"; default "fail_batch"
 //! ```
 //!
 //! The two barrier keys describe what happens when a command addressed to the
@@ -962,23 +962,33 @@ pub struct RawGroup {
 
 /// The barrier policy as spelled in a config file.
 ///
-/// A separate type from [`Barrier`] so the wire spellings (`"fail"`,
-/// `"dispatch-ready"`) live next to the parser rather than being imposed on the
-/// domain enum by a `#[serde(rename)]`. `deny_unknown_fields` has no equivalent
-/// for an enum, so a misspelling is caught by there being no variant to match —
-/// `barrier = "failed"` is a parse error naming the value, not a silent
-/// fallback to the default.
+/// A separate type from [`Barrier`] so the accepted spellings live next to the
+/// parser rather than being imposed on the domain enum by a `#[serde(rename)]`.
+/// `deny_unknown_fields` has no equivalent for an enum, so a misspelling is
+/// caught by there being no variant to match — `barrier = "failed"` is a parse
+/// error naming the value, not a silent fallback to the default.
+///
+/// `snake_case`, matching `sismatic_api_types::Barrier` exactly — same variant
+/// names, same spellings. That agreement is worth having rather than
+/// coincidental: a group moves between this file and
+/// `PUT /v1/inventory/groups/{id}` without anyone translating, and the two enums
+/// cannot drift into spelling one policy two ways.
+///
+/// It was `kebab-case` with a `Fail` variant, which spelled the same policy
+/// three ways across the system (`fail`, `fail_batch`, `FailBatch`). A devices
+/// file written against that will now fail to load, loudly, naming the value —
+/// which is the good kind of breaking.
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum RawBarrier {
-    Fail,
+    FailBatch,
     DispatchReady,
 }
 
 impl From<RawBarrier> for Barrier {
     fn from(raw: RawBarrier) -> Self {
         match raw {
-            RawBarrier::Fail => Barrier::FailBatch,
+            RawBarrier::FailBatch => Barrier::FailBatch,
             RawBarrier::DispatchReady => Barrier::DispatchReady,
         }
     }
@@ -1418,8 +1428,8 @@ devices = ["room-5-front", "room-5-back"]
     #[test]
     fn both_barrier_policies_parse_from_their_wire_spellings() {
         for (written, expected) in [
-            ("fail", Barrier::FailBatch),
-            ("dispatch-ready", Barrier::DispatchReady),
+            ("fail_batch", Barrier::FailBatch),
+            ("dispatch_ready", Barrier::DispatchReady),
         ] {
             let text = format!("{GROUP_EXAMPLE}barrier = \"{written}\"\n");
             assert_eq!(from_toml_str(&text).unwrap().groups[0].barrier, expected);

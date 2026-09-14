@@ -88,7 +88,7 @@ pub use group::{
     MemberDesiredRecordingState, MemberHistory, MemberState, MemberWrites,
 };
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
-pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, Removed};
+pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, GroupWrite, Removed};
 pub use read::{
     DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
 };

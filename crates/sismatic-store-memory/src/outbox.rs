@@ -526,6 +526,31 @@ impl MemoryOutbox {
             .collect()
     }
 
+    /// Forget what `device_group` was last told, and report how many field
+    /// expectations went.
+    ///
+    /// For a group leaving the fleet. Deliberately *not* a cancellation: a group
+    /// owns no queue — a group-addressed write is expanded into per-device rows
+    /// at submission, and those are owed to devices that still exist — so what
+    /// is removed is only the record of what the group was asked for, which is
+    /// a statement about something that no longer exists.
+    ///
+    /// Any batch already armed is left alone for the same reason. Its members
+    /// are devices, its rendezvous is between their queues, and it completes or
+    /// times out on the barrier policy it was armed with. The group's departure
+    /// does not make a recording that was already asked for wrong.
+    ///
+    /// Inherent rather than on a port, for the reason
+    /// [`cancel_queued`](Self::cancel_queued) is: the relay must not be able to
+    /// do this, and the composition root is holding this adapter already.
+    pub fn forget_group(&self, device_group: &str) -> u64 {
+        let mut state = self.state();
+        state
+            .groups
+            .remove(device_group)
+            .map_or(0, |fields| fields.len() as u64)
+    }
+
     /// Cancel every write still queued for `device`, and report how many went.
     ///
     /// For a device leaving the fleet. Nothing is left pending against an id no

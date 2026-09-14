@@ -43,10 +43,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use sismatic_api_types::{DeviceSummary, DeviceWrite, ExportFormat, ExportQuery, Removed};
+use sismatic_api_types::{
+    Barrier as ApiBarrier, DeviceSummary, DeviceWrite, ExportFormat, ExportQuery, GroupSummary,
+    GroupWrite, Removed,
+};
 use sismatic_core::devices::config::{
-    Barrier, ConfigError, Defaults, DeviceConfig, GroupConfig, Password, RawConfig, RawDevice,
-    Resolved, load_raw, resolve_config,
+    Barrier, ConfigError, Defaults, DeviceConfig, GroupConfig, Password, RawBarrier, RawConfig,
+    RawDevice, RawGroup, Resolved, load_raw, resolve_config,
 };
 use sismatic_core::devices::registry::{Registry, RegistryChange};
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
@@ -217,7 +220,7 @@ impl LiveFleet {
     /// which is the same whole-or-nothing contract `patched` gives settings.
     fn amend(
         &self,
-        edit: impl FnOnce(&mut Vec<RawDevice>) -> Result<(), InventoryRefusal>,
+        edit: impl FnOnce(&mut RawConfig) -> Result<(), InventoryRefusal>,
     ) -> Result<Resolved, InventoryRefusal> {
         let mut document = self
             .document
@@ -225,23 +228,38 @@ impl LiveFleet {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Against a copy, so a resolution failure cannot leave the document
-        // describing a fleet that was never applied.
-        let mut devices = document.devices.clone();
-        edit(&mut devices)?;
-
-        let amended = RawConfig {
-            defaults: document.defaults.clone(),
-            devices,
-            groups: document.groups.clone(),
-        };
+        // describing a fleet that was never applied. The whole document rather
+        // than its device list, because a group is part of it and an edit to
+        // either has to be validated against the other: a group naming a device
+        // that is being removed in the same breath is a contradiction only
+        // `resolve_config` can see.
+        let mut amended = document.clone();
+        edit(&mut amended)?;
+        // Kept before `resolve_config` consumes the document.
+        let amended_groups = amended.groups.clone();
         let resolved = resolve_config(amended).map_err(refusal_of)?;
 
-        // Rebuild from the amended list, which resolution has now vouched for.
+        // Devices are projected back from the *resolved* set, with every key
+        // stated: a device added through the API resolved against the
+        // `[defaults]` of the moment, and leaving its keys blank would let a
+        // later edit to those defaults silently re-resolve it into a different
+        // device.
         document.devices = resolved
             .devices
             .iter()
             .map(|device| raw_of(device, &document.defaults))
             .collect();
+
+        // Groups are kept exactly as the edit left them, and are deliberately
+        // *not* projected back from the resolved set. A `GroupConfig` cannot be
+        // turned back into the raw form without losing something in one
+        // direction or the other: `barrier_timeout` is always `Some` there, so
+        // writing it back pins a value the operator may have left to the
+        // members, and writing `None` back discards one they may have stated.
+        // The raw form is the only thing that knows which, and nothing about a
+        // group inherits from `[defaults]` — so unlike a device there is nothing
+        // the projection would have bought.
+        document.groups = amended_groups;
 
         self.catalog.replace(
             resolved.devices.iter().map(summarize).collect(),
@@ -301,6 +319,18 @@ impl LiveFleet {
         self.generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
         change
+    }
+
+    /// The group summary the inventory routes serve for `id`, after a change.
+    fn group_summary_of(resolved: &Resolved, id: &str) -> Result<GroupSummary, InventoryRefusal> {
+        resolved
+            .groups
+            .iter()
+            .find(|group| group.id == id)
+            .map(summarize_group)
+            .ok_or_else(|| {
+                InventoryRefusal::Malformed(format!("group '{id}' was not in the applied fleet"))
+            })
     }
 
     /// The summary the inventory routes serve for `id`, after a change.
@@ -373,6 +403,28 @@ fn raw_of(config: &DeviceConfig, _defaults: &Defaults) -> RawDevice {
     }
 }
 
+/// Turn a caller's [`GroupWrite`] into the raw group the config layer resolves.
+///
+/// Infallible now that the barrier is typed: an unaccepted policy is refused by
+/// the JSON extractor, with the accepted ones named, before this is reached. It
+/// used to take a string and parse it here, which meant the same misspelling was
+/// a `400` from the config file's parser and a hand-written message from this
+/// one.
+///
+/// The match is wildcard-free, so a third policy is a build error at this seam —
+/// the same drift sentinel `summarize_group` uses for the other direction.
+fn raw_of_group_write(id: String, write: GroupWrite) -> RawGroup {
+    RawGroup {
+        id,
+        devices: write.devices,
+        barrier_timeout_secs: write.barrier_timeout_secs,
+        barrier: write.barrier.map(|barrier| match barrier {
+            ApiBarrier::FailBatch => RawBarrier::FailBatch,
+            ApiBarrier::DispatchReady => RawBarrier::DispatchReady,
+        }),
+    }
+}
+
 /// Turn a caller's [`DeviceWrite`] into the raw device the config layer
 /// resolves.
 ///
@@ -412,8 +464,8 @@ impl LiveInventory for LiveFleet {
         // No "does it exist" check: appending a duplicate id is exactly what
         // `resolve_config` refuses, and letting it do so keeps one rule in one
         // place. `refusal_of` turns that into the `409` a caller expects.
-        let resolved = self.amend(move |devices| {
-            devices.push(raw);
+        let resolved = self.amend(move |document| {
+            document.devices.push(raw);
             Ok(())
         })?;
         info!(device = %id, "a device was added to the running fleet");
@@ -436,8 +488,9 @@ impl LiveInventory for LiveFleet {
         let raw = raw_of_write(id.to_owned(), write);
         let target = id.to_owned();
 
-        let resolved = self.amend(move |devices| {
-            let slot = devices
+        let resolved = self.amend(move |document| {
+            let slot = document
+                .devices
                 .iter_mut()
                 .find(|device| device.id == target)
                 .ok_or_else(|| {
@@ -463,10 +516,10 @@ impl LiveInventory for LiveFleet {
         // A group that still names it is refused *here*, by `resolve_config`,
         // before anything has been cancelled — which is why the refusal path
         // leaves no trace.
-        self.amend(move |devices| {
-            let before = devices.len();
-            devices.retain(|device| device.id != target);
-            if devices.len() == before {
+        self.amend(move |document| {
+            let before = document.devices.len();
+            document.devices.retain(|device| device.id != target);
+            if document.devices.len() == before {
                 return Err(InventoryRefusal::Unknown(format!(
                     "no device '{target}' is configured"
                 )));
@@ -498,6 +551,84 @@ impl LiveInventory for LiveFleet {
             writes_canceled,
             reads_dropped,
         })
+    }
+
+    async fn add_group(&self, write: GroupWrite) -> Result<GroupSummary, InventoryRefusal> {
+        let id = write.id.clone().ok_or_else(|| {
+            InventoryRefusal::Malformed(
+                "an added group must state an `id`; the URL does not name one".to_owned(),
+            )
+        })?;
+        let raw = raw_of_group_write(id.clone(), write);
+
+        // No existence check: a duplicate id, an empty member list and a member
+        // that names no device are all `resolve_config`'s to refuse, and letting
+        // it refuse them keeps one rule in one place.
+        let resolved = self.amend(move |document| {
+            document.groups.push(raw);
+            Ok(())
+        })?;
+        info!(group = %id, "a group was added to the running fleet");
+        Self::group_summary_of(&resolved, &id)
+    }
+
+    async fn replace_group(
+        &self,
+        id: &str,
+        write: GroupWrite,
+    ) -> Result<GroupSummary, InventoryRefusal> {
+        if let Some(stated) = &write.id
+            && stated != id
+        {
+            return Err(InventoryRefusal::Malformed(format!(
+                "the body names group '{stated}' and the path names '{id}'; a replace states \
+                 the id once"
+            )));
+        }
+        let raw = raw_of_group_write(id.to_owned(), write);
+        let target = id.to_owned();
+
+        let resolved = self.amend(move |document| {
+            let slot = document
+                .groups
+                .iter_mut()
+                .find(|group| group.id == target)
+                .ok_or_else(|| {
+                    InventoryRefusal::Unknown(format!("no group '{target}' is configured"))
+                })?;
+            *slot = raw;
+            Ok(())
+        })?;
+        info!(group = %id, "a group was replaced in the running fleet");
+        Self::group_summary_of(&resolved, id)
+    }
+
+    async fn remove_group(&self, id: &str) -> Result<(), InventoryRefusal> {
+        let target = id.to_owned();
+
+        self.amend(move |document| {
+            let before = document.groups.len();
+            document.groups.retain(|group| group.id != target);
+            if document.groups.len() == before {
+                return Err(InventoryRefusal::Unknown(format!(
+                    "no group '{target}' is configured"
+                )));
+            }
+            Ok(())
+        })?;
+
+        // Nothing to cancel: a group owns no queue. A write addressed to one is
+        // expanded into per-device rows at submission, so what is owed is owed
+        // to devices that still exist and still dispatches. What does go is the
+        // record of what this group was last told, which is a claim about
+        // something that no longer exists.
+        let forgotten = self.outbox.forget_group(id);
+        info!(
+            group = %id,
+            expectations = forgotten,
+            "a group was removed from the running fleet"
+        );
+        Ok(())
     }
 
     async fn export(&self, query: &ExportQuery) -> Result<String, InventoryRefusal> {
@@ -815,9 +946,12 @@ fn render(
                 devices: group.device_ids.clone(),
                 barrier_timeout_secs: group.barrier_timeout.as_secs(),
                 // The file's spellings, not the enum's: an export has to load.
+                // The file's spellings, which are also the wire's — see
+                // `RawBarrier`. An export has to load, and now it also reads the
+                // same as the `PUT` that would have produced the group.
                 barrier: match group.barrier {
-                    Barrier::FailBatch => "fail",
-                    Barrier::DispatchReady => "dispatch-ready",
+                    Barrier::FailBatch => "fail_batch",
+                    Barrier::DispatchReady => "dispatch_ready",
                 },
             })
             .collect(),
@@ -1286,6 +1420,213 @@ mod tests {
         }
     }
 
+    // ---- group verbs -----------------------------------------------------
+
+    fn group_write(id: Option<&str>, members: &[&str]) -> GroupWrite {
+        GroupWrite {
+            id: id.map(ToOwned::to_owned),
+            devices: members.iter().map(|m| (*m).to_owned()).collect(),
+            barrier_timeout_secs: None,
+            barrier: None,
+        }
+    }
+
+    /// A group resolves against the devices that exist, and its derived barrier
+    /// timeout comes from the slowest member — which is the one value a caller
+    /// gets back that it did not send.
+    #[tokio::test]
+    async fn an_added_group_resolves_over_the_running_devices() {
+        let (fleet, ..) = live(&["atrium", "annex"], false);
+
+        let summary = fleet
+            .add_group(group_write(Some("atrium-room"), &["atrium", "annex"]))
+            .await
+            .expect("the group");
+
+        assert_eq!(summary.id, "atrium-room");
+        assert_eq!(summary.members, ["atrium", "annex"]);
+        assert!(summary.barrier_timeout_secs > 0, "derived from the members");
+        assert!(fleet.registry().group("atrium-room").is_some());
+    }
+
+    /// A member naming no device is refused — by `resolve_config`, which is the
+    /// same rule the devices file is held to.
+    #[tokio::test]
+    async fn a_group_naming_an_unknown_device_is_refused() {
+        let (fleet, ..) = live(&["atrium"], false);
+
+        let refusal = fleet
+            .add_group(group_write(Some("room"), &["atrium", "nobody"]))
+            .await
+            .expect_err("an unresolvable member");
+
+        assert!(
+            matches!(refusal, InventoryRefusal::Blocked(_)),
+            "{refusal:?}"
+        );
+        assert!(fleet.registry().group("room").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_empty_group_is_refused() {
+        let (fleet, ..) = live(&["atrium"], false);
+        let refusal = fleet
+            .add_group(group_write(Some("room"), &[]))
+            .await
+            .expect_err("a group addressing nothing");
+        assert!(
+            matches!(refusal, InventoryRefusal::Malformed(_)),
+            "{refusal:?}"
+        );
+    }
+
+    /// The stated policy survives into the registry, which is what the outbox
+    /// arms a batch's barrier from — and survives a later unrelated edit, which
+    /// is what keeping the raw group as written is for.
+    ///
+    /// A *misspelled* policy has no test here and cannot have one: the barrier
+    /// is a typed enum, so an unaccepted value is refused by the JSON extractor
+    /// before any of this is reached. That refusal is asserted in the HTTP
+    /// suite, which is where it now happens.
+    #[tokio::test]
+    async fn a_stated_barrier_policy_survives_a_later_edit() {
+        let (fleet, ..) = live(&["atrium"], false);
+
+        let summary = fleet
+            .add_group(GroupWrite {
+                barrier: Some(ApiBarrier::DispatchReady),
+                ..group_write(Some("room"), &["atrium"])
+            })
+            .await
+            .expect("the group");
+        assert_eq!(summary.barrier, ApiBarrier::DispatchReady);
+
+        // An edit that does not mention this group at all.
+        fleet
+            .add_group(group_write(Some("other"), &["atrium"]))
+            .await
+            .expect("a second group");
+
+        assert_eq!(
+            fleet
+                .registry()
+                .group("room")
+                .map(|_| ())
+                .expect("still configured"),
+            (),
+        );
+        assert!(
+            matches!(
+                fleet.export(&export_query(ExportFormat::Toml)).await,
+                Ok(ref doc) if doc.contains("dispatch_ready")
+            ),
+            "the policy must not have reverted to the default"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_group_replaces_its_membership() {
+        let (fleet, ..) = live(&["atrium", "annex"], false);
+        fleet
+            .add_group(group_write(Some("room"), &["atrium", "annex"]))
+            .await
+            .expect("the group");
+
+        let summary = fleet
+            .replace_group("room", group_write(None, &["atrium"]))
+            .await
+            .expect("the replacement");
+
+        assert_eq!(summary.members, ["atrium"]);
+        assert_eq!(
+            fleet.registry().group("room").expect("still there").len(),
+            1,
+            "the registry's group must address the new membership"
+        );
+    }
+
+    /// A group owns no queue, so removing one strands nothing — but it does
+    /// forget what the group was last told, which is a claim about something
+    /// that no longer exists.
+    #[tokio::test]
+    async fn removing_a_group_leaves_its_members_alone() {
+        let (fleet, outbox, _) = live(&["atrium", "annex"], false);
+        fleet
+            .add_group(group_write(Some("room"), &["atrium", "annex"]))
+            .await
+            .expect("the group");
+        queue_a_write(&outbox, "atrium", "owed").await;
+
+        fleet.remove_group("room").await.expect("the removal");
+
+        assert!(fleet.registry().group("room").is_none());
+        assert!(
+            fleet.registry().device("atrium").is_some(),
+            "a group is a name over devices, not an owner of them"
+        );
+        let owed = outbox.write("owed".to_owned()).await.unwrap().unwrap();
+        assert_eq!(
+            owed.status,
+            WriteStatus::Pending,
+            "what was owed to a device is still owed to it"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_group_that_does_not_exist_is_unknown() {
+        let (fleet, ..) = live(&["atrium"], false);
+        let refusal = fleet
+            .remove_group("ghost")
+            .await
+            .expect_err("no such group");
+        assert!(
+            matches!(refusal, InventoryRefusal::Unknown(_)),
+            "{refusal:?}"
+        );
+    }
+
+    /// The pair that makes device removal usable: a member cannot be removed
+    /// while the group holds it, and removing the group is what clears the way.
+    #[tokio::test]
+    async fn removing_a_group_unblocks_removing_its_members() {
+        let (fleet, ..) = live(&["atrium", "annex"], false);
+        fleet
+            .add_group(group_write(Some("room"), &["atrium", "annex"]))
+            .await
+            .expect("the group");
+
+        let blocked = fleet
+            .remove("atrium")
+            .await
+            .expect_err("the group holds it");
+        assert!(
+            matches!(blocked, InventoryRefusal::Blocked(_)),
+            "{blocked:?}"
+        );
+
+        fleet.remove_group("room").await.expect("the group removal");
+        fleet
+            .remove("atrium")
+            .await
+            .expect("with the group gone, the device may go");
+        assert!(fleet.registry().device("atrium").is_none());
+    }
+
+    /// Groups reach subscribers too — the registry rebuilds every group over
+    /// the current device handles, so a group change is a fleet change.
+    #[tokio::test]
+    async fn a_group_change_wakes_the_subscribers() {
+        let (fleet, ..) = live(&["atrium"], false);
+        let watcher = fleet.subscribe();
+
+        fleet
+            .add_group(group_write(Some("room"), &["atrium"]))
+            .await
+            .expect("the group");
+
+        assert!(watcher.has_changed().expect("the sender is alive"));
+    }
+
     // ---- export ----------------------------------------------------------
 
     fn export_query(format: ExportFormat) -> ExportQuery {
@@ -1331,6 +1672,46 @@ mod tests {
                 .uuid,
             before,
             "an exported device must resolve back to the same device"
+        );
+    }
+
+    /// The correction this route exists for: an export is the whole *document*,
+    /// not the device list. A group left out would load back as a fleet whose
+    /// members can no longer act together — the same ids, and a different
+    /// system.
+    #[tokio::test]
+    async fn an_export_carries_groups_as_well_as_devices() {
+        let (fleet, ..) = live(&["atrium", "annex"], false);
+        fleet
+            .add_group(GroupWrite {
+                barrier: Some(ApiBarrier::DispatchReady),
+                ..group_write(Some("atrium-room"), &["atrium", "annex"])
+            })
+            .await
+            .expect("the group");
+
+        let exported = fleet
+            .export(&ExportQuery {
+                include_secrets: true,
+                ..export_query(ExportFormat::Toml)
+            })
+            .await
+            .expect("the export");
+
+        let reloaded = sismatic_core::devices::config::from_toml_str(&exported)
+            .expect("an export must be a loadable devices file");
+        assert_eq!(reloaded.groups.len(), 1, "{exported}");
+        let group = &reloaded.groups[0];
+        assert_eq!(group.id, "atrium-room");
+        assert_eq!(
+            group.device_ids,
+            ["atrium", "annex"],
+            "member order is the operator's and must survive the round trip"
+        );
+        assert_eq!(
+            group.barrier,
+            Barrier::DispatchReady,
+            "the policy has to survive too, or the fleet behaves differently on reload"
         );
     }
 

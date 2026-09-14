@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{
     AutoDisabledField, Barrier, ConfigDocument, ConfigPatch, ConnectionStatus, DeviceSummary,
-    DeviceWrite, ExportQuery, FieldCatalog, FieldSettings, GroupSummary, HttpSettings,
+    DeviceWrite, ExportQuery, FieldCatalog, FieldSettings, GroupSummary, GroupWrite, HttpSettings,
     InstructionSummary, RelaySettings, Removed, StoreSettings, SyncSettings, Timestamp,
     WritesCatalog,
 };
@@ -570,6 +570,8 @@ pub struct StatedInventory {
     pub known: Vec<String>,
     /// Ids a group still holds, which removal refuses.
     pub held: Vec<String>,
+    /// Group ids this double claims exist.
+    pub groups: Vec<String>,
     /// What the last mutation was asked to do, for a test that cares the port
     /// was reached at all.
     pub calls: Arc<std::sync::Mutex<Vec<String>>>,
@@ -597,6 +599,23 @@ impl StatedInventory {
 
     fn record(&self, call: &str) {
         self.calls.lock().expect("lock").push(call.to_owned());
+    }
+
+    /// `with`, plus group ids this double claims exist.
+    pub fn with_groups(known: &[&str], groups: &[&str]) -> Self {
+        Self {
+            groups: groups.iter().map(|id| (*id).to_owned()).collect(),
+            ..Self::with(known)
+        }
+    }
+
+    fn group_summary(id: &str, members: &[String]) -> GroupSummary {
+        GroupSummary {
+            id: id.to_owned(),
+            members: members.to_vec(),
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
+        }
     }
 
     fn summary(id: &str) -> DeviceSummary {
@@ -666,6 +685,50 @@ impl LiveInventory for StatedInventory {
             writes_canceled: 3,
             reads_dropped: None,
         })
+    }
+
+    async fn add_group(&self, group: GroupWrite) -> Result<GroupSummary, InventoryRefusal> {
+        let id = group.id.clone().ok_or_else(|| {
+            InventoryRefusal::Malformed("an added group must state an `id`".to_owned())
+        })?;
+        self.record(&format!("add_group {id}"));
+        if self.known.contains(&id) || self.groups.contains(&id) {
+            return Err(InventoryRefusal::Duplicate(format!(
+                "'{id}' already names a device or group"
+            )));
+        }
+        Ok(Self::group_summary(&id, &group.devices))
+    }
+
+    async fn replace_group(
+        &self,
+        id: &str,
+        group: GroupWrite,
+    ) -> Result<GroupSummary, InventoryRefusal> {
+        if let Some(stated) = &group.id
+            && stated != id
+        {
+            return Err(InventoryRefusal::Malformed(format!(
+                "the body names '{stated}' and the path names '{id}'"
+            )));
+        }
+        self.record(&format!("replace_group {id}"));
+        if !self.groups.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no group '{id}' is configured"
+            )));
+        }
+        Ok(Self::group_summary(id, &group.devices))
+    }
+
+    async fn remove_group(&self, id: &str) -> Result<(), InventoryRefusal> {
+        self.record(&format!("remove_group {id}"));
+        if !self.groups.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no group '{id}' is configured"
+            )));
+        }
+        Ok(())
     }
 
     async fn export(&self, query: &ExportQuery) -> Result<String, InventoryRefusal> {
