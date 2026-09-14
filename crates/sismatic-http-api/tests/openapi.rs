@@ -20,9 +20,18 @@
 //! A documented-but-unrouted path is the only way that test fails, which is
 //! precisely the drift the literals allow.
 //!
-//! It closes one direction only. A route added to `startup` and never given a
-//! `#[utoipa::path]` is invisible to a test that starts from the document — it
-//! is missing, not wrong, and nothing here will say so.
+//! That direction alone leaves a hole, and it is the one that actually bit: a
+//! handler routed in `startup` *and* carrying a `#[utoipa::path]` attribute is
+//! still absent from the document unless it is also named in `Docs`'s
+//! `paths(..)` list — a third literal nothing pairs with the other two. Seven
+//! inventory routes shipped that way, serving correctly and invisible at `/api`.
+//! [`every_attributed_handler_is_registered_in_the_document`] closes it by
+//! counting the attributes in the source against the operations in the document.
+//!
+//! What is left open is narrower: a route added to `startup` with no attribute
+//! at all. Nothing here starts from the route table, so that is still missing
+//! rather than wrong — but it is also a route nobody wrote documentation for,
+//! which is a more visible omission than one that was written and dropped.
 //!
 //! # The other place a path is written by hand: the prose
 //!
@@ -159,7 +168,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        32,
+        34,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -184,6 +193,11 @@ async fn every_documented_operation_is_one_the_server_serves() {
                 // body at all would be a 400 from the extractor, which reads
                 // exactly like a route that does not exist.
                 "patch" => client.patch(&url).json(&serde_json::json!({})),
+                // The inventory scope's removals. No body, and the stated
+                // inventory double knows the fixture device and group — so a
+                // `404` here is a routing failure and nothing else, which is
+                // the whole point of the assertion below.
+                "delete" => client.delete(&url),
                 other => panic!("{template} documents an unhandled method: {other}"),
             };
             let status = request
@@ -211,11 +225,70 @@ async fn every_documented_operation_is_one_the_server_serves() {
         }
     }
 
-    // One operation per path except `/v1/config`, which is read and written on
-    // one resource — asserted rather than assumed, because a path that gained a
-    // second method and lost it in `startup` would otherwise slip through as
-    // "32 paths, still fine".
-    assert_eq!(checked, 33, "expected every documented operation");
+    // More operations than paths, because several resources carry a verb each:
+    // `/v1/config` is read and written, and the inventory scope's two device and
+    // two group resources each carry a read plus the mutations. Asserted rather
+    // than assumed, because a path that gained a second method and lost it in
+    // `startup` would otherwise slip through as "34 paths, still fine".
+    assert_eq!(checked, 41, "expected every documented operation");
+}
+
+/// Every handler carrying a `#[utoipa::path]` attribute appears in the document.
+///
+/// The other direction, and the one the module docs above used to concede was
+/// open. [`every_documented_operation_is_one_the_server_serves`] starts from the
+/// document and checks the server answers; a handler *routed and attributed* but
+/// left out of `Docs`'s `paths(..)` list is invisible to it — the operation
+/// simply is not there to be checked, and `/api` shows an API missing routes the
+/// server serves.
+///
+/// That is not hypothetical: seven inventory routes shipped that way. utoipa
+/// requires each handler to be named in `paths(..)`, so the attribute on the
+/// handler and the entry in that list are a third pair of literals nothing pairs
+/// — the same failure mode as `path` versus `web::resource`, one level up.
+///
+/// Counted from the source rather than derived, because there is nothing to
+/// derive from: the attribute expands to a type whose only registration is the
+/// list itself. A count is enough — an attributed handler that is not registered
+/// makes the two disagree, whichever one it is.
+#[tokio::test]
+async fn every_attributed_handler_is_registered_in_the_document() {
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let documented: usize = doc["paths"]
+        .as_object()
+        .expect("paths is an object")
+        .values()
+        .map(|item| item.as_object().expect("a path item is an object").len())
+        .sum();
+
+    let handlers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/handlers");
+    let mut attributed = 0;
+    let mut files: Vec<_> = std::fs::read_dir(&handlers)
+        .expect("reading the handlers directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "no handler sources at {}",
+        handlers.display()
+    );
+
+    for file in &files {
+        let source = std::fs::read_to_string(file).expect("reading a handler source");
+        attributed += source.matches("#[utoipa::path(").count();
+    }
+
+    assert_eq!(
+        attributed, documented,
+        "{attributed} handlers carry a `#[utoipa::path]` attribute but the document \
+         describes {documented} operations; a handler is attributed and routed but \
+         missing from `Docs`'s `paths(..)` list, so `/api` does not show it"
+    );
 }
 
 /// Substitute a documented path template's parameters with data the fixtures
@@ -414,7 +487,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        31,
+        33,
         "expected every reads, group, writes and inventory route under /v1, \
          got {:?}",
         paths.keys().collect::<Vec<_>>()

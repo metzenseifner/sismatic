@@ -68,10 +68,18 @@ pub struct ConfigDocument {
     /// listener would drop every connection in flight, so a change here needs a
     /// restart.
     pub http: HttpSettings,
-    /// The devices file this server's registry was built from. Reported, not
-    /// editable, and note what that does *not* say: the file's contents are read
-    /// once at startup, so a device added to it — under this path or any other —
-    /// reaches the fleet by a restart and by nothing else.
+    /// The devices file this server's registry was built from.
+    ///
+    /// Reported, not editable: this names a file, and pointing it somewhere else
+    /// mid-run would leave the fleet described by one document and the server
+    /// persisting to another. Changing *which* file is a restart.
+    ///
+    /// Its *contents*, though, are no longer read once. A device added to this
+    /// file reaches the fleet through `POST /v1/inventory/config/reset`, which
+    /// re-reads it and adopts it wholesale — and the `/v1/inventory` scope can
+    /// change the fleet without touching the file at all. Whether such a change
+    /// outlives the process is the deployment's `inventory.state_path` to
+    /// decide; see the inventory routes.
     pub devices_config_path: String,
 }
 

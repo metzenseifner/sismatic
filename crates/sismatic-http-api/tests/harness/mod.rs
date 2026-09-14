@@ -326,7 +326,7 @@ pub fn serve_with_status(
         field_catalog(),
         writes_catalog(),
         Arc::new(StatedConfig::default()),
-        Arc::new(StatedInventory::default()),
+        Arc::new(StatedInventory::fixture()),
     )
 }
 
@@ -439,7 +439,7 @@ pub fn spawn_with_instructions(
         fields,
         writes,
         Arc::new(StatedConfig::default()),
-        Arc::new(StatedInventory::default()),
+        Arc::new(StatedInventory::fixture()),
     );
     (format!("http://127.0.0.1:{port}"), outbox)
 }
@@ -487,7 +487,7 @@ pub fn spawn_with_config(config: StatedConfig) -> (String, Arc<StatedConfig>) {
         field_catalog(),
         writes_catalog(),
         config.clone(),
-        Arc::new(StatedInventory::default()),
+        Arc::new(StatedInventory::fixture()),
     ));
     (format!("http://127.0.0.1:{port}"), config)
 }
@@ -578,6 +578,18 @@ pub struct StatedInventory {
 }
 
 impl StatedInventory {
+    /// The double that agrees with [`catalog`]: it knows the one fixture device
+    /// and the one group over it.
+    ///
+    /// The default for every suite that is not *about* the inventory port, and
+    /// seeded rather than empty for the same reason the store and the outbox
+    /// are: a double that claims the fixture device does not exist would make a
+    /// `DELETE` answer `404` for a reason that has nothing to do with routing,
+    /// which is precisely what `tests/openapi.rs` is trying to rule out.
+    pub fn fixture() -> Self {
+        Self::with_groups(&[DEVICE], &[GROUP])
+    }
+
     pub fn with(known: &[&str]) -> Self {
         Self {
             known: known.iter().map(|id| (*id).to_owned()).collect(),

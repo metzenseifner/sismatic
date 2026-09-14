@@ -29,20 +29,46 @@
 //! describing a membership the file disagrees with. Naming them under
 //! `/devices` said otherwise.
 //!
-//! # The three that change things
+//! # The six that change things
 //!
-//! The device set moves while the server runs, and these are how. They go
-//! through [`LiveInventory`], which is the composition root behind a port — the
-//! same arrangement the config scope uses, and for the same reason: applying a
-//! change means touching the registry, the poll loops, the relay's per-device
-//! tasks and the keepalive, and none of that is storage.
+//! The fleet moves while the server runs, and these are how. They go through
+//! [`LiveInventory`], which is the composition root behind a port — the same
+//! arrangement the config scope uses, and for the same reason: applying a change
+//! means touching the registry, the poll loops, the relay's per-device tasks and
+//! the keepalive, and none of that is storage.
 //!
 //! There is no `PATCH`. A device is immutable: changing any key mints a
 //! different device with a different identity and a new connection, so a body
 //! stating only a delta would describe something this system cannot represent.
 //! `PUT` therefore replaces wholesale, and an omitted key takes the server's
 //! default rather than the previous device's value — which is what makes the
-//! same request applied twice leave the same device.
+//! same request applied twice leave the same device. The group routes keep the
+//! same contract, where it bites hardest on membership: `devices` replaces the
+//! member list rather than adding to it, so removing one member means sending
+//! the list without it.
+//!
+//! # What survives a restart
+//!
+//! Stated once here, because it is the same answer for all six and it is not
+//! the obvious one.
+//!
+//! **The devices file is never written.** No route in this scope touches it; it
+//! stays the artifact a deployment reviews and version-controls, which is the
+//! contract `PATCH /v1/config` keeps for settings.
+//!
+//! Whether a change *outlives the process* is a separate question, answered by
+//! the deployment's `inventory.state_path`:
+//!
+//! * **Unset**, the default: it does not. The next startup reads the devices
+//!   file and the fleet is whatever that says.
+//! * **Set**: it does. The whole document is written to that path after every
+//!   change here, and the next startup loads *that* instead of the devices file
+//!   — which also means an edit made to the devices file meanwhile has no effect
+//!   until [`reset_config`] adopts it. The server says so at `warn!` on every
+//!   startup that loads from state.
+//!
+//! Either way [`export_config`] is how a running fleet becomes a devices file
+//! again: a state file is the server's to write, not a thing anyone reads.
 //!
 //! # Why these are not answered from the store
 //!
@@ -201,10 +227,22 @@ pub async fn read_device(
 /// fields, the relay gains a task for its queue, and if it is `eager` the
 /// keepalive opens its connection. Nothing else in the fleet is disturbed.
 ///
-/// **The change is not written to the devices file.** A restart returns to
-/// whatever the file says, which is the same contract `PATCH /v1/config` keeps
-/// for settings — the file stays the thing a deployment can put in version
-/// control. An operator who wants a device to survive a restart puts it there.
+/// **The devices file is never written**, whatever else happens — it stays the
+/// thing a deployment can put in version control, which is the same contract
+/// `PATCH /v1/config` keeps for settings.
+///
+/// Whether the change *survives a restart* is a second question, and the answer
+/// is the deployment's `inventory.state_path`:
+///
+/// * **Unset**, the default: it does not. A restart returns to whatever the
+///   devices file says. An operator who wants the device back puts it there —
+///   `GET /v1/inventory/config/export` renders the running fleet in a form the
+///   file accepts.
+/// * **Set**: it does. The whole document is written to that path after every
+///   change, and that file is what the next startup loads *instead of* the
+///   devices file. Which is worth knowing in both directions: a fleet edited
+///   here survives, and an edit made to the devices file meanwhile does not take
+///   effect until `POST /v1/inventory/config/reset` adopts it.
 #[utoipa::path(
     post,
     path = "/devices",
@@ -320,9 +358,15 @@ pub async fn remove_device(
 /// file.
 ///
 /// The answer to what a runtime-mutable fleet costs: changes made through this
-/// scope are not written to the devices file, so without this there would be no
-/// way to get them back into one. The body is text in the format asked for, and
-/// saving it under that extension produces a file the loader reads unchanged.
+/// scope never reach the devices file, so without this there would be no way to
+/// get them back into one. The body is text in the format asked for, and saving
+/// it under that extension produces a file the loader reads unchanged.
+///
+/// That holds whether or not `inventory.state_path` is set. A deployment with
+/// one persists its changes and they survive a restart — but to a *state* file,
+/// which is the server's to write and not a thing anyone edits or reviews. This
+/// route is how the running fleet becomes a devices file again: one a human
+/// reads, a repository holds, and `POST /v1/inventory/config/reset` adopts.
 ///
 /// It is the whole document — `[defaults]`, every `[[device]]` and every
 /// `[[group]]` — because that is what "loads back as the same fleet" requires.
