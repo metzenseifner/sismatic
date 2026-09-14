@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sismatic_api_types::{
     AutoDisabledField, Barrier, ConfigDocument, ConfigPatch, ConnectionStatus, DeviceSummary,
     DeviceWrite, ExportQuery, FieldCatalog, FieldSettings, GroupSummary, GroupWrite, HttpSettings,
-    InstructionSummary, RelaySettings, Removed, StoreSettings, SyncSettings, Timestamp,
-    WritesCatalog,
+    InstructionSummary, InventorySettings, RelaySettings, Removed, StoreSettings, SyncSettings,
+    Timestamp, WritesCatalog,
 };
 use sismatic_http_api::Stamp;
 use sismatic_http_api::config::{ConfigRefusal, DynLiveConfig, LiveConfig};
@@ -201,7 +201,12 @@ pub fn settings() -> ConfigDocument {
             host: "127.0.0.1".to_owned(),
             port: 8080,
         },
-        devices_config_path: "/etc/sismatic/devices.toml".to_owned(),
+        inventory: InventorySettings {
+            config_path: "/etc/sismatic/devices.toml".to_owned(),
+            // Unset, which is the default and the shape most deployments run:
+            // the devices file is authoritative and nothing is persisted.
+            runtime_config_path: None,
+        },
     }
 }
 

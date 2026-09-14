@@ -100,7 +100,7 @@ pub struct LiveFleet {
     /// Whether a removed device's recorded reads go with it.
     cleanup_on_remove: bool,
     /// The devices file, for the one operation that reads it again.
-    devices_path: PathBuf,
+    config_path: PathBuf,
     /// Where runtime changes are persisted, or `None` to keep them in memory.
     ///
     /// Unset by default, and the default is what makes the devices file
@@ -109,7 +109,7 @@ pub struct LiveFleet {
     ///
     /// Set, it becomes one — which is the point and the hazard both. See
     /// [`persist`](Self::persist).
-    state_path: Option<PathBuf>,
+    runtime_config_path: Option<PathBuf>,
 }
 
 /// Everything [`LiveFleet::new`] is built from.
@@ -130,9 +130,9 @@ pub struct Wiring {
     /// Whether a removed device's recorded reads go with it.
     pub cleanup_on_remove: bool,
     /// The devices file, for `reset`.
-    pub devices_path: PathBuf,
+    pub config_path: PathBuf,
     /// Where runtime changes are persisted, or `None` to keep them in memory.
-    pub state_path: Option<PathBuf>,
+    pub runtime_config_path: Option<PathBuf>,
 }
 
 impl LiveFleet {
@@ -145,8 +145,8 @@ impl LiveFleet {
             outbox,
             store,
             cleanup_on_remove,
-            devices_path,
-            state_path,
+            config_path,
+            runtime_config_path,
         } = wiring;
         Self {
             registry,
@@ -156,8 +156,8 @@ impl LiveFleet {
             outbox,
             store,
             cleanup_on_remove,
-            devices_path,
-            state_path,
+            config_path,
+            runtime_config_path,
         }
     }
 
@@ -270,7 +270,8 @@ impl LiveFleet {
         Ok(resolved)
     }
 
-    /// Write the running fleet to `state_path`, if a deployment asked for one.
+    /// Write the running fleet to `runtime_config_path`, if a deployment asked for
+    /// one.
     ///
     /// **With credentials**, necessarily: the file's whole purpose is to be
     /// loadable at the next startup, and a device this process cannot
@@ -285,7 +286,7 @@ impl LiveFleet {
     /// recover from a full disk. What a failed persist costs is that the change
     /// does not survive a restart, which is exactly what the log line says.
     fn persist(&self, resolved: &Resolved) {
-        let Some(path) = &self.state_path else {
+        let Some(path) = &self.runtime_config_path else {
             return;
         };
         let query = ExportQuery {
@@ -674,8 +675,8 @@ impl LiveInventory for LiveFleet {
     }
 
     async fn reset(&self) -> Result<sismatic_api_types::DeviceList, InventoryRefusal> {
-        let reloaded = load_raw(&self.devices_path).map_err(|e| {
-            InventoryRefusal::Source(format!("reading {}: {e}", self.devices_path.display()))
+        let reloaded = load_raw(&self.config_path).map_err(|e| {
+            InventoryRefusal::Source(format!("reading {}: {e}", self.config_path.display()))
         })?;
 
         let mut document = self
@@ -715,7 +716,7 @@ impl LiveInventory for LiveFleet {
             removed = change.removed.len(),
             replaced = change.replaced.len(),
             unchanged = change.unchanged,
-            path = %self.devices_path.display(),
+            path = %self.config_path.display(),
             "the device set was reset to the devices file"
         );
         Ok(sismatic_api_types::DeviceList {
@@ -885,7 +886,8 @@ struct ExportGroup {
 /// Which format a state file's extension implies.
 ///
 /// TOML when it says nothing, matching the devices file's own default — so an
-/// `inventory.state_path` written without an extension produces something the
+/// `inventory.runtime_config_path` written without an extension produces
+/// something the
 /// loader still reads, rather than something that silently round-trips as the
 /// wrong format.
 fn format_of(path: &Path) -> ExportFormat {
@@ -1054,8 +1056,8 @@ mod tests {
             outbox: outbox.clone(),
             store: store.clone(),
             cleanup_on_remove,
-            devices_path: PathBuf::from("devices-for-these-tests.toml"),
-            state_path: None,
+            config_path: PathBuf::from("devices-for-these-tests.toml"),
+            runtime_config_path: None,
         });
         (fleet, outbox, store)
     }
@@ -1341,8 +1343,8 @@ mod tests {
             outbox: outbox.clone(),
             store: MemoryStore::default(),
             cleanup_on_remove: true,
-            devices_path: PathBuf::from("devices-for-these-tests.toml"),
-            state_path: None,
+            config_path: PathBuf::from("devices-for-these-tests.toml"),
+            runtime_config_path: None,
         });
         queue_a_write(&outbox, "member", "still-owed").await;
 
@@ -1881,8 +1883,8 @@ mod tests {
             outbox: outbox.clone(),
             store: MemoryStore::default(),
             cleanup_on_remove: false,
-            devices_path: path.clone(),
-            state_path: state,
+            config_path: path.clone(),
+            runtime_config_path: state,
         });
         (fleet, path, outbox)
     }
@@ -1944,10 +1946,10 @@ mod tests {
         assert_eq!(fleet.registry().len(), 2, "the fleet must be untouched");
     }
 
-    /// With `state_path` set, a mutation is written to disk — which is what
+    /// With `runtime_config_path` set, a mutation is written to disk — which is what
     /// makes it survive a restart.
     #[tokio::test]
-    async fn a_mutation_is_persisted_when_a_state_path_is_configured() {
+    async fn a_mutation_is_persisted_when_a_runtime_config_path_is_configured() {
         let state = std::env::temp_dir().join(format!(
             "sismatic-state-{}-{:?}.toml",
             std::process::id(),
@@ -2014,7 +2016,7 @@ mod tests {
     /// Without one, nothing is written. The default is what keeps the devices
     /// file unambiguously authoritative.
     #[tokio::test]
-    async fn no_state_path_means_no_file_is_written() {
+    async fn no_runtime_config_path_means_no_file_is_written() {
         let (fleet, path, _) = live_on_disk(&["first"], &["first"], None);
         let dir = path.parent().expect("a directory").to_owned();
         let before: Vec<_> = std::fs::read_dir(&dir)

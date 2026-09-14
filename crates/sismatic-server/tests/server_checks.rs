@@ -1,7 +1,7 @@
 //! tests/server_checks.rs — what unit tests in `configuration.rs` deliberately
 //! cannot cover.
 //!
-//! Everything about *which* path `devices_config_path` resolves to is a pure
+//! Everything about *which* path `inventory.config_path` resolves to is a pure
 //! function and is tested there, with no filesystem and no environment. What is
 //! left is the wiring: that a real file on disk round-trips through
 //! `get_configuration` into a path core's loader accepts, that the environment
@@ -34,8 +34,8 @@ use tokio::sync::oneshot;
 use sismatic_core::devices::config::{self, RawConfig};
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_server::configuration::{
-    CONFIG_PATH_ENV, ConfigSource, FieldConfig, Overrides, ServerConfig, SyncConfig, env_source,
-    get_configuration, get_configuration_with_env,
+    CONFIG_PATH_ENV, ConfigSource, FieldConfig, InventoryConfig, Overrides, ServerConfig,
+    SyncConfig, env_source, get_configuration, get_configuration_with_env,
 };
 use sismatic_server::lifecycle::Retention;
 use sismatic_server::run;
@@ -46,19 +46,57 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// The seam that matters: a relative `devices_config_path` in a config file
+/// The seam that matters: a relative `inventory.config_path` in a config file
 /// resolves against that file's directory, and the result is a path core's
 /// loader can actually open.
 #[test]
-fn devices_config_path_resolves_next_to_the_config_file_and_loads() {
+fn inventory_config_path_resolves_next_to_the_config_file_and_loads() {
     let cfg = get_configuration(fixture("configuration.yaml")).expect("reading fixture config");
 
-    assert_eq!(cfg.devices_config_path, fixture("devices.toml"));
+    assert_eq!(cfg.inventory.config_path, fixture("devices.toml"));
 
-    let devices = config::load(&cfg.devices_config_path).expect("loading the devices it names");
+    let devices = config::load(&cfg.inventory.config_path).expect("loading the devices it names");
     let ids: Vec<&str> = devices.devices.iter().map(|d| d.id.as_str()).collect();
     assert_eq!(ids, ["fixture-atrium", "fixture-annex"]);
     assert_eq!(devices.groups.len(), 1);
+}
+
+/// `inventory.runtime_config_path` is anchored the same way `config_path` beside
+/// it is.
+///
+/// The reason it needs a fixture rather than a unit test over config text: both
+/// are relative paths in the shipped example, and both are resolved against the
+/// *config file's* directory rather than the process's working directory. A unit
+/// test states the base directly and so cannot notice if the wiring stopped
+/// passing one.
+///
+/// Anchored there and not beside `devices.toml` by coincidence — they sit in the
+/// same directory here because the fixture writes them that way, which is what
+/// an operator would do.
+#[test]
+fn runtime_config_path_resolves_next_to_the_config_file() {
+    let cfg = get_configuration(fixture("configuration.yaml")).expect("reading fixture config");
+
+    assert_eq!(
+        cfg.inventory.runtime_config_path,
+        Some(fixture("devices.runtime.state.yaml")),
+        "a relative state path belongs to the config file's directory"
+    );
+}
+
+/// ...and a config that says nothing about it leaves it unset, which is the
+/// default that keeps the devices file authoritative.
+///
+/// Asserted against the *other* fixture rather than a hand-built config,
+/// because what is being checked is an absent key in a real document: a
+/// `serde(default)` that went missing would still produce a valid
+/// `InventoryConfig` from a struct literal.
+#[test]
+fn a_config_without_an_inventory_section_persists_nothing() {
+    let cfg = get_configuration(fixture("configuration-all-fields.yaml"))
+        .expect("reading fixture config");
+
+    assert_eq!(cfg.inventory.runtime_config_path, None);
 }
 
 /// The rest of the file still parses into the resolved values the runtime reads.
@@ -162,7 +200,7 @@ fn the_environment_layers_over_a_config_read_from_disk() {
     // environment, and a test that mutated it could change another's result.
     let vars = [
         ("SISMATIC_SERVER__HTTP__PORT", "1234"),
-        ("SISMATIC_SERVER__DEVICES_CONFIG_PATH", "devices.toml"),
+        ("SISMATIC_SERVER__INVENTORY__CONFIG_PATH", "devices.toml"),
         // In the namespace but not in the document: it named the file, and the
         // file has already been chosen. Dropped rather than rejected.
         (CONFIG_PATH_ENV, "/should/be/ignored.yaml"),
@@ -183,7 +221,7 @@ fn the_environment_layers_over_a_config_read_from_disk() {
         "the key beside it should not move"
     );
     assert_eq!(
-        cfg.devices_config_path,
+        cfg.inventory.config_path,
         fixture("devices.toml"),
         "a relative path from the environment anchors to the config's directory"
     );
@@ -199,7 +237,7 @@ fn the_environment_layers_over_a_config_read_from_disk() {
 /// A subprocess is what makes reading the real environment safe here — it owns
 /// its own, so setting a variable races nothing. The variable names a devices
 /// file that cannot exist, and the failure quoting that path back is the proof
-/// the value survived the merge and the resolve into `devices_config_path`.
+/// the value survived the merge and the resolve into `inventory.config_path`.
 #[test]
 fn the_real_environment_reaches_the_real_binary() {
     const MISSING: &str = "/nonexistent/from-the-environment.toml";
@@ -207,7 +245,7 @@ fn the_real_environment_reaches_the_real_binary() {
     let out = Command::new(env!("CARGO_BIN_EXE_sismatic-server"))
         .arg("--config-path")
         .arg(fixture("configuration.yaml"))
-        .env("SISMATIC_SERVER__DEVICES_CONFIG_PATH", MISSING)
+        .env("SISMATIC_SERVER__INVENTORY__CONFIG_PATH", MISSING)
         .output()
         .expect("running the server binary");
 
@@ -229,7 +267,7 @@ fn the_real_environment_reaches_the_real_binary() {
 /// themselves, so a `main` that had dropped the call would still pass every one
 /// of them.
 ///
-/// `--devices-config-path` is the flag worth driving through the real binary,
+/// `--inventory-config-path` is the flag worth driving through the real binary,
 /// because the failure it causes quotes the path back — the same trick the
 /// environment test uses to prove a value survived into the resolved config.
 /// Setting the matching variable at the same time makes this an assertion about
@@ -243,9 +281,9 @@ fn the_command_line_reaches_the_real_binary_and_outranks_the_environment() {
     let out = Command::new(env!("CARGO_BIN_EXE_sismatic-server"))
         .arg("--config-path")
         .arg(fixture("configuration.yaml"))
-        .arg("--devices-config-path")
+        .arg("--inventory-config-path")
         .arg(TYPED)
-        .env("SISMATIC_SERVER__DEVICES_CONFIG_PATH", EXPORTED)
+        .env("SISMATIC_SERVER__INVENTORY__CONFIG_PATH", EXPORTED)
         .output()
         .expect("running the server binary");
 
@@ -314,8 +352,10 @@ fn test_source() -> ConfigSource {
 /// pinned to `host`/`port`.
 fn test_config(host: &str, port: u16) -> ServerConfig {
     ServerConfig {
-        devices_config_path: PathBuf::from("unused-by-run.toml"),
-        inventory: Default::default(),
+        inventory: InventoryConfig {
+            config_path: PathBuf::from("unused-by-run.toml"),
+            runtime_config_path: None,
+        },
         // A relay over a fleet of no devices starts no tasks, so the numbers
         // here only have to be startable: a zero poll would panic the ticker.
         intent_relay: sismatic_server::configuration::IntentRelayConfig {

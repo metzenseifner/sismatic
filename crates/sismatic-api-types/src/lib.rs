@@ -74,8 +74,8 @@ pub type GroupId = String;
 pub type FieldName = String;
 
 pub use config::{
-    ConfigDocument, ConfigPatch, FieldSettings, HttpSettings, RelayPatch, RelaySettings,
-    StorePatch, StoreSettings, SyncPatch, SyncSettings,
+    ConfigDocument, ConfigPatch, FieldSettings, HttpSettings, InventoryPatch, InventorySettings,
+    RelayPatch, RelaySettings, StorePatch, StoreSettings, SyncPatch, SyncSettings,
 };
 pub use device::{
     AutoDisabledField, ConnectionStatus, DeviceDetail, DeviceList, DeviceSummary, GroupList,

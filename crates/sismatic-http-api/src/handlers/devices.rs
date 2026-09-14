@@ -57,7 +57,7 @@
 //! contract `PATCH /v1/config` keeps for settings.
 //!
 //! Whether a change *outlives the process* is a separate question, answered by
-//! the deployment's `inventory.state_path`:
+//! the deployment's `inventory.runtime_config_path`:
 //!
 //! * **Unset**, the default: it does not. The next startup reads the devices
 //!   file and the fleet is whatever that says.
@@ -232,7 +232,7 @@ pub async fn read_device(
 /// `PATCH /v1/config` keeps for settings.
 ///
 /// Whether the change *survives a restart* is a second question, and the answer
-/// is the deployment's `inventory.state_path`:
+/// is the deployment's `inventory.runtime_config_path`:
 ///
 /// * **Unset**, the default: it does not. A restart returns to whatever the
 ///   devices file says. An operator who wants the device back puts it there —
@@ -362,7 +362,8 @@ pub async fn remove_device(
 /// get them back into one. The body is text in the format asked for, and saving
 /// it under that extension produces a file the loader reads unchanged.
 ///
-/// That holds whether or not `inventory.state_path` is set. A deployment with
+/// That holds whether or not `inventory.runtime_config_path` is set. A
+/// deployment with
 /// one persists its changes and they survive a restart — but to a *state* file,
 /// which is the server's to write and not a thing anyone edits or reviews. This
 /// route is how the running fleet becomes a devices file again: one a human

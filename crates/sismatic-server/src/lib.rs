@@ -177,8 +177,8 @@ pub async fn run(
         outbox: outbox_handle,
         store: store_handle,
         cleanup_on_remove: cfg.store.cleanup_on_remove,
-        devices_path: cfg.devices_config_path.clone(),
-        state_path: cfg.inventory.state_path.clone(),
+        config_path: cfg.inventory.config_path.clone(),
+        runtime_config_path: cfg.inventory.runtime_config_path.clone(),
     }));
 
     // Bound and built before anything is *started*, so the one failure that is
