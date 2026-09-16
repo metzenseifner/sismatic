@@ -15,10 +15,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use sismatic_api_types::{ConnectionStatus, DeviceId};
-use sismatic_core::devices::device::Connectivity;
+use sismatic_api_types::{AutoDisabledField, ConnectionStatus, DeviceId};
+use sismatic_core::devices::auto_disabled::AutoDisabledField as AutoDisabled;
+use sismatic_core::devices::device::{Connectivity, Device};
 use sismatic_core::devices::registry::Registry;
-use sismatic_store::status::DeviceStatus;
+use sismatic_store::status::{DeviceStatus, Observation};
 
 /// Reports what the registry's devices are doing, without dialing any of them.
 pub struct RegistryStatus {
@@ -33,20 +34,53 @@ impl RegistryStatus {
 
 #[async_trait::async_trait]
 impl DeviceStatus for RegistryStatus {
-    async fn status(&self, id: &str) -> ConnectionStatus {
+    async fn observe(&self, id: &str) -> Observation {
         self.registry
             .device(id)
-            .map_or(ConnectionStatus::Unknown, |device| {
-                to_dto(device.connectivity())
-            })
+            .map_or_else(Observation::default, |device| observe(&device))
     }
 
-    async fn all(&self) -> BTreeMap<DeviceId, ConnectionStatus> {
+    async fn all(&self) -> BTreeMap<DeviceId, Observation> {
         self.registry
             .devices()
             .into_iter()
-            .map(|device| (device.id().to_owned(), to_dto(device.connectivity())))
+            .map(|device| (device.id().to_owned(), observe(&device)))
             .collect()
+    }
+}
+
+/// Read one device's live state: its connectivity and what it has been observed
+/// to refuse.
+///
+/// Both come off the same handle, which is the whole reason they are one port.
+/// Neither dials and neither waits — `connectivity` uses `try_lock` and the
+/// learned set is a map behind a sync mutex — so this stays true of a fleet
+/// mid-poll, which is exactly when an operator looks at it.
+fn observe(device: &Device) -> Observation {
+    Observation {
+        connection: to_dto(device.connectivity()),
+        auto_disabled: device
+            .auto_disabled()
+            .snapshot()
+            .into_iter()
+            .map(to_field_dto)
+            .collect(),
+    }
+}
+
+/// Map core's learned-veto entry onto the wire shape.
+///
+/// The one lossy step is deliberate: a `Duration` becomes whole seconds,
+/// because the wire spells every other delay that way (`interval_secs`,
+/// `retry_in_secs`) and a self-heal window is configured in seconds to begin
+/// with. A sub-second remainder would be reporting precision the setting that
+/// produced it never had.
+fn to_field_dto(field: AutoDisabled) -> AutoDisabledField {
+    AutoDisabledField {
+        name: field.name,
+        refusals: field.refusals,
+        disabled: field.disabled,
+        retry_in_secs: field.retry_in.map(|wait| wait.as_secs()),
     }
 }
 
@@ -69,9 +103,10 @@ const fn to_dto(connectivity: Connectivity) -> ConnectionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
-    use sismatic_core::devices::config::DeviceConfig;
+    use sismatic_core::devices::config::{DeviceConfig, Uuid};
     use sismatic_core::devices::connector::fake::CountingConnector;
     use sismatic_core::devices::transport::fake::FakeTransport;
 
@@ -88,7 +123,12 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff: None,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     fn registry_status(ids: &[&str]) -> RegistryStatus {
@@ -100,11 +140,21 @@ mod tests {
         RegistryStatus::new(Arc::new(registry))
     }
 
+    /// Every connection state, with nothing inferred against any device.
+    fn connections(
+        observed: &BTreeMap<DeviceId, Observation>,
+    ) -> BTreeMap<DeviceId, ConnectionStatus> {
+        observed
+            .iter()
+            .map(|(id, observation)| (id.clone(), observation.connection))
+            .collect()
+    }
+
     #[tokio::test]
     async fn an_untouched_fleet_reads_as_cold() {
         let status = registry_status(&["atrium", "annex"]);
         assert_eq!(
-            status.all().await,
+            connections(&status.all().await),
             BTreeMap::from([
                 ("annex".to_owned(), ConnectionStatus::Cold),
                 ("atrium".to_owned(), ConnectionStatus::Cold),
@@ -123,7 +173,10 @@ mod tests {
             .await
             .expect("the write");
 
-        assert_eq!(status.status("atrium").await, ConnectionStatus::Warm);
+        assert_eq!(
+            status.observe("atrium").await.connection,
+            ConnectionStatus::Warm
+        );
     }
 
     /// An id the registry does not hold is `Unknown`, not an error. The caller
@@ -132,6 +185,64 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_id_is_unknown_rather_than_an_error() {
         let status = registry_status(&["atrium"]);
-        assert_eq!(status.status("nobody").await, ConnectionStatus::Unknown);
+        let observed = status.observe("nobody").await;
+        assert_eq!(observed.connection, ConnectionStatus::Unknown);
+        assert!(
+            observed.auto_disabled.is_empty(),
+            "and nothing may be claimed about a device that is not there"
+        );
+    }
+
+    /// The inferred veto crosses this seam alongside connectivity, which is the
+    /// reason the two are one port: both come off the same handle, and the fleet
+    /// index reads them in a single walk.
+    #[tokio::test]
+    async fn the_inferred_veto_is_reported_with_the_connection_state() {
+        let status = registry_status(&["atrium"]);
+        let device = status.registry.device("atrium").expect("the device");
+        // Two refusals at a threshold of two: vetoed, with no self-heal.
+        device.auto_disabled().refused("STREAM_2_NAME", 2, None);
+        device.auto_disabled().refused("STREAM_2_NAME", 2, None);
+        // One below the threshold: watched, not yet vetoed.
+        device.auto_disabled().refused("STREAM_3_NAME", 2, None);
+
+        let observed = status.observe("atrium").await;
+
+        assert_eq!(observed.auto_disabled.len(), 2, "{observed:?}");
+        let vetoed = &observed.auto_disabled[0];
+        assert_eq!(vetoed.name, "STREAM_2_NAME");
+        assert!(vetoed.disabled);
+        assert_eq!(vetoed.refusals, 2);
+        assert_eq!(
+            vetoed.retry_in_secs, None,
+            "self-heal is off, so there is no next attempt to report"
+        );
+
+        let watched = &observed.auto_disabled[1];
+        assert_eq!(watched.name, "STREAM_3_NAME");
+        assert!(
+            !watched.disabled,
+            "a near-miss is reported, so a field never goes dark out of nowhere"
+        );
+        assert_eq!(watched.refusals, 1);
+    }
+
+    /// A self-healing veto reports when it will next be tried, which is the one
+    /// thing an operator wants from it that the flag alone cannot say.
+    #[tokio::test]
+    async fn a_self_healing_veto_reports_its_retry_window() {
+        let status = registry_status(&["atrium"]);
+        let device = status.registry.device("atrium").expect("the device");
+        let heal = Some(Duration::from_secs(600));
+        device.auto_disabled().refused("STREAM_2_NAME", 1, heal);
+
+        let observed = status.observe("atrium").await;
+        let field = &observed.auto_disabled[0];
+
+        assert!(field.disabled);
+        // Whole seconds, and the window has only just been armed — so this is
+        // 600 or a hair under, never above.
+        let retry = field.retry_in_secs.expect("a self-healing veto retries");
+        assert!((599..=600).contains(&retry), "{retry}");
     }
 }

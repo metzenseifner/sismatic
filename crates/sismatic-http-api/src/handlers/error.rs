@@ -14,11 +14,12 @@
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpResponse, ResponseError};
-use sismatic_api_types::{ApiError, ErrorCode};
+use sismatic_api_types::{ApiError, ErrorCode, Rejection};
 use sismatic_store::ReadError;
 use sismatic_store::outbox::SubmitError;
 
 use crate::config::ConfigRefusal;
+use crate::inventory::InventoryRefusal;
 
 /// A failed read-side request.
 #[derive(Debug)]
@@ -50,6 +51,24 @@ pub enum ApiFailure {
     /// decision is made, and this variant defers to it for both the body and —
     /// via the code it chose — the status.
     Submit(SubmitError),
+    /// A write this surface refused before the outbox ever saw it.
+    ///
+    /// Distinct from [`Submit`](Self::Submit), which carries what the *outbox*
+    /// refused. The four rejections that port produces are about a device's
+    /// recording state, which it alone tracks; this one is about the devices
+    /// file, which it has never read. Folding the two together would mean the
+    /// outbox growing a copy of the fleet's configuration to answer a question
+    /// the catalog already answers.
+    Rejected {
+        rejection: Rejection,
+        message: String,
+    },
+    /// A change to the *fleet* that was not made.
+    ///
+    /// Carried whole for the reason [`Config`](Self::Config) is: the port has
+    /// already classified it into four cases that are four different people's
+    /// problems, and re-deciding here is how the two could come to disagree.
+    Inventory(InventoryRefusal),
     /// A change to the settings that was not made.
     ///
     /// Carried whole for the reason [`Submit`](Self::Submit) is: the port has
@@ -66,6 +85,8 @@ impl std::fmt::Display for ApiFailure {
             // Rendered through the same conversion the body uses, so the
             // message a log line carries is the message the caller received.
             ApiFailure::Submit(e) => f.write_str(&ApiError::from(e.clone()).error),
+            ApiFailure::Rejected { message, .. } => f.write_str(message),
+            ApiFailure::Inventory(e) => write!(f, "{e}"),
             ApiFailure::Config(e) => write!(f, "{e}"),
         }
     }
@@ -87,6 +108,13 @@ impl From<ReadError> for ApiFailure {
 impl From<SubmitError> for ApiFailure {
     fn from(e: SubmitError) -> Self {
         ApiFailure::Submit(e)
+    }
+}
+
+/// The same convenience for the inventory scope's three mutating routes.
+impl From<InventoryRefusal> for ApiFailure {
+    fn from(e: InventoryRefusal) -> Self {
+        ApiFailure::Inventory(e)
     }
 }
 
@@ -117,6 +145,35 @@ impl ApiFailure {
             // came from already classified them, and re-deciding here is how the
             // two could disagree.
             ApiFailure::Submit(e) => return ApiError::from(e.clone()),
+            // Carries the rejection as the typed second axis rather than only in
+            // prose, which is the whole reason `ApiError::rejected` exists: a
+            // client branches on *which* precondition refused without parsing a
+            // sentence. See `ApiError` for why that is a field beside the code
+            // and not another code.
+            ApiFailure::Rejected { rejection, message } => {
+                return ApiError::rejected(*rejection, message.clone());
+            }
+            // Four cases, four people. A body that does not describe a device
+            // is the caller's; an id that already exists is a conflict with the
+            // fleet rather than a malformed request, and the message names the
+            // route that would have worked; an unknown id is a plain absence;
+            // and a device a group still holds is a conflict the caller resolves
+            // by editing the group.
+            ApiFailure::Inventory(e) => {
+                let code = match e {
+                    InventoryRefusal::Malformed(_) => ErrorCode::BadRequest,
+                    InventoryRefusal::Duplicate(_) | InventoryRefusal::Blocked(_) => {
+                        ErrorCode::Conflict
+                    }
+                    // `UnknownDevice`, not the generic `NotFound`: that code
+                    // exists for exactly this — "no device or group has the
+                    // requested id" — and a client already branches on it for
+                    // the write routes' version of the same mistake.
+                    InventoryRefusal::Unknown(_) => ErrorCode::UnknownDevice,
+                    InventoryRefusal::Source(_) => ErrorCode::Internal,
+                };
+                return ApiError::coded(code, e.to_string());
+            }
             ApiFailure::Config(e) => {
                 let code = match e {
                     ConfigRefusal::Malformed(_) => ErrorCode::BadRequest,
@@ -143,11 +200,24 @@ impl ResponseError for ApiFailure {
                 Some(ErrorCode::Conflict) => StatusCode::CONFLICT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
+            // A conflict for the same reason the outbox's four are: the request
+            // is well-formed and contradicts state the server will not change on
+            // the caller's behalf. Unlike those four, no amount of waiting will
+            // clear it — only an edit to the devices file.
+            ApiFailure::Rejected { .. } => StatusCode::CONFLICT,
             // Three cases, three people. A value we could not read is the
             // caller's; a setting that needs a restart is a conflict with the
             // running process rather than a mistake; a config file that will not
             // load is the deployment's, and there is nothing the caller could
             // have sent instead — which is what a 500 says.
+            ApiFailure::Inventory(e) => match e {
+                InventoryRefusal::Malformed(_) => StatusCode::BAD_REQUEST,
+                InventoryRefusal::Duplicate(_) | InventoryRefusal::Blocked(_) => {
+                    StatusCode::CONFLICT
+                }
+                InventoryRefusal::Unknown(_) => StatusCode::NOT_FOUND,
+                InventoryRefusal::Source(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            },
             ApiFailure::Config(e) => match e {
                 ConfigRefusal::Malformed(_) => StatusCode::BAD_REQUEST,
                 ConfigRefusal::Fixed(_) => StatusCode::CONFLICT,
@@ -164,7 +234,7 @@ impl ResponseError for ApiFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{DesiredRecordingState, Rejection};
+    use sismatic_api_types::DesiredRecordingState;
 
     /// The pairing the two `match`es above could get out of step. A rejection
     /// is the caller's fault and a backend failure is ours, and the status has

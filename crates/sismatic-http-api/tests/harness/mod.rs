@@ -20,15 +20,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sismatic_api_types::{
-    Barrier, ConfigDocument, ConfigPatch, ConnectionStatus, DeviceSummary, FieldCatalog,
-    FieldSettings, GroupSummary, HttpSettings, InstructionSummary, RelaySettings, StoreSettings,
-    SyncSettings, Timestamp, WritesCatalog,
+    AutoDisabledField, Barrier, ConfigDocument, ConfigPatch, ConnectionStatus, DeviceSummary,
+    DeviceWrite, ExportQuery, FieldCatalog, FieldSettings, GroupSummary, GroupWrite, HttpSettings,
+    InstructionSummary, InventorySettings, RelaySettings, Removed, StoreSettings, SyncSettings,
+    Timestamp, WritesCatalog,
 };
 use sismatic_http_api::Stamp;
 use sismatic_http_api::config::{ConfigRefusal, DynLiveConfig, LiveConfig};
+use sismatic_http_api::inventory::{DynLiveInventory, InventoryRefusal, LiveInventory};
 use sismatic_store::group::DynGroupState;
 use sismatic_store::outbox::{DynWriteLog, DynWriteSubmit};
-use sismatic_store::status::DeviceStatus;
+use sismatic_store::status::{DeviceStatus, Observation};
 use sismatic_store::{DynDeviceCatalog, DynDeviceStatus, DynReadStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox};
 
@@ -78,10 +80,46 @@ pub fn device_group(members: &[&str]) -> MemoryCatalog {
             .iter()
             .map(|id| DeviceSummary {
                 id: (*id).to_owned(),
+                uuid: format!("00000000-0000-0000-0000-0000000000{:02x}", id.len()),
                 host: "10.0.0.7".to_owned(),
                 port: 22023,
                 eager: false,
                 status: ConnectionStatus::Unknown,
+                disabled_fields: Vec::new(),
+                auto_disabled_fields: Vec::new(),
+            })
+            .collect(),
+        vec![GroupSummary {
+            id: GROUP.to_owned(),
+            members: members.iter().map(|id| (*id).to_owned()).collect(),
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
+        }],
+    )
+}
+
+/// [`device_group`], with `disabled` naming per-device `disabled_fields`.
+///
+/// For the write routes' all-or-nothing rule, where what matters is that *one*
+/// member vetoes a field the others accept — so the veto is stated per device
+/// rather than fleet-wide.
+pub fn device_group_disabling(members: &[&str], disabled: &[(&str, &[&str])]) -> MemoryCatalog {
+    MemoryCatalog::new(
+        members
+            .iter()
+            .map(|id| DeviceSummary {
+                id: (*id).to_owned(),
+                uuid: format!("00000000-0000-0000-0000-{:012x}", id.len()),
+                host: "10.0.0.7".to_owned(),
+                port: 22023,
+                eager: false,
+                status: ConnectionStatus::Unknown,
+                disabled_fields: disabled
+                    .iter()
+                    .find(|(vetoed, _)| vetoed == id)
+                    .map(|(_, fields)| fields.iter().map(|f| (*f).to_owned()).collect())
+                    .unwrap_or_default(),
+                auto_disabled_fields: Vec::new(),
             })
             .collect(),
         vec![GroupSummary {
@@ -163,7 +201,12 @@ pub fn settings() -> ConfigDocument {
             host: "127.0.0.1".to_owned(),
             port: 8080,
         },
-        devices_config_path: "/etc/sismatic/devices.toml".to_owned(),
+        inventory: InventorySettings {
+            config_path: "/etc/sismatic/devices.toml".to_owned(),
+            // Unset, which is the default and the shape most deployments run:
+            // the devices file is authoritative and nothing is persisted.
+            runtime_config_path: None,
+        },
     }
 }
 
@@ -288,11 +331,19 @@ pub fn serve_with_status(
         field_catalog(),
         writes_catalog(),
         Arc::new(StatedConfig::default()),
+        Arc::new(StatedInventory::fixture()),
     )
 }
 
 /// The one funnel every entry point above reaches: everything stated, nothing
 /// defaulted.
+///
+/// The argument count is the design rather than an oversight — every
+/// collaborator the server takes is named here, so a new port is one edit in
+/// this signature and a compile error at each wrapper that has to decide what
+/// to pass. Hiding them behind a builder would turn that compile error into a
+/// silent default.
+#[allow(clippy::too_many_arguments)]
 ///
 /// Only `tests/instructions.rs` calls it directly — it is the suite that is
 /// about the two catalogs, so it is the only one that needs to state them. The
@@ -307,6 +358,7 @@ pub fn serve_all(
     fields: FieldCatalog,
     writes: WritesCatalog,
     config: DynLiveConfig,
+    inventory: DynLiveInventory,
 ) -> MemoryOutbox {
     let outbox = MemoryOutbox::with_max_attempts(3);
     let catalog: DynDeviceCatalog = Arc::new(catalog);
@@ -330,6 +382,7 @@ pub fn serve_all(
             log,
             group_state,
             config,
+            inventory,
             fields,
             writes,
         },
@@ -391,8 +444,33 @@ pub fn spawn_with_instructions(
         fields,
         writes,
         Arc::new(StatedConfig::default()),
+        Arc::new(StatedInventory::fixture()),
     );
     (format!("http://127.0.0.1:{port}"), outbox)
+}
+
+/// [`spawn`] over a stated inventory port, for the suite that is about the
+/// mutation routes. Returns the base URL and the double, so a test can ask what
+/// reached the port as well as what came back.
+pub fn spawn_with_inventory(inventory: StatedInventory) -> (String, Arc<StatedInventory>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding an ephemeral port");
+    let port = listener
+        .local_addr()
+        .expect("reading the bound address")
+        .port();
+    let inventory = Arc::new(inventory);
+    let store: DynReadStore = Arc::new(sismatic_store_memory::MemoryStore::default());
+    drop(serve_all(
+        listener,
+        store,
+        catalog(),
+        StatedStatus::default(),
+        field_catalog(),
+        writes_catalog(),
+        Arc::new(StatedConfig::default()),
+        inventory.clone(),
+    ));
+    (format!("http://127.0.0.1:{port}"), inventory)
 }
 
 /// [`spawn`] over a stated settings port, for the suite that is about the config
@@ -414,6 +492,7 @@ pub fn spawn_with_config(config: StatedConfig) -> (String, Arc<StatedConfig>) {
         field_catalog(),
         writes_catalog(),
         config.clone(),
+        Arc::new(StatedInventory::fixture()),
     ));
     (format!("http://127.0.0.1:{port}"), config)
 }
@@ -426,26 +505,266 @@ pub fn spawn_with_config(config: StatedConfig) -> (String, Arc<StatedConfig>) {
 /// of these routes states the status it wants observed and asserts it comes
 /// back, which is the whole of what the routes are responsible for.
 #[derive(Debug, Default, Clone)]
-pub struct StatedStatus(pub std::collections::BTreeMap<String, ConnectionStatus>);
+pub struct StatedStatus(pub std::collections::BTreeMap<String, Observation>);
 
 impl StatedStatus {
+    /// A fleet whose devices differ only in connectivity — the shape every test
+    /// that predates the field veto wants, and the one that keeps those tests
+    /// saying what they said.
     pub fn of(pairs: &[(&str, ConnectionStatus)]) -> Self {
         Self(
             pairs
                 .iter()
-                .map(|(id, status)| ((*id).to_owned(), *status))
+                .map(|(id, status)| {
+                    (
+                        (*id).to_owned(),
+                        Observation {
+                            connection: *status,
+                            auto_disabled: Vec::new(),
+                        },
+                    )
+                })
                 .collect(),
         )
+    }
+
+    /// One device observed to have refused `fields`, every one already past its
+    /// threshold. For the routes that report the inferred veto.
+    pub fn refusing(id: &str, fields: &[&str]) -> Self {
+        Self(std::collections::BTreeMap::from([(
+            id.to_owned(),
+            Observation {
+                connection: ConnectionStatus::Warm,
+                auto_disabled: fields
+                    .iter()
+                    .map(|name| AutoDisabledField {
+                        name: (*name).to_owned(),
+                        refusals: 2,
+                        disabled: true,
+                        retry_in_secs: None,
+                    })
+                    .collect(),
+            },
+        )]))
     }
 }
 
 #[async_trait::async_trait]
 impl DeviceStatus for StatedStatus {
-    async fn status(&self, id: &str) -> ConnectionStatus {
-        self.0.get(id).copied().unwrap_or(ConnectionStatus::Unknown)
+    async fn observe(&self, id: &str) -> Observation {
+        self.0.get(id).cloned().unwrap_or_default()
     }
 
-    async fn all(&self) -> std::collections::BTreeMap<String, ConnectionStatus> {
+    async fn all(&self) -> std::collections::BTreeMap<String, Observation> {
         self.0.clone()
+    }
+}
+
+/// A [`LiveInventory`] that records what it was asked and answers whatever it
+/// was told to.
+///
+/// A double rather than the real adapter, for the reason `StatedStatus` is one:
+/// the real thing is the composition root, which owns a registry, an outbox and
+/// a store, and this crate may not name any of them. What these routes are
+/// responsible for is the URL space, the status codes and the bodies — so a
+/// test states the outcome it wants and asserts it comes back, and whether the
+/// removal *sequence* is right is `sismatic-server`'s test to write.
+#[derive(Debug, Default, Clone)]
+pub struct StatedInventory {
+    /// Ids this double claims exist. Everything else is `Unknown`.
+    pub known: Vec<String>,
+    /// Ids a group still holds, which removal refuses.
+    pub held: Vec<String>,
+    /// Group ids this double claims exist.
+    pub groups: Vec<String>,
+    /// What the last mutation was asked to do, for a test that cares the port
+    /// was reached at all.
+    pub calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl StatedInventory {
+    /// The double that agrees with [`catalog`]: it knows the one fixture device
+    /// and the one group over it.
+    ///
+    /// The default for every suite that is not *about* the inventory port, and
+    /// seeded rather than empty for the same reason the store and the outbox
+    /// are: a double that claims the fixture device does not exist would make a
+    /// `DELETE` answer `404` for a reason that has nothing to do with routing,
+    /// which is precisely what `tests/openapi.rs` is trying to rule out.
+    pub fn fixture() -> Self {
+        Self::with_groups(&[DEVICE], &[GROUP])
+    }
+
+    pub fn with(known: &[&str]) -> Self {
+        Self {
+            known: known.iter().map(|id| (*id).to_owned()).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// `with`, plus ids a group still names — which `DELETE` refuses.
+    pub fn holding(known: &[&str], held: &[&str]) -> Self {
+        Self {
+            held: held.iter().map(|id| (*id).to_owned()).collect(),
+            ..Self::with(known)
+        }
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("lock").clone()
+    }
+
+    fn record(&self, call: &str) {
+        self.calls.lock().expect("lock").push(call.to_owned());
+    }
+
+    /// `with`, plus group ids this double claims exist.
+    pub fn with_groups(known: &[&str], groups: &[&str]) -> Self {
+        Self {
+            groups: groups.iter().map(|id| (*id).to_owned()).collect(),
+            ..Self::with(known)
+        }
+    }
+
+    fn group_summary(id: &str, members: &[String]) -> GroupSummary {
+        GroupSummary {
+            id: id.to_owned(),
+            members: members.to_vec(),
+            barrier_timeout_secs: 15,
+            barrier: Barrier::FailBatch,
+        }
+    }
+
+    fn summary(id: &str) -> DeviceSummary {
+        DeviceSummary {
+            id: id.to_owned(),
+            uuid: format!("00000000-0000-0000-0000-{:012x}", id.len()),
+            host: "10.0.0.7".to_owned(),
+            port: 22023,
+            eager: false,
+            status: ConnectionStatus::Unknown,
+            disabled_fields: Vec::new(),
+            auto_disabled_fields: Vec::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveInventory for StatedInventory {
+    async fn add(&self, device: DeviceWrite) -> Result<DeviceSummary, InventoryRefusal> {
+        let id = device.id.clone().ok_or_else(|| {
+            InventoryRefusal::Malformed("an added device must state an `id`".to_owned())
+        })?;
+        self.record(&format!("add {id}"));
+        if self.known.contains(&id) {
+            return Err(InventoryRefusal::Duplicate(format!(
+                "'{id}' already names a device or group"
+            )));
+        }
+        Ok(Self::summary(&id))
+    }
+
+    async fn replace(
+        &self,
+        id: &str,
+        device: DeviceWrite,
+    ) -> Result<DeviceSummary, InventoryRefusal> {
+        if let Some(stated) = &device.id
+            && stated != id
+        {
+            return Err(InventoryRefusal::Malformed(format!(
+                "the body names '{stated}' and the path names '{id}'"
+            )));
+        }
+        self.record(&format!("replace {id}"));
+        if !self.known.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no device '{id}' is configured"
+            )));
+        }
+        Ok(Self::summary(id))
+    }
+
+    async fn remove(&self, id: &str) -> Result<Removed, InventoryRefusal> {
+        self.record(&format!("remove {id}"));
+        if !self.known.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no device '{id}' is configured"
+            )));
+        }
+        if self.held.iter().any(|held| held == id) {
+            return Err(InventoryRefusal::Blocked(format!(
+                "group '{GROUP}' still names device '{id}'; remove it from the group first"
+            )));
+        }
+        Ok(Removed {
+            device: id.to_owned(),
+            writes_canceled: 3,
+            reads_dropped: None,
+        })
+    }
+
+    async fn add_group(&self, group: GroupWrite) -> Result<GroupSummary, InventoryRefusal> {
+        let id = group.id.clone().ok_or_else(|| {
+            InventoryRefusal::Malformed("an added group must state an `id`".to_owned())
+        })?;
+        self.record(&format!("add_group {id}"));
+        if self.known.contains(&id) || self.groups.contains(&id) {
+            return Err(InventoryRefusal::Duplicate(format!(
+                "'{id}' already names a device or group"
+            )));
+        }
+        Ok(Self::group_summary(&id, &group.devices))
+    }
+
+    async fn replace_group(
+        &self,
+        id: &str,
+        group: GroupWrite,
+    ) -> Result<GroupSummary, InventoryRefusal> {
+        if let Some(stated) = &group.id
+            && stated != id
+        {
+            return Err(InventoryRefusal::Malformed(format!(
+                "the body names '{stated}' and the path names '{id}'"
+            )));
+        }
+        self.record(&format!("replace_group {id}"));
+        if !self.groups.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no group '{id}' is configured"
+            )));
+        }
+        Ok(Self::group_summary(id, &group.devices))
+    }
+
+    async fn remove_group(&self, id: &str) -> Result<(), InventoryRefusal> {
+        self.record(&format!("remove_group {id}"));
+        if !self.groups.iter().any(|known| known == id) {
+            return Err(InventoryRefusal::Unknown(format!(
+                "no group '{id}' is configured"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn export(&self, query: &ExportQuery) -> Result<String, InventoryRefusal> {
+        self.record(&format!(
+            "export {:?} promote={} secrets={}",
+            query.format,
+            query.promote_auto_disabled_fields_to_disabled_fields,
+            query.include_secrets
+        ));
+        // Enough to assert the route serves the port's bytes verbatim with the
+        // right content type. What a *real* document looks like is the adapter's
+        // test, over in `sismatic-server`.
+        Ok(format!("# exported as {:?}\n", query.format))
+    }
+
+    async fn reset(&self) -> Result<sismatic_api_types::DeviceList, InventoryRefusal> {
+        self.record("reset");
+        Ok(sismatic_api_types::DeviceList {
+            devices: self.known.iter().map(|id| Self::summary(id)).collect(),
+        })
     }
 }

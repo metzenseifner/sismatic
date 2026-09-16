@@ -49,6 +49,7 @@ use tokio::time::Instant;
 use crate::protocol::Value;
 use crate::protocol::instructions::Instruction;
 
+use super::auto_disabled::{AutoDisabled, VetoSource};
 use super::config::DeviceConfig;
 use super::connector::{ConnectError, Connector};
 use super::controller::{Controller, ControllerError};
@@ -71,6 +72,42 @@ pub enum DeviceError {
     ///
     /// [`cold_backoff`]: super::config::DeviceConfig::cold_backoff
     Cold { retry_in: Duration },
+    /// Nothing was sent: this field is vetoed on this device, either because
+    /// the operator named it in `disabled_fields` or because the device has
+    /// refused it [`auto_disable_after`] times running.
+    ///
+    /// The cheapest error of all — it costs neither a dial nor an exchange —
+    /// and the only one that is a statement about the *instruction* rather than
+    /// about reaching the device. A caller that sees this has asked for
+    /// something this deployment has decided not to ask for; retrying will not
+    /// change it, and no amount of the device coming back will either.
+    ///
+    /// `retry_in` is `Some` only for an inferred veto on a device with
+    /// `self_heal_secs` set, where the window does close on its own.
+    ///
+    /// [`auto_disable_after`]: super::config::DeviceConfig::auto_disable_after
+    Disabled {
+        field: String,
+        source: VetoSource,
+        retry_in: Option<Duration>,
+    },
+}
+
+impl DeviceError {
+    /// Whether this is the device answering *no* rather than failing to answer.
+    ///
+    /// The distinction the whole veto turns on, and it is offered here rather
+    /// than left to callers to match on, because the shape it has to match is
+    /// nested two levels deep — and a caller that gets it wrong does not fail
+    /// to compile, it just quietly counts timeouts as refusals and disables a
+    /// field because the network was slow.
+    ///
+    /// A [`Disabled`](Self::Disabled) error is deliberately *not* a refusal. The
+    /// device said nothing; we did.
+    #[must_use]
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, DeviceError::Command(ControllerError::Rejected { .. }))
+    }
 }
 
 impl fmt::Display for DeviceError {
@@ -81,6 +118,18 @@ impl fmt::Display for DeviceError {
             DeviceError::Cold { retry_in } => {
                 write!(f, "device is cold; dialing again possible in {retry_in:?}")
             }
+            DeviceError::Disabled {
+                field,
+                source,
+                retry_in,
+            } => match retry_in {
+                Some(retry_in) => write!(
+                    f,
+                    "`{field}` is disabled on this device ({source}); \
+                     it will be tried again in {retry_in:?}"
+                ),
+                None => write!(f, "`{field}` is disabled on this device ({source})"),
+            },
         }
     }
 }
@@ -149,16 +198,68 @@ pub struct Device {
     config: DeviceConfig,
     connector: Arc<dyn Connector>,
     link: Mutex<Link>,
+    /// What this device has been observed to refuse.
+    ///
+    /// An `Arc` and not an owned value, because it has to outlive *this*
+    /// `Device`. A device is immutable, so editing its configuration builds a
+    /// replacement — and the replacement is the same physical recorder with the
+    /// same missing license, so the registry hands the new device the old
+    /// device's learned set rather than making it rediscover the fleet's worth
+    /// of refusals it already paid for. See [`AutoDisabled`].
+    auto_disabled: Arc<AutoDisabled>,
 }
 
 impl Device {
-    /// Create a device that will connect lazily on its first exchange.
+    /// Create a device that will connect lazily on its first exchange, with an
+    /// empty learned set of its own.
     pub fn new(config: DeviceConfig, connector: Arc<dyn Connector>) -> Self {
+        Self::with_auto_disabled(config, connector, Arc::new(AutoDisabled::new()))
+    }
+
+    /// Create a device sharing an existing learned set.
+    ///
+    /// The registry's constructor. What it is for is device *replacement*: a
+    /// reload that changes one key rebuilds the device, and passing the old
+    /// set through is what keeps the replacement from re-learning — at
+    /// `auto_disable_after` refused exchanges per field — everything the
+    /// original had already established about the unit at this address.
+    pub fn with_auto_disabled(
+        config: DeviceConfig,
+        connector: Arc<dyn Connector>,
+        auto_disabled: Arc<AutoDisabled>,
+    ) -> Self {
         Self {
             config,
             connector,
             link: Mutex::new(Link::default()),
+            auto_disabled,
         }
+    }
+
+    /// This device's learned set, for the registry to carry across a
+    /// replacement and for an inventory read to report.
+    pub fn auto_disabled(&self) -> &Arc<AutoDisabled> {
+        &self.auto_disabled
+    }
+
+    /// Why `field` is not being asked for on this device, if it is not.
+    ///
+    /// The declared veto is checked first and reported as
+    /// [`VetoSource::Declared`], because it is the one an operator can act on:
+    /// a field that is in `disabled_fields` *and* has been refused is still,
+    /// as far as anyone reading a status page is concerned, switched off on
+    /// purpose.
+    ///
+    /// Synchronous and lock-light on purpose — this is consulted before every
+    /// exchange and on every tick of a vetoed field's poll loop, so it must
+    /// cost a set lookup rather than anything that can wait.
+    pub fn field_veto(&self, field: &str) -> Option<(VetoSource, Option<Duration>)> {
+        if self.config.disabled_fields.contains(field) {
+            return Some((VetoSource::Declared, None));
+        }
+        self.auto_disabled
+            .veto(field)
+            .map(|retry_in| (VetoSource::Inferred, retry_in))
     }
 
     /// This device's id.
@@ -215,6 +316,21 @@ impl Device {
     ///
     /// [`cold_backoff`]: super::config::DeviceConfig::cold_backoff
     pub async fn run(&self, instruction: &Instruction) -> Result<Value, DeviceError> {
+        // The one enforcement point for the field veto, and it is on `run`
+        // rather than on `exec` so that `probe` bypasses it — see `probe`.
+        //
+        // Checking here rather than in each caller is what makes the veto a
+        // property of the device instead of a rule every scheduler has to
+        // remember: the poll loops skip a vetoed field before they get this far
+        // (so a veto costs them no wake-up beyond the tick), and the relay,
+        // the CLI and the Python SDK inherit it without knowing it exists.
+        if let Some((source, retry_in)) = self.field_veto(&instruction.name) {
+            return Err(DeviceError::Disabled {
+                field: instruction.name.clone(),
+                source,
+                retry_in,
+            });
+        }
         self.exec(instruction, Dial::WhenWarm).await
     }
 
@@ -229,6 +345,16 @@ impl Device {
     /// The result is a clean split for an eager device — one component dials a
     /// cold device, on a cadence named for that purpose, and every other caller
     /// rides on the verdict it publishes into the gate.
+    ///
+    /// It bypasses the **field veto** as well, and that is not incidental. The
+    /// keepalive probes with [`Query::Firmware`], an instruction it chooses
+    /// rather than one an operator asked for; honoring the veto here would let
+    /// `disabled_fields = ["FIRMWARE"]` silently stop a device's keep-warm loop
+    /// and, through it, the only thing that re-dials that device when it is
+    /// down. A veto says "do not ask this on the fleet's behalf", and this call
+    /// is not on the fleet's behalf.
+    ///
+    /// [`Query::Firmware`]: crate::protocol::instructions::query::Query::Firmware
     ///
     /// [`SisKeepalive`]: super::sis_keepalive::SisKeepalive
     /// [`eager_retry`]: super::config::DeviceConfig::eager_retry
@@ -342,6 +468,9 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use std::collections::BTreeSet;
+
+    use crate::devices::config::Uuid;
     use crate::devices::connector::fake::CountingConnector;
     use crate::devices::transport::Transport;
     use crate::devices::transport::fake::FakeTransport;
@@ -370,7 +499,12 @@ mod tests {
             sis_keepalive: None,
             eager_retry: None,
             cold_backoff,
+            uuid: Uuid::nil(),
+            disabled_fields: BTreeSet::new(),
+            auto_disable_after: 0,
+            self_heal: None,
         }
+        .derive_uuid()
     }
 
     fn port_query() -> Instruction {

@@ -1,7 +1,8 @@
 # Fixture for tests/server_checks.rs — the catch-all shape a deployment writes
 # when it wants everything core can query and never wants to edit this list
 # again. The quotes around `*` are required: a bare `*` opens a YAML alias.
-devices_config_path: devices.toml
+inventory:
+  config_path: devices.toml
 
 sync:
   interval_secs: 300

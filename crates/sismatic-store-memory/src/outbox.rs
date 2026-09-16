@@ -525,6 +525,133 @@ impl MemoryOutbox {
             })
             .collect()
     }
+
+    /// Forget what `device_group` was last told, and report how many field
+    /// expectations went.
+    ///
+    /// For a group leaving the fleet. Deliberately *not* a cancellation: a group
+    /// owns no queue — a group-addressed write is expanded into per-device rows
+    /// at submission, and those are owed to devices that still exist — so what
+    /// is removed is only the record of what the group was asked for, which is
+    /// a statement about something that no longer exists.
+    ///
+    /// Any batch already armed is left alone for the same reason. Its members
+    /// are devices, its rendezvous is between their queues, and it completes or
+    /// times out on the barrier policy it was armed with. The group's departure
+    /// does not make a recording that was already asked for wrong.
+    ///
+    /// Inherent rather than on a port, for the reason
+    /// [`cancel_queued`](Self::cancel_queued) is: the relay must not be able to
+    /// do this, and the composition root is holding this adapter already.
+    pub fn forget_group(&self, device_group: &str) -> u64 {
+        let mut state = self.state();
+        state
+            .groups
+            .remove(device_group)
+            .map_or(0, |fields| fields.len() as u64)
+    }
+
+    /// Cancel every write still queued for `device`, and report how many went.
+    ///
+    /// For a device leaving the fleet. Nothing is left pending against an id no
+    /// caller can address any more, and nothing is *deleted*: a cancelled write
+    /// stays readable at `GET /v1/writes/{id}`, carrying `reason`. That is the
+    /// point rather than an implementation detail — a caller polling a write it
+    /// submitted has to learn it was cancelled, and purging the record would
+    /// turn that poll into a `404` that says nothing at all.
+    ///
+    /// Only `Pending` rows are touched. A row already `InFlight` is mid-exchange
+    /// on a connection that is still open, and cancelling it here would race the
+    /// relay's `settle` for the same record — so it is left to finish, which is
+    /// what cooperative removal means everywhere else in this system.
+    ///
+    /// **A cancelled row takes its whole batch with it.** A group write is
+    /// dispatched only when every member has reached the head of its queue, so a
+    /// member that has left the fleet would hold the rendezvous until it timed
+    /// out, and the surviving members would then act — or not — on a barrier
+    /// policy that was chosen for a device group this is no longer. Failing the
+    /// batch is the same answer `Barrier::FailBatch` gives to the same question.
+    ///
+    /// Inherent rather than on [`WriteDrain`], which the relay holds: the relay
+    /// must not be able to cancel a queue, and the composition root doing the
+    /// removal is holding this adapter already.
+    ///
+    /// [`WriteDrain`]: sismatic_store::outbox::WriteDrain
+    pub fn cancel_queued(&self, device: &str, reason: &str) -> u64 {
+        let mut state = self.state();
+
+        let Some(log) = state.logs.get_mut(device) else {
+            return 0;
+        };
+        // Drained rather than filtered: every id in it is either cancelled here
+        // or belongs to a batch that is about to be, so nothing is left owed.
+        let queued: Vec<WriteId> = log.queue.drain(..).collect();
+
+        // The batches any of those rows belonged to. Collected first, because
+        // cancelling a sibling means reaching into *another* device's queue and
+        // the borrow above is still live.
+        let mut doomed: BTreeSet<BatchId> = BTreeSet::new();
+        let mut canceled = 0u64;
+        for id in &queued {
+            if let Some(mut record) = self.records.get_mut(id) {
+                if let Some(batch) = record.batch.clone() {
+                    doomed.insert(batch);
+                }
+                record.status = WriteStatus::Canceled {
+                    reason: reason.to_owned(),
+                };
+                canceled += 1;
+            }
+        }
+
+        for batch in doomed {
+            canceled += cancel_batch(&mut state, &self.records, &batch, reason);
+        }
+        canceled
+    }
+}
+
+/// Cancel every *other* member's row in `batch`, and forget the rendezvous.
+///
+/// Free-standing because it reaches across devices — the member whose removal
+/// started this is only one of the queues involved — and a method would have
+/// implied it was that member's business.
+fn cancel_batch(
+    state: &mut State,
+    records: &DashMap<WriteId, WriteRecord>,
+    batch: &BatchId,
+    reason: &str,
+) -> u64 {
+    let Some(entry) = state.batches.remove(batch) else {
+        return 0;
+    };
+
+    let mut canceled = 0u64;
+    for member in &entry.members {
+        let Some(log) = state.logs.get_mut(member) else {
+            continue;
+        };
+        // Only the rows of *this* batch: a member may have unrelated writes
+        // behind it, and those are still owed to a device that still exists.
+        let (doomed, kept): (Vec<WriteId>, Vec<WriteId>) = log.queue.drain(..).partition(|id| {
+            records
+                .get(id)
+                .is_some_and(|record| record.batch.as_ref() == Some(batch))
+        });
+        log.queue.extend(kept);
+
+        for id in doomed {
+            if let Some(mut record) = records.get_mut(&id)
+                && record.status == WriteStatus::Pending
+            {
+                record.status = WriteStatus::Canceled {
+                    reason: format!("{reason} (this write's device group could not act together)"),
+                };
+                canceled += 1;
+            }
+        }
+    }
+    canceled
 }
 
 #[async_trait::async_trait]
@@ -1425,6 +1552,89 @@ mod tests {
         );
     }
 
+    // ---- a device leaving the fleet ------------------------------------
+
+    /// The removal sequence's second step: nothing is left owed to an id no
+    /// caller can address any more.
+    #[tokio::test]
+    async fn cancelling_a_departed_devices_queue_settles_every_pending_write() {
+        let outbox = outbox();
+        submit(&outbox, "first", title("a")).await.unwrap();
+        submit(&outbox, "second", title("b")).await.unwrap();
+
+        assert_eq!(outbox.cancel_queued(DEV, "the device was removed"), 2);
+
+        for id in ["first", "second"] {
+            let record = outbox.write(id.to_owned()).await.unwrap().expect("kept");
+            assert!(
+                matches!(record.status, WriteStatus::Canceled { ref reason }
+                    if reason.contains("removed")),
+                "{id}: {:?}",
+                record.status
+            );
+        }
+        // Nothing is left for a relay to pick up.
+        assert!(
+            outbox
+                .claim_next(DEV.to_owned(), at(T0))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A cancelled write stays *readable*. Purging the record would turn a
+    /// caller's poll into a `404`, destroying the very evidence the
+    /// cancellation created.
+    #[tokio::test]
+    async fn a_cancelled_write_is_still_fetchable() {
+        let outbox = outbox();
+        submit(&outbox, "gone", title("a")).await.unwrap();
+        outbox.cancel_queued(DEV, "removed");
+
+        assert!(outbox.write("gone".to_owned()).await.unwrap().is_some());
+        assert_eq!(outbox.writes_for(DEV.to_owned()).await.unwrap().len(), 1);
+    }
+
+    /// An in-flight write is mid-exchange on a connection that is still open, so
+    /// it settles normally. Cancelling it here would race the relay's `settle`
+    /// for the same record.
+    #[tokio::test]
+    async fn an_in_flight_write_is_left_to_finish() {
+        let outbox = outbox();
+        submit(&outbox, "claimed", title("a")).await.unwrap();
+        submit(&outbox, "queued", title("b")).await.unwrap();
+        outbox.claim_next(DEV.to_owned(), at(T0)).await.unwrap();
+
+        assert_eq!(
+            outbox.cancel_queued(DEV, "removed"),
+            1,
+            "only the pending row"
+        );
+
+        let in_flight = outbox.write("claimed".to_owned()).await.unwrap().unwrap();
+        assert_eq!(in_flight.status, WriteStatus::InFlight);
+        // ...and it can still be settled, which is what the relay will do when
+        // its exchange returns.
+        outbox
+            .settle(
+                "claimed".to_owned(),
+                Outcome::Succeeded(ReadValue::Text("ok".into())),
+                at(T0),
+            )
+            .await
+            .expect("an in-flight write must remain settleable");
+    }
+
+    /// Idempotent, so a removal path need not ask whether there is anything to
+    /// cancel.
+    #[tokio::test]
+    async fn cancelling_a_device_with_nothing_queued_is_a_no_op() {
+        let outbox = outbox();
+        assert_eq!(outbox.cancel_queued("nobody", "removed"), 0);
+        assert_eq!(outbox.cancel_queued(DEV, "removed"), 0);
+    }
+
     #[tokio::test]
     async fn only_claimed_writes_are_in_flight() {
         let outbox = outbox();
@@ -2046,6 +2256,84 @@ mod batch_tests {
         assert_eq!(
             expected(&outbox, RUNNING_STATE).await.map(|e| e.since),
             Some(at(T0))
+        );
+    }
+
+    /// A member leaving the fleet takes its whole batch with it.
+    ///
+    /// The rendezvous only fires when every member reaches the head of its
+    /// queue, so a departed member would hold it until the barrier timed out —
+    /// and the survivors would then act, or not, on a policy chosen for a device
+    /// group that no longer exists. Failing the batch is the answer
+    /// `Barrier::FailBatch` already gives to the same question.
+    #[tokio::test]
+    async fn cancelling_one_member_cancels_the_whole_batch() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .expect("the group submission");
+
+        // `A` leaves the fleet. `B` never asked to be left half-dispatched.
+        let canceled = outbox.cancel_queued(A, "the device was removed");
+
+        assert_eq!(canceled, 2, "both members' rows");
+        for id in ["cmd-a", "cmd-b"] {
+            let record = outbox.write(id.to_owned()).await.unwrap().expect("kept");
+            assert!(
+                matches!(record.status, WriteStatus::Canceled { .. }),
+                "{id}: {:?}",
+                record.status
+            );
+        }
+        // And the surviving member has nothing left to claim, so no relay task
+        // is going to dispatch half a group start.
+        assert!(
+            outbox
+                .claim_next(B.to_owned(), at(T0))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A member's *unrelated* writes are still owed to a device that still
+    /// exists, so cancelling a batch must not take them.
+    #[tokio::test]
+    async fn a_surviving_members_other_writes_are_untouched() {
+        let outbox = outbox();
+        outbox
+            .submit(group_start(Barrier::FailBatch))
+            .await
+            .expect("the group submission");
+        outbox
+            .submit(Submission {
+                ids: vec!["b-own".to_owned()],
+                targets: vec![B.to_owned()],
+                group: None,
+                batch: None,
+                barrier: None,
+                intent: Intent::SetSetting {
+                    field: "TIMEZONE".to_owned(),
+                    value: "Europe/Vienna".to_owned(),
+                },
+                at: at(T0),
+                idempotency_key: None,
+            })
+            .await
+            .expect("a write of B's own");
+
+        outbox.cancel_queued(A, "removed");
+
+        let own = outbox
+            .write("b-own".to_owned())
+            .await
+            .unwrap()
+            .expect("kept");
+        assert_eq!(
+            own.status,
+            WriteStatus::Pending,
+            "a write addressed to a device that still exists is still owed"
         );
     }
 }

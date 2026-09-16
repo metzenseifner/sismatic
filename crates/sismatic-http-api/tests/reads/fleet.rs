@@ -39,10 +39,13 @@ fn catalog(devices: &[&str], members: &[&str]) -> MemoryCatalog {
             .iter()
             .map(|id| DeviceSummary {
                 id: (*id).to_owned(),
+                uuid: format!("00000000-0000-0000-0000-{:012x}", id.len()),
                 host: "10.0.0.7".to_owned(),
                 port: 22023,
                 eager: false,
                 status: ConnectionStatus::Unknown,
+                disabled_fields: Vec::new(),
+                auto_disabled_fields: Vec::new(),
             })
             .collect(),
         vec![GroupSummary {

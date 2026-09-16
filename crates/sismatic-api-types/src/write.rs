@@ -110,12 +110,17 @@ pub enum DesiredRecordingState {
 /// the other is "which rule". See [`ApiError`](crate::ApiError) for the whole
 /// argument.
 ///
-/// The distinction earns its keep: three of these four say the device is
-/// already in the state that was asked for, which a caller can often treat as
-/// benign, while [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was
-/// discarded and something has to be done about it. A client that could not
-/// tell them apart would either treat every `409` as an error or silently lose
-/// metadata edits.
+/// The distinction earns its keep: three of these say the device is already in
+/// the state that was asked for, which a caller can often treat as benign, while
+/// [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was discarded and
+/// something has to be done about it. A client that could not tell them apart
+/// would either treat every `409` as an error or silently lose metadata edits.
+///
+/// [`FieldDisabled`](Rejection::FieldDisabled) adds a third kind, and the one a
+/// client must handle differently again: the four above are *states* and may
+/// admit the same request a moment later, so retrying is reasonable. That one is
+/// configuration and will refuse forever until an operator edits the devices
+/// file, so retrying is pure waste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -126,6 +131,23 @@ pub enum Rejection {
     AlreadyRecording,
     AlreadyPaused,
     NotRecording,
+    /// The write names a field the target device's `disabled_fields` switches
+    /// off — or, for a group, that at least one member switches off.
+    ///
+    /// The odd one out among these, and worth saying how. The other four are
+    /// *states*: they change on their own, and the same request a moment later
+    /// may well be admitted. This one is configuration, so it will refuse the
+    /// same request forever until an operator edits the devices file. A client
+    /// that retries the others on a timer should not retry this one at all.
+    ///
+    /// It reports only the **declared** veto. A field the server has merely
+    /// *inferred* a device will not answer is admitted here and fails at
+    /// dispatch instead — see the note on
+    /// [`WriteStatus::Failed`] — because an
+    /// inference can heal between submission and dispatch, and a `409` that
+    /// depended on a timer would make the same request succeed or fail for
+    /// reasons no caller can see.
+    FieldDisabled,
 }
 
 /// Prose for the `409` body. Written out rather than `{:?}`-formatted: the
@@ -147,6 +169,10 @@ impl std::fmt::Display for Rejection {
             Rejection::NotRecording => {
                 f.write_str("not_recording: this device has no recording in progress")
             }
+            Rejection::FieldDisabled => f.write_str(
+                "field_disabled: this field is switched off in the devices file for \
+                 the device this write addresses",
+            ),
         }
     }
 }
@@ -166,6 +192,21 @@ pub enum WriteStatus {
     Succeeded { value: ReadValue },
     /// Terminal failure after `attempts` tries.
     Failed { reason: String },
+    /// Terminal, and nothing was attempted: the device this write was queued for
+    /// left the fleet before it could be dispatched.
+    ///
+    /// Distinct from [`Failed`](Self::Failed) because the two call for opposite
+    /// responses. A failure says the device would not take the write — retry it,
+    /// chase the recorder, look at the reason. A cancellation says nobody will
+    /// ever take it, because the recorder it was addressed to is no longer
+    /// configured; the write is not the problem and resubmitting it would only
+    /// produce a `404`.
+    ///
+    /// Only a [`Pending`](Self::Pending) write can reach this state. One already
+    /// [`InFlight`](Self::InFlight) is mid-exchange with a device that still
+    /// exists as far as that exchange is concerned, and it settles normally —
+    /// removal is cooperative everywhere else in this system and is here too.
+    Canceled { reason: String },
 }
 
 /// A device's write-side state, as `GET /v1/writes/devices/{id}/recording` reports it.

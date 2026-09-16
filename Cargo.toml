@@ -163,7 +163,11 @@ tracing-subscriber = { version = "0.3.23", features = [
 tracing-bunyan-formatter = "0.3.10"
 tracing-log = "0.2.0"
 secrecy = { version = "0.10.3", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+# `v5` alongside `v4`: device identity is *derived* from a device's resolved
+# configuration rather than drawn at random, so that equal configs are one
+# device and a reload that changes nothing replaces nothing. See
+# `sismatic_core::devices::config::fingerprint`.
+uuid = { version = "1", features = ["v4", "v5"] }
 # Time spans an operator writes in words — `30d`, `2 weeks`, `1h 30min` — for the
 # server config's `[store]` section. A superset of the syntax a systemd unit
 # file accepts, which is where an operator configuring a service on these hosts

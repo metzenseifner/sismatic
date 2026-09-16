@@ -77,6 +77,14 @@ fn spawn_over(members: &[&str]) -> (String, MemoryOutbox) {
     (address, outbox)
 }
 
+/// [`spawn_over`], with `disabled` naming per-device `disabled_fields`.
+fn spawn_disabling(members: &[&str], disabled: &[(&str, &[&str])]) -> (String, MemoryOutbox) {
+    let store: DynReadStore = Arc::new(MemoryStore::default());
+    let (address, outbox, _) =
+        harness::spawn_with(store, harness::device_group_disabling(members, disabled));
+    (address, outbox)
+}
+
 /// `POST base+SCOPE+path`, returning the status, the `Location` header and the
 /// body.
 ///

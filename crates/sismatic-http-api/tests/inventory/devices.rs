@@ -28,8 +28,21 @@ async fn the_device_index_lists_the_configured_set_ordered_by_id() {
     assert_eq!(
         body,
         serde_json::json!({"devices": [
-            {"id": "alpha", "host": "10.0.0.1", "port": 22023, "eager": true, "status": "unknown"},
-            {"id": "zulu", "host": "10.0.0.9", "port": 22023, "eager": false, "status": "unknown"},
+            {
+                "id": "alpha",
+                "uuid": "00000000-0000-0000-0000-000000000005",
+                "host": "10.0.0.1", "port": 22023, "eager": true, "status": "unknown",
+                // Both empty, and both *present*: a client branching on whether
+                // a field is switched off must not have to tell an absent key
+                // from an empty list.
+                "disabled_fields": [], "auto_disabled_fields": [],
+            },
+            {
+                "id": "zulu",
+                "uuid": "00000000-0000-0000-0000-000000000004",
+                "host": "10.0.0.9", "port": 22023, "eager": false, "status": "unknown",
+                "disabled_fields": [], "auto_disabled_fields": [],
+            },
         ]})
     );
 }
@@ -211,4 +224,111 @@ async fn a_device_the_status_port_does_not_know_stays_unknown() {
 
     let (_, body) = get(&address, "/devices/ghost").await;
     assert_eq!(body["device"]["status"], "unknown");
+}
+
+// ---- the two halves of the field veto ----------------------------------
+
+/// The declared half travels with the configuration, so it is on the catalog's
+/// summary and needs no live port to reach the wire.
+#[tokio::test]
+async fn the_detail_route_reports_the_declared_veto() {
+    let mut device = summary("licensed", "10.0.0.1", false);
+    device.disabled_fields = vec!["STREAM_2_NAME".to_owned(), "STREAM_3_NAME".to_owned()];
+    let catalog = MemoryCatalog::new(vec![device], vec![]);
+    let address = spawn_with(catalog);
+
+    let (code, body) = get(&address, "/devices/licensed").await;
+
+    assert_eq!(code, 200);
+    assert_eq!(
+        body["device"]["disabled_fields"]
+            .as_array()
+            .expect("disabled_fields"),
+        &vec![
+            serde_json::json!("STREAM_2_NAME"),
+            serde_json::json!("STREAM_3_NAME")
+        ]
+    );
+}
+
+/// The inferred half is an observation, so it arrives through the same port as
+/// `status` and is absent from the catalog entirely. This is the assertion that
+/// would fail if the overlay were dropped: the catalog's own value is `[]`, so a
+/// handler that forgot to overlay would still answer `200` with a plausible body.
+#[tokio::test]
+async fn the_detail_route_reports_the_inferred_veto() {
+    let catalog = MemoryCatalog::new(vec![summary("refuser", "10.0.0.1", false)], vec![]);
+    let status = harness::StatedStatus::refusing("refuser", &["STREAM_2_NAME"]);
+    let address = spawn_with_status(catalog, status);
+
+    let (code, body) = get(&address, "/devices/refuser").await;
+
+    assert_eq!(code, 200);
+    let inferred = &body["device"]["auto_disabled_fields"]
+        .as_array()
+        .expect("auto_disabled_fields")[0];
+    assert_eq!(inferred["name"], "STREAM_2_NAME");
+    assert_eq!(inferred["disabled"], true);
+    assert_eq!(inferred["refusals"], 2);
+    assert!(
+        inferred["retry_in_secs"].is_null(),
+        "with self-heal off there is no next attempt to report"
+    );
+}
+
+/// ...and the index overlays it too, so a dashboard rendering the whole fleet
+/// does not have to fetch each device to find out what it is not being asked.
+#[tokio::test]
+async fn the_index_reports_the_inferred_veto() {
+    let catalog = MemoryCatalog::new(vec![summary("refuser", "10.0.0.1", false)], vec![]);
+    let status = harness::StatedStatus::refusing("refuser", &["RTMP_STREAM_1_LIVE_STATE"]);
+    let address = spawn_with_status(catalog, status);
+
+    let (code, body) = get(&address, "/devices").await;
+
+    assert_eq!(code, 200);
+    assert_eq!(
+        body["devices"][0]["auto_disabled_fields"][0]["name"],
+        "RTMP_STREAM_1_LIVE_STATE"
+    );
+}
+
+/// A device with nothing declared and nothing inferred reports two empty lists
+/// rather than omitting the keys. A client branching on "is this field off"
+/// should not have to tell an absent key from an empty one.
+#[tokio::test]
+async fn a_device_with_no_veto_reports_both_lists_empty() {
+    let catalog = MemoryCatalog::new(vec![summary("plain", "10.0.0.1", false)], vec![]);
+    let address = spawn_with(catalog);
+
+    let (code, body) = get(&address, "/devices/plain").await;
+
+    assert_eq!(code, 200);
+    assert_eq!(
+        body["device"]["disabled_fields"]
+            .as_array()
+            .expect("disabled_fields is present"),
+        &Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(
+        body["device"]["auto_disabled_fields"]
+            .as_array()
+            .expect("auto_disabled_fields is present"),
+        &Vec::<serde_json::Value>::new()
+    );
+}
+
+/// The configuration identity reaches the wire, which is what lets a caller tell
+/// "the same recorder, reconfigured" from "the same recorder, untouched" across
+/// two reads.
+#[tokio::test]
+async fn a_device_reports_its_configuration_uuid() {
+    let catalog = MemoryCatalog::new(vec![summary("identified", "10.0.0.1", false)], vec![]);
+    let address = spawn_with(catalog);
+
+    let (code, body) = get(&address, "/devices/identified").await;
+
+    assert_eq!(code, 200);
+    let uuid = body["device"]["uuid"].as_str().expect("uuid");
+    assert_eq!(uuid.len(), 36, "an RFC 4122 rendering, got {uuid:?}");
 }
