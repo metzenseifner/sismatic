@@ -21,6 +21,9 @@
 
     # Pin the exact Rust toolchain (instead of whatever nixpkgs ships).
     # rust-overlay can read rust-toolchain.toml so cargo-outside-nix matches.
+    # Update upstream rust toolchain availability with: nix flake update rust-overlay
+    # The actual toolchain version is specified in the rust-toolchain.toml
+    # nix build --no-link --print-out-paths 'github:oxalica/rust-overlay'
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
