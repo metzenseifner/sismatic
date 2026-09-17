@@ -72,14 +72,56 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
       # cargo must be on PATH for release-plz to read metadata / publish. core's
-      # default features pull in no native deps, so a plain pinned toolchain is
-      # enough (no Nix needed for this workflow).
-      - uses: dtolnay/rust-toolchain@1.92.0
+      # default features pull in no native deps, so a plain toolchain is enough
+      # (no Nix needed for this workflow).
+      #
+      # Deliberately NOT the project's pinned toolchain. This job builds no
+      # shipping artifact; it runs release-plz, whose version determination
+      # shells out to cargo-semver-checks, which reads rustdoc JSON — a format
+      # tied to the compiler, so it enforces its own rustc floor that moves with
+      # upstream. Pinning that to our MSRV couples two versions with no reason
+      # to agree, and on 2026-09-16 they stopped agreeing (run 35062233853):
+      #
+      #     error: rustc version is not high enough: >=1.93.0 needed, got 1.92.0
+      #
+      # Nothing in the tree had changed. `release-plz/action` defaults its
+      # `version` input to whatever was latest when the action tag was cut, so
+      # `@v0.5` floats the CLI: 0.3.162 (green, 2026-09-08) became 0.3.167,
+      # which bundles a cargo-semver-checks wanting rustc >= 1.93. Against a
+      # pinned 1.92.0 that made a calendar event red main.
+      #
+      # Both pins below are load-bearing. `version` stops the CLI floating, so
+      # an upstream release can no longer break main without a commit here.
+      # RUSTUP_TOOLCHAIN — not the action pin — is what actually selects the
+      # compiler: rustup ranks the env var (2) above a rust-toolchain.toml
+      # directory override (4) and above the default toolchain the action sets
+      # (5), so ./rust-toolchain.toml would otherwise win and the action pin
+      # would be decorative.
+      #
+      # Which rust-toolchain.toml governs is worth stating, because the answer
+      # resembles the tag-wedge failure documented in release-plz.toml.
+      # cargo-semver-checks is run against a worktree checked out at the last
+      # tag, carrying *that tag's* rust-toolchain.toml — if that file governed,
+      # main could never fix itself, since the tag only moves via the release PR
+      # this job opens. It does not govern: release-plz spawns the tool with no
+      # current_dir (release_plz_core/src/semver_check.rs), the rustc gate is
+      # rustc_version::version() in that inherited cwd (cargo-semver-checks
+      # src/lib.rs), and both rustdoc builds are driven by --manifest-path
+      # rather than a chdir. Everything resolves against this checkout — and the
+      # env var outranks all of it regardless.
+      #
+      # `stable` is a deliberate float, in the one direction cargo-semver-checks
+      # always wants. Its only failure mode is the crate ceasing to compile on a
+      # new stable, and this job is advisory: it proposes a version bump, it
+      # never publishes. Pin it to an explicit version if that trade changes.
+      - uses: dtolnay/rust-toolchain@stable
       - name: release-plz release-pr
         uses: release-plz/action@v0.5
         with:
           command: release-pr
+          version: 0.3.167
         env:
+          RUSTUP_TOOLCHAIN: stable
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -99,11 +141,17 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
-      - uses: dtolnay/rust-toolchain@1.92.0
+      # `stable` + the two pins below, for the reasons spelled out on the
+      # release-pr job above. Keep the three values in sync across both jobs:
+      # they must agree, since either job reaching cargo-semver-checks on a
+      # rustc below its floor fails the same way.
+      - uses: dtolnay/rust-toolchain@stable
       - name: release-plz release
         uses: release-plz/action@v0.5
         with:
           command: release
+          version: 0.3.167
         env:
+          RUSTUP_TOOLCHAIN: stable
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
