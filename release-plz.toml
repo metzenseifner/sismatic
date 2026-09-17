@@ -88,8 +88,47 @@ name = "sismatic-core"
 publish = false
 version_group = "sismatic"
 
+# `semver_check = false` here and on sismatic-http-api below: neither member can
+# be semver-checked, and neither ever has been.
+#
+# cargo-semver-checks builds the baseline from the *packaged* crate release-plz
+# produces under `<worktree>/target/package/`. Packaging rewrites every internal
+# path dependency into a registry dependency — the "publishable dependency" rule
+# at the top of this file — so packaged sismatic-python-sdk asks crates.io for
+# `sismatic-core = "0"`, and packaged sismatic-http-api asks for
+# `sismatic-api-types` and `sismatic-store`. No sismatic crate exists there, so
+# resolution dies:
+#
+#     error: no matching package named `sismatic-api-types` found
+#
+# `cargo package --workspace` *does* substitute local siblings, through a
+# temporary local registry at `target/package/tmp-registry` — but only for the
+# duration of its own verification pass. cargo-semver-checks resolves later, in a
+# throwaway `placeholder` crate of its own, where that source replacement is
+# gone. Measured on a two-crate synthetic workspace: same failure, and identical
+# under cargo 1.92 and current stable. Structural, not a toolchain regression.
+#
+# It went unnoticed because release-plz <= 0.3.162 mapped every cargo-semver-
+# checks exit code it did not recognise to `Compatible`:
+#
+#     if stderr.contains("semver requires new major version") { Incompatible }
+#     else { Ok(SemverCheck::Compatible) }
+#
+# So every "sismatic-http-api: ... (✓ API compatible changes)" in this repo's
+# history is a false green — the check has never once run to completion. 0.3.167
+# (release-plz#3021, "detect cargo-semver-checks failures") turned those exit
+# codes into hard errors, which is the only thing that actually changed; it
+# stalled the release PR on the 2026-09-17 push.
+#
+# This flag therefore removes an error, not a guarantee: it makes explicit the
+# behaviour the workspace has had all along. Breaking changes in these two are
+# still caught the way they always have been — by `!` / BREAKING CHANGE markers
+# in conventional commits. sismatic-core deliberately keeps the check, and it
+# genuinely works there: core has no internal dependencies, so its packaged
+# baseline resolves against crates.io-free input.
 [[package]]
 name = "sismatic-python-sdk"
+semver_check = false
 version_group = "sismatic"
 
 # Unreleased members. Each carries a *scoped* git_tag_name whose regex can never
@@ -140,8 +179,12 @@ git_tag_name = "{{ package }}-v{{ version }}"
 version_group = "sismatic"
 release = false
 
+# `semver_check = false`: the internal path deps sismatic-api-types and
+# sismatic-store make this member's packaged baseline unresolvable. Full
+# reasoning in the block above the sismatic-python-sdk entry.
 [[package]]
 name = "sismatic-http-api"
+semver_check = false
 version_group = "sismatic"
 
 [[package]]
