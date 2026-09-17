@@ -171,8 +171,9 @@ inactivity timer never lets the connection go cold. Because `eager` means
 "hold a warm connection over time," `eager_retry_secs` sets how often to
 re-attempt the handshake for an eager device that is unreachable at startup or
 has since dropped (`0` gives up after the first failure). See
-[the design note on eager connections and SIS keepalive](https://github.com/metzenseifner/sismatic/blob/main/docs/sis-keepalive-eager-connections.md)
-for the full rationale.
+[Warm versus cold connections](https://github.com/metzenseifner/sismatic#warm-versus-cold-connections)
+for the full rationale, including `cold_backoff_secs` — which stops a single
+unreachable device from costing every caller its own connect timeout.
 
 ## API at a glance
 
