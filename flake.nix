@@ -480,7 +480,7 @@
             '';
           };
 
-          # Node for the web/ frontend (vite + react-ts). nixpkgs attribute
+          # Node for the http-ui/ frontend (vite + react-ts). nixpkgs attribute
           # names carry only the MAJOR version — there is no `nodejs_24_16` —
           # because the minor/patch is a property of the nixpkgs *revision*,
           # not of the attribute. That revision is pinned in flake.lock, so
@@ -508,7 +508,57 @@
                 flake.nix: Node is pinned to ${nodeVersion}, but the locked
                 nixpkgs now ships ${pkgs.nodejs_24.version}. To accept the bump set
                   nodeVersion = "${pkgs.nodejs_24.version}";
-                and re-run `npm ci` in web/ so the lockfile is rebuilt against it.
+                and re-run `pnpm install` in http-ui/ so the lockfile is rebuilt.
+              '';
+
+          # pnpm, pinned the same way as Node. There IS coupling to Node, in
+          # three directions that behave quite differently:
+          #
+          # 1. pnpm declares `engines.node`: 11.9.0 wants >= 22.13, 10.x wants
+          #    >= 18.12. pnpmRequiresNode records the pinned pnpm's figure and
+          #    the assert checks the pinned Node against it, so an
+          #    incompatible pair is an eval error, not a runtime surprise.
+          #    Re-read it after a bump with:
+          #      nix eval --raw --impure --expr '(builtins.fromJSON (builtins.readFile "${(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.pnpm_11}/libexec/pnpm/package.json")).engines.node'
+          #
+          # 2. The `pnpm` CLI does not actually run on the Node below. nixpkgs
+          #    gives it a shebang pointing at its own nodejs-slim (24.16.0 in
+          #    this revision), so pnpm's interpreter is nixpkgs' choice, not
+          #    ours. Only the scripts pnpm *spawns* (`pnpm run dev`) use the
+          #    Node on PATH. That is why (1) is a recorded constant rather
+          #    than a check against pnpm's real interpreter: the two are
+          #    independent, and the one that matters for project code is ours.
+          #
+          # 3. pnpm 11 replaces itself, and Node, at runtime. A
+          #    `packageManager` or `devEngines.packageManager` field naming a
+          #    different pnpm makes it download and exec that version
+          #    (`pmOnFail` defaults to "download"); `devEngines.runtime` does
+          #    the same for Node via `runtimeOnFail`. Either silently defeats
+          #    this pin. The only places that switch it off are
+          #    `pnpm-workspace.yaml` (`pmOnFail: ignore`) and the CLI flag
+          #    (`--pm-on-fail=ignore`) — measured, not assumed: `.npmrc` is
+          #    not consulted for it, nor is any npm_config_* env var, and the
+          #    pnpm 10 spelling (`manage-package-manager-versions`) is gone.
+          #    The shellHook warns when http-ui/ is missing the setting.
+          #
+          # Note: pnpm_9 is marked insecure in this nixpkgs revision, so 10 or
+          # 11 are the real choices.
+          pnpmVersion = "11.9.0";
+          pnpmRequiresNode = "22.13";
+          pnpm =
+            assert lib.assertMsg (lib.versionAtLeast nodeVersion pnpmRequiresNode) ''
+              flake.nix: pnpm ${pnpmVersion} requires Node >= ${pnpmRequiresNode}, but Node
+              is pinned to ${nodeVersion}. Raise nodeVersion (and the nodejs_NN
+              attribute it reads) or pin an older pnpm.
+            '';
+            if pkgs.pnpm_11.version == pnpmVersion then
+              pkgs.pnpm_11
+            else
+              throw ''
+                flake.nix: pnpm is pinned to ${pnpmVersion}, but the locked
+                nixpkgs now ships ${pkgs.pnpm_11.version}. To accept the bump set
+                  pnpmVersion = "${pkgs.pnpm_11.version}";
+                and re-check pnpmRequiresNode against the new pnpm's engines.node.
               '';
 
           # Named binding (not just an output attr) so the devShell can
@@ -1121,12 +1171,13 @@
                 # Doc site: `mkdocs serve` / `mkdocs build` (same toolchain the
                 # `nix run .#docs` app uses).
                 docsEnv
-                # Frontend toolchain for web/ (vite + react-ts). Pinned by the
+                # Frontend toolchain for http-ui/ (vite + react-ts). Pinned by the
                 # flake like every other tool, so `npm` here is the same npm on
                 # a laptop and in CI rather than whatever the host happens to
                 # have on PATH. Scaffold with:
-                #   npm create vite@latest web -- --template react-ts
+                #   pnpm install   (in http-ui/)
                 nodejs
+                pnpm
                 # zero2prod chapter 3+: database tooling
                 # pkgs.sqlx-cli
                 # pkgs.postgresql
@@ -1171,6 +1222,19 @@
                 [ -d "$SIS_VENV" ] || python3 -m venv "$SIS_VENV"
                 export VIRTUAL_ENV="$SIS_VENV"
                 export PATH="$SIS_VENV/bin:$PATH"
+
+                # pnpm can swap itself (and Node) out at runtime on the
+                # strength of a package.json field, which would quietly undo
+                # the pins above. Only http-ui/pnpm-workspace.yaml can disable
+                # that, and the flake cannot write a file into a project that
+                # does not exist yet -- so warn rather than imply the pin is
+                # airtight. See the pnpm binding for the mechanism.
+                SIS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+                if [ -f "$SIS_ROOT/http-ui/package.json" ] \
+                  && ! grep -qs pmOnFail "$SIS_ROOT/http-ui/pnpm-workspace.yaml"; then
+                  echo "warning: http-ui/pnpm-workspace.yaml does not set 'pmOnFail: ignore', so a" >&2
+                  echo "         packageManager field can override this flake's pnpm ${pnpmVersion}." >&2
+                fi
               '';
             }
             // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
