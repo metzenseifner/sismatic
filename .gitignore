@@ -8,6 +8,11 @@ dist
 .claude
 rust-analyzer
 
+# Node / frontend (http-ui/)
+node_modules/
+*.tsbuildinfo
+.vite/
+
 # Python
 .venv/
 sis-venv/
