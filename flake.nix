@@ -480,6 +480,37 @@
             '';
           };
 
+          # Node for the web/ frontend (vite + react-ts). nixpkgs attribute
+          # names carry only the MAJOR version — there is no `nodejs_24_16` —
+          # because the minor/patch is a property of the nixpkgs *revision*,
+          # not of the attribute. That revision is pinned in flake.lock, so
+          # `nodejs_24` resolves to exactly one version (today 24.16.0) on
+          # every machine and in every CI run until someone runs
+          # `nix flake update`. The pin is the lock, not the attribute name.
+          #
+          # The guard below makes that implicit pin explicit: a minor bump
+          # riding along with an unrelated `nix flake update` becomes an
+          # eval-time error naming both versions, instead of a silent change
+          # in everyone's dev shell. To accept a bump, edit nodeVersion.
+          #
+          # Switching majors: nodejs_22 (maintenance LTS until 2027-04),
+          # nodejs_24 (active LTS), nodejs_26 (current). Vite needs
+          # >= 20.19 / >= 22.12. The nodejs derivation bundles npm + npx.
+          nodeVersion = "24.16.0";
+          nodejs =
+            # without this guard, a minor bump arrives silently as a side effect
+            # of nix flake update. this forces manual decision to accept the
+            # incremented minor version.
+            if pkgs.nodejs_24.version == nodeVersion then
+              pkgs.nodejs_24
+            else
+              throw ''
+                flake.nix: Node is pinned to ${nodeVersion}, but the locked
+                nixpkgs now ships ${pkgs.nodejs_24.version}. To accept the bump set
+                  nodeVersion = "${pkgs.nodejs_24.version}";
+                and re-run `npm ci` in web/ so the lockfile is rebuilt against it.
+              '';
+
           # Named binding (not just an output attr) so the devShell can
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
@@ -1090,6 +1121,12 @@
                 # Doc site: `mkdocs serve` / `mkdocs build` (same toolchain the
                 # `nix run .#docs` app uses).
                 docsEnv
+                # Frontend toolchain for web/ (vite + react-ts). Pinned by the
+                # flake like every other tool, so `npm` here is the same npm on
+                # a laptop and in CI rather than whatever the host happens to
+                # have on PATH. Scaffold with:
+                #   npm create vite@latest web -- --template react-ts
+                nodejs
                 # zero2prod chapter 3+: database tooling
                 # pkgs.sqlx-cli
                 # pkgs.postgresql
