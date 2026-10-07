@@ -1,0 +1,14 @@
+# pnpm settings live here, not in .npmrc (pnpm 11 moved them; see
+# https://pnpm.io/settings). The flake pins pnpm and Node, so this file's
+# only job is to stop pnpm from overriding that pin at runtime.
+#
+# pmOnFail governs what pnpm does when a `packageManager` or
+# `devEngines.packageManager` field names a pnpm other than the running one.
+# The default is "download": pnpm fetches that version and re-execs itself,
+# silently bypassing the Nix-pinned binary. "ignore" keeps whatever the flake
+# put on PATH, which is the single source of truth for tool versions here.
+#
+# The matching knob for Node is runtimeOnFail (devEngines.runtime); it is left
+# at its default only because no runtime field is declared. Add
+# `runtimeOnFail: ignore` here if one is ever introduced.
+pmOnFail: ignore
