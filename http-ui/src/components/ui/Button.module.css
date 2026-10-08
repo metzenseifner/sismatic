@@ -1,0 +1,17 @@
+/* Button.module.css */
+.button {
+  min-height: var(--tap-size);
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-radius: var(--radius);
+  font: inherit;
+  cursor: pointer;
+}
+.primary { background: var(--color-primary); color: white; }
+.secondary { background: var(--color-surface); color: var(--color-text); }
+
+/* Only apply hover on devices with a mouse or trackpad,
+   so iPhone and iPad taps do not leave a "stuck" hover color */
+@media (hover: hover) {
+  .button:hover { filter: brightness(1.1); }
+}
