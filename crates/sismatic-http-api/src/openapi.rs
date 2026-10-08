@@ -223,6 +223,16 @@ const SCALAR_HTML: &str = r#"<!doctype html>
         // from one of them, for the same reason `ReadValue` does.
         sismatic_api_types::ConfigDocument,
         sismatic_api_types::ConfigPatch,
+        // Named here despite being no body at all, because the walk above
+        // cannot reach it. It is a *query* field — `ExportQuery`'s `format` —
+        // and `ExportQuery` enters the document through `params(..)` on the
+        // export handler rather than as a schema, so nothing registered leads
+        // to it. `IntoParams` writes the `$ref` to this enum but registers
+        // nothing, so left off this list the reference dangles: the document
+        // still serves and still renders, and every generator that resolves
+        // refs before emitting refuses the whole document over the one hole.
+        // `the_document_has_no_dangling_refs` is what notices.
+        sismatic_api_types::ExportFormat,
     )),
     tags(
         (name = "reads", description =

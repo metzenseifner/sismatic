@@ -12,3 +12,23 @@
 # at its default only because no runtime field is declared. Add
 # `runtimeOnFail: ignore` here if one is ever introduced.
 pmOnFail: ignore
+
+# openapi-typescript 7.13.0 declares `peerDependencies: { typescript: "^5.x" }`
+# and this project is on TypeScript 6, so pnpm reports an unmet peer. The range
+# is stale metadata, not a real incompatibility: every published version up to
+# and including 7.13.0 (latest) carries `^5.x`, so there is nothing to upgrade
+# to, and openapi-typescript does use the peer at runtime — it resolves the
+# hoisted typescript 6.0.3 to build the AST it emits.
+#
+# Checked rather than assumed, against typescript 6.0.3: the CLI generates for
+# a 3.1 schema exercising $ref, arrays, nullable and format, and `tsc --strict`
+# with skipLibCheck disabled accepts the result, including indexing
+# paths/components. So the honest fix is to widen the range we accept, not to
+# drag the project back to TypeScript 5 for one codegen tool.
+#
+# Scope note: allowedVersions is keyed `package>peer`, so this widens the peer
+# only for openapi-typescript. Any other package demanding typescript ^5 still
+# warns. Drop this entry once upstream ships a release allowing 6.
+peerDependencyRules:
+  allowedVersions:
+    openapi-typescript>typescript: "6"
