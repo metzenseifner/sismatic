@@ -481,10 +481,10 @@
           };
 
           # Node for the http-ui/ frontend (vite + react-ts). nixpkgs attribute
-          # names carry only the MAJOR version — there is no `nodejs_24_16` —
+          # names carry only the MAJOR version — there is no `nodejs_26_4` —
           # because the minor/patch is a property of the nixpkgs *revision*,
           # not of the attribute. That revision is pinned in flake.lock, so
-          # `nodejs_24` resolves to exactly one version (today 24.16.0) on
+          # `nodejs_26` resolves to exactly one version (today 26.4.0) on
           # every machine and in every CI run until someone runs
           # `nix flake update`. The pin is the lock, not the attribute name.
           #
@@ -494,20 +494,38 @@
           # in everyone's dev shell. To accept a bump, edit nodeVersion.
           #
           # Switching majors: nodejs_22 (maintenance LTS until 2027-04),
-          # nodejs_24 (active LTS), nodejs_26 (current). Vite needs
-          # >= 20.19 / >= 22.12. The nodejs derivation bundles npm + npx.
-          nodeVersion = "24.16.0";
+          # nodejs_24 (LTS, but see below), nodejs_26 (current, LTS from
+          # 2026-10). Vite needs >= 20.19 / >= 22.12. The nodejs derivation
+          # bundles npm + npx.
+          #
+          # NOT nodejs_24: 24.16.0 aborts `pnpm add` (SIGABRT, exit 134).
+          # Node tracks the raw fds a worker thread opens via fs.open/fs.close
+          # and closes them on worker exit (the `trackUnmanagedFds` Worker
+          # option, on by default). 24.16.0 miscounts — it warns "File
+          # descriptor N closed but not opened in unmanaged mode" — and on
+          # worker exit closes an fd it does not own, which is libuv's own
+          # async pipe. The next uv_async_send() write gets EBADF, and libuv
+          # answers that with abort():
+          #   Worker::Exit -> Environment::ExitEnv -> uv_async_send -> abort
+          # The install itself completes first, so the lockfile is written and
+          # only the exit status is lost — which makes it easy to mistake for
+          # a pnpm bug. It is not: pnpm 11.9.0 is clean on both neighbouring
+          # majors, and pnpm exposes no knob for trackUnmanagedFds. Measured
+          # in http-ui/, 3 runs each: 22.23.1 and 26.4.0 both exit 0 with zero
+          # fd warnings; 24.16.0 exits 134 with 9, every run. Revisit 24 only
+          # if a later patch fixes it.
+          nodeVersion = "26.4.0";
           nodejs =
             # without this guard, a minor bump arrives silently as a side effect
             # of nix flake update. this forces manual decision to accept the
             # incremented minor version.
-            if pkgs.nodejs_24.version == nodeVersion then
-              pkgs.nodejs_24
+            if pkgs.nodejs_26.version == nodeVersion then
+              pkgs.nodejs_26
             else
               throw ''
                 flake.nix: Node is pinned to ${nodeVersion}, but the locked
-                nixpkgs now ships ${pkgs.nodejs_24.version}. To accept the bump set
-                  nodeVersion = "${pkgs.nodejs_24.version}";
+                nixpkgs now ships ${pkgs.nodejs_26.version}. To accept the bump set
+                  nodeVersion = "${pkgs.nodejs_26.version}";
                 and re-run `pnpm install` in http-ui/ so the lockfile is rebuilt.
               '';
 
@@ -521,13 +539,20 @@
           #    Re-read it after a bump with:
           #      nix eval --raw --impure --expr '(builtins.fromJSON (builtins.readFile "${(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.pnpm_11}/libexec/pnpm/package.json")).engines.node'
           #
-          # 2. The `pnpm` CLI does not actually run on the Node below. nixpkgs
-          #    gives it a shebang pointing at its own nodejs-slim (24.16.0 in
-          #    this revision), so pnpm's interpreter is nixpkgs' choice, not
-          #    ours. Only the scripts pnpm *spawns* (`pnpm run dev`) use the
-          #    Node on PATH. That is why (1) is a recorded constant rather
-          #    than a check against pnpm's real interpreter: the two are
-          #    independent, and the one that matters for project code is ours.
+          # 2. The `pnpm` CLI does not run on the `nodejs` above. nixpkgs
+          #    builds it with its own nodejs-slim and `patchShebangs` bakes
+          #    that absolute store path into bin/pnpm.mjs, so pnpm's
+          #    interpreter is fixed at build time and the Node on PATH only
+          #    reaches the scripts pnpm *spawns* (`pnpm run dev`). Left alone
+          #    that interpreter is nixpkgs' choice: nodejs-slim_24 (24.16.0)
+          #    in this revision, which is exactly the build that aborts
+          #    `pnpm add` — see the nodeVersion comment. Repinning nodeVersion
+          #    does NOT fix that, because it never touches this shebang. So
+          #    the override below pins the interpreter too, to the slim build
+          #    of the same major as `nodeVersion`. Keep the two in step.
+          #    That is also why (1) is a recorded constant rather than a check
+          #    against pnpm's real interpreter: the two remain independent
+          #    knobs, now both set deliberately.
           #
           # 3. pnpm 11 replaces itself, and Node, at runtime. A
           #    `packageManager` or `devEngines.packageManager` field naming a
@@ -551,8 +576,18 @@
               is pinned to ${nodeVersion}. Raise nodeVersion (and the nodejs_NN
               attribute it reads) or pin an older pnpm.
             '';
+            assert lib.assertMsg (pkgs.nodejs-slim_26.version == nodeVersion) ''
+              flake.nix: pnpm's interpreter is pinned to nodejs-slim_26
+              (${pkgs.nodejs-slim_26.version}) but nodeVersion is ${nodeVersion}.
+              These must be the same build: the whole point of the override is
+              that pnpm runs on the Node we chose, not on whichever one nixpkgs
+              happened to build it against. Move both attributes together.
+            '';
             if pkgs.pnpm_11.version == pnpmVersion then
-              pkgs.pnpm_11
+              # nodejs-slim, not nodejs: generic.nix warns on the `nodejs` arg
+              # and tells you to override this one. It is the interpreter
+              # patchShebangs stamps into bin/pnpm.mjs.
+              pkgs.pnpm_11.override { nodejs-slim = pkgs.nodejs-slim_26; }
             else
               throw ''
                 flake.nix: pnpm is pinned to ${pnpmVersion}, but the locked
