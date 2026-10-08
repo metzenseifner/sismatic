@@ -35,7 +35,7 @@ export default function App() {
   return (
     <Container>
       <Stack gap="lg">
-        <h1 style={{fontSize: "var(--text-xl)"}}>Sismatic Devices Overview</h1>
+        <h1 style={{fontSize: "var(--text-xl)"}}>Sismatic Fleet Overview</h1>
 
         {error && <ErrorNotice error={error} onRetry={retry} />}
 
