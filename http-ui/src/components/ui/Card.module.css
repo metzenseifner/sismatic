@@ -1,0 +1,17 @@
+/* Card.module.css */
+.wrapper { container-type: inline-size; }
+
+.card {
+  display: grid;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background: var(--color-surface);
+  border-radius: var(--radius);
+}
+.image { border-radius: calc(var(--radius) / 2); aspect-ratio: 16 / 9; object-fit: cover; }
+.title { margin: 0 0 var(--space-sm); font-size: var(--text-lg); }
+
+/* When the card itself is wider than 32rem, put the image beside the text */
+@container (min-width: 32rem) {
+  .card { grid-template-columns: 1fr 2fr; align-items: center; }
+}

@@ -11,6 +11,7 @@
     "gen:api": "openapi-typescript http://127.0.0.1:9000/api-docs/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.1",
     "openapi-fetch": "^0.17.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
