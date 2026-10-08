@@ -198,6 +198,8 @@
               pname = "sismatic-server";
               cargoExtraArgs = "-p sismatic-server";
               meta.mainProgram = "sismatic-server";
+              # The frontend this binary serves from `/ui`.
+              env = uiEnv;
             }
           );
 
@@ -273,6 +275,9 @@
                 cargoArtifacts = craneLibMusl.buildDepsOnly muslArgs;
                 doCheck = false;
                 meta.mainProgram = "sismatic-server";
+                # The published artifact carries the same frontend the
+                # `nix build .#server` one does.
+                env = uiEnv;
               }
             );
 
@@ -596,6 +601,88 @@
                 and re-check pnpmRequiresNode against the new pnpm's engines.node.
               '';
 
+          #------------------------------------------------------------------#
+          #                    The http-ui frontend                          #
+          #------------------------------------------------------------------#
+          # Built by nix so that the bytes `sismatic-http-api` embeds are a
+          # *derivation input* rather than something a developer has to remember
+          # to rebuild. That is the whole reason this exists rather than a
+          # committed `dist/`: `crates/sismatic-http-api/src/ui.rs` makes the
+          # same claim the Scalar bundle does — "the UI a server shows is the UI
+          # that server was built with" — and a checked-in build output is
+          # exactly the skippable, version-skewable step that claim rules out.
+          # Here the frontend's sources and `pnpm-lock.yaml` are inputs to this
+          # derivation, this derivation is an input to every binary that serves
+          # it, and skew stops being representable.
+          #
+          # `src` is the flake source, which is the git tree: `node_modules/`
+          # and `dist/` are gitignored and therefore already absent from the
+          # sandbox, so there is nothing to filter out.
+          httpUi = pkgs.stdenv.mkDerivation (finalAttrs: {
+            pname = "sismatic-http-ui";
+            inherit version;
+            src = ./http-ui;
+
+            # The offline pnpm store, as a fixed-output derivation — the one
+            # place in this flake that is allowed to reach the network, and it
+            # is pinned by `hash` to exactly what `pnpm-lock.yaml` resolves to.
+            # Re-run after any `pnpm install`: set `hash = lib.fakeHash;`, build,
+            # and take the hash the mismatch reports.
+            # `fetchPnpmDeps` resolves the lockfile by *running* pnpm, so it is
+            # overridden onto the pnpm pinned above rather than taken as it
+            # comes — otherwise the store would be built by whichever pnpm
+            # nixpkgs happens to default to, which is the pin's whole purpose.
+            # (`pnpm.fetchDeps` is the deprecated alias of the same thing.)
+            pnpmDeps = (pkgs.fetchPnpmDeps.override { inherit pnpm; }) {
+              inherit (finalAttrs) pname version src;
+              fetcherVersion = 3;
+              hash = "sha256-GRhGa5SBUkionozzLYgQQDmHrNfYMo4E/18FmY+fJGU=";
+            };
+
+            # `pnpmConfigHook` needs no override: it resolves `pnpm` off `PATH`,
+            # which is what the pinned one beside it puts there. The hook links
+            # `pnpmDeps` into an offline store and installs from it, so the build
+            # below never reaches the network.
+            nativeBuildInputs = [
+              nodejs
+              pnpm
+              pkgs.pnpmConfigHook
+            ];
+
+            # `pnpm build` is `tsc -b && vite build`, so a frontend that does
+            # not type-check fails this derivation — which is why it is also
+            # registered as a check below rather than only as a package.
+            buildPhase = ''
+              runHook preBuild
+              pnpm build
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              cp -r dist $out
+              runHook postInstall
+            '';
+          });
+
+          # Handed to every derivation that compiles `sismatic-http-api` with
+          # its `ui` feature on: the server binaries, and the workspace-wide
+          # lint/test/coverage runs that compile the server as a member.
+          #
+          # Deliberately NOT part of `commonArgs`. `cargoArtifacts` is built
+          # from those, so a CSS edit would invalidate the shared third-party
+          # dependency layer that every check in this file stands on — tens of
+          # minutes of rebuild for a change no dependency can see. Nothing is
+          # lost by leaving it out: crane builds that layer over dummy sources,
+          # so no workspace member's build script runs there at all.
+          #
+          # A derivation that compiles the crate *without* this (the `doc`
+          # check, scoped to core; a bare `cargo build`) is not a failure — see
+          # `dist_dir` in that crate's `build.rs`.
+          uiEnv = {
+            SISMATIC_HTTP_UI_DIST = "${httpUi}";
+          };
+
           # Named binding (not just an output attr) so the devShell can
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
@@ -606,6 +693,12 @@
             # CI builds it on each architecture anyway.
             inherit cli server;
 
+            # The frontend building at all, on the same principle — and since
+            # `pnpm build` is `tsc -b && vite build`, this is where a type error
+            # in `http-ui/` fails the check run. The pipeline enumerates checks
+            # dynamically, so it needs no workflow change to pick this up.
+            http-ui = httpUi;
+
             # Clippy as a separate derivation: CI blocks on lints, but
             # downstream consumers can still build the package without
             # being subject to them.
@@ -614,6 +707,9 @@
               // {
                 inherit cargoArtifacts;
                 cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+                # Lints the frontend's embed path too: without this the `ui`
+                # feature would be linted against the placeholder.
+                env = uiEnv;
               }
             );
 
@@ -1077,6 +1173,9 @@
                 partitionType = "count";
                 # Don't fail if a crate has no tests yet.
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";
+                # `tests/ui.rs` and `ui::tests` assert against the *real*
+                # frontend, so the test run is given one.
+                env = uiEnv;
               }
             );
           }
@@ -1088,6 +1187,10 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # The same frontend `nextest` is given: this runs the same
+                # tests, and a `ui::tests` compiled against the placeholder
+                # would cover a different branch than the one that ships.
+                env = uiEnv;
                 # `--engine llvm` rather than tarpaulin's default, which is
                 # ptrace: that one single-steps the test binary through an INT3
                 # written over every address DWARF calls a statement, and crane
@@ -1122,6 +1225,12 @@
             inherit cli server;
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
+
+            # `nix build .#http-ui` -> the frontend's dist on its own, which is
+            # also what `.#server` embeds. Worth an output of its own so the
+            # thing the Rust build takes as an input can be built and inspected
+            # without building the binary around it.
+            http-ui = httpUi;
 
             # The dependency layer on its own. Nothing consumes this directly —
             # it exists so one machine (locally, or one CI job) can compile the

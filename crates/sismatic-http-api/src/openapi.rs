@@ -474,7 +474,10 @@ pub async fn scalar_js(request: HttpRequest, docs: web::Data<Docs>) -> HttpRespo
 ///
 /// A quality of `0` is a refusal — `gzip;q=0` and `*;q=0` both say no — and an
 /// explicit mention of `gzip` outranks a `*` that would otherwise cover it.
-fn accepts_gzip(request: &HttpRequest) -> bool {
+///
+/// Shared with [`crate::ui`], which stores the frontend's assets compressed for
+/// the same reason this stores the bundle that way.
+pub(crate) fn accepts_gzip(request: &HttpRequest) -> bool {
     let Some(header) = request.headers().get("accept-encoding") else {
         return true;
     };
