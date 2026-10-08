@@ -1,0 +1,188 @@
+/* The card answers to its own width, not the screen's, so it looks right
+   in a one-column iPhone list and in a four-column desktop grid alike. */
+.wrapper {
+  container-type: inline-size;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 0.5rem);
+  padding: var(--space-md, 1rem);
+  background: var(--color-surface, #f4f4f5);
+  border-radius: var(--radius, 0.75rem);
+  /* A colored edge so a recording card stands out even when scrolled past fast. */
+  border-left: 4px solid transparent;
+}
+.card[data-status="recording"] {
+  border-left-color: var(--color-recording, #dc2626);
+}
+.card[data-status="paused"],
+.card[data-status="mixed"] {
+  border-left-color: var(--color-paused, #92400e);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.kind {
+  display: block;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted, #71717a);
+}
+
+.name {
+  margin: 0;
+  font-size: var(--text-lg, 1.25rem);
+  overflow-wrap: anywhere;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-base, 1rem);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  /* Long titles are cut at two lines visually; screen readers still read all of it. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.title[data-empty] {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--color-muted, #71717a);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm, 0.5rem);
+}
+
+/* ─── Details ─────────────────────────────────────────────── */
+
+.details {
+  border-top: 1px solid var(--color-border, #e4e4e7);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap-size, 44px);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-primary, #2563eb);
+  list-style: none;
+}
+.summary::-webkit-details-marker {
+  display: none;
+}
+.summary::after {
+  content: "";
+  width: 0.45em;
+  height: 0.45em;
+  margin: 0 0 0.2em 0.6em;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg); /* points down: "there is more" */
+  transition: transform 150ms;
+}
+.details[open] > .summary::after {
+  margin-bottom: -0.2em;
+  transform: rotate(-135deg); /* points up: "fold it away" */
+}
+@media (prefers-reduced-motion: reduce) {
+  .summary::after {
+    transition: none;
+  }
+}
+
+.detailsBody {
+  display: grid;
+  gap: var(--space-md, 1rem);
+  padding-bottom: var(--space-sm, 0.5rem);
+  font-size: 0.875rem;
+}
+
+.subheading {
+  margin: 0 0 var(--space-xs, 0.25rem);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted, #71717a);
+}
+
+.list {
+  display: grid;
+  gap: var(--space-xs, 0.25rem);
+  margin: 0;
+}
+
+.row {
+  display: grid;
+  gap: 0 var(--space-sm, 0.5rem);
+}
+.row dt {
+  color: var(--color-muted, #71717a);
+}
+.row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.members {
+  display: grid;
+  gap: var(--space-sm, 0.5rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.member {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.15rem var(--space-sm, 0.5rem);
+}
+.memberName {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.memberTitle {
+  grid-column: 1 / -1;
+  color: var(--color-muted, #71717a);
+  overflow-wrap: anywhere;
+}
+.drift {
+  font-weight: 400;
+  color: var(--color-paused, #92400e);
+}
+
+.updated {
+  margin: 0;
+  color: var(--color-muted, #71717a);
+}
+
+/* ─── Wider cards: labels beside values ───────────────────── */
+
+@container (min-width: 26rem) {
+  .row {
+    grid-template-columns: minmax(8rem, 40%) 1fr;
+  }
+  .title {
+    font-size: var(--text-lg, 1.25rem);
+  }
+}

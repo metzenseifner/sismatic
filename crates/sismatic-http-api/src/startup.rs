@@ -46,6 +46,7 @@ use crate::openapi::{
     Docs, OPENAPI_JSON_PATH, SCALAR_JS_PATH, SCALAR_UI_PATH, openapi_json, scalar_js, scalar_ui,
 };
 use crate::stamp::Stamp;
+use crate::ui::Mount;
 
 /// The collaborators the application is assembled over.
 ///
@@ -184,6 +185,13 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
     // closure would rebuild the whole thing — document, page and a four-megabyte
     // bundle — once per thread at startup.
     let docs = web::Data::new(Docs::render());
+
+    // Built here for the same reason, and for one more: with the `ui` feature on
+    // this holds the whole frontend, so rendering it inside the closure would
+    // rebuild the asset table — a `HashMap` over every file vite emitted — once
+    // per worker thread at startup. With the feature off it is a unit struct and
+    // the two lines below compile to nothing.
+    let ui = Mount::render();
 
     let server = HttpServer::new(move || {
         // Run once per worker thread, so everything captured here is cloned per
@@ -481,6 +489,18 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
             // and 405s above into a set of near-misses that all resolve. The
             // problem is one path's, and so is the fix.
             .service(web::redirect("/api/", SCALAR_UI_PATH))
+            // The frontend, under `/ui`. Registered through `configure` rather
+            // than inline because with the `ui` feature off it registers
+            // nothing at all, and a `#[cfg]` in the middle of this chain would
+            // make the shape of the application depend on a feature.
+            //
+            // Its position is free, unlike the reads routes': everything it
+            // registers is either an exact `/` or inside a `web::scope`, so it
+            // can neither shadow a route above nor be shadowed by one. Last
+            // anyway, because that is where a reader expects the catch-all to
+            // be. See `crate::ui` for why the frontend owns a subtree rather
+            // than the root.
+            .configure(|cfg| ui.apply(cfg))
     })
     .listen(listener)?
     // The composition root owns the process's shutdown signal (it has a sync

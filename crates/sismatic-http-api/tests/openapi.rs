@@ -33,6 +33,31 @@
 //! rather than wrong — but it is also a route nobody wrote documentation for,
 //! which is a more visible omission than one that was written and dropped.
 //!
+//! # The failure that does not surface, and why it gets its own test
+//!
+//! Every drift above is visible from outside: an operation missing from the
+//! document is missing from `/api`, a path that moved answers 404. A `$ref` to
+//! a schema the document never defines is not. The document still serves,
+//! Scalar still renders it, and the hole surfaces only in whatever reads the
+//! document as a *contract* — `openapi-typescript` resolves and bundles before
+//! it emits, so one bad ref anywhere aborts the entire client codegen, with a
+//! JSON pointer for a message and nothing pointing back at the derive.
+//!
+//! The cause is structural rather than careless. `components(schemas(..))` in
+//! `Docs` names only top-level bodies and utoipa walks into them for the rest,
+//! which is why that list stays short and does not rot as types are added. But
+//! the walk starts from bodies, and a type reachable *only* through `params(..)`
+//! sits under none of them: `ExportQuery` derives `IntoParams`, which writes a
+//! `$ref` to its `format` field's enum and registers nothing, so `ExportFormat`
+//! was referenced by the export route and defined nowhere.
+//!
+//! [`the_document_has_no_dangling_refs`] closes it by walking every ref in the
+//! whole document rather than the schema subtree — parameters included, because
+//! that is where this class of hole lives — and reporting the pointer it was
+//! found at, in the shape the generator reports. The query-string structs are
+//! the standing risk: each one is a place a non-primitive field can be
+//! referenced into the document without being registered in it.
+//!
 //! # The other place a path is written by hand: the prose
 //!
 //! A route attribute is not the only literal naming a URL. utoipa lifts each
@@ -702,6 +727,124 @@ async fn the_string_aliases_are_documented_as_strings() {
 
     let device = &doc["components"]["schemas"]["Read"]["properties"]["device"];
     assert_eq!(device["type"], "string", "got {device}");
+}
+
+#[tokio::test]
+async fn the_document_has_no_dangling_refs() {
+    // The hole the `components(schemas(..))` list leaves, caught from the one
+    // angle that does not require knowing which types belong on it.
+    //
+    // Everything else about the document degrades visibly: a missing operation
+    // is missing from `/api`, a wrong path answers 404. An unresolvable `$ref`
+    // does not. The server serves the document, Scalar renders it — the ref
+    // just shows as an empty schema in a page nobody reads that closely — and
+    // the breakage lands instead on whatever consumes the document as a
+    // contract. `openapi-typescript` resolves and bundles before it emits, so
+    // one dangling ref anywhere aborts the client codegen entirely, with an
+    // error naming a JSON pointer rather than anything a reader maps back to a
+    // derive. That is a long way to carry a mistake made in a macro list.
+    //
+    // This walks every `$ref` in the whole document rather than the schema
+    // subtree, because the one that shipped was not in a schema at all: it came
+    // off `ExportQuery`'s `IntoParams`, which writes a ref to the `format`
+    // field's enum and registers nothing. Anything reached only through
+    // `params(..)` is invisible to the collector's walk over the registered
+    // bodies, so parameters are precisely where this recurs.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let defined: std::collections::BTreeSet<&str> = doc["components"]["schemas"]
+        .as_object()
+        .expect("components.schemas is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    let mut dangling = Vec::new();
+    collect_dangling_refs(&doc, &mut String::new(), &defined, &mut dangling);
+
+    assert!(
+        dangling.is_empty(),
+        "the document references schemas it does not define — a type reachable \
+         only through `params(..)` has to be named in `components(schemas(..))` \
+         explicitly: {dangling:#?}"
+    );
+}
+
+/// Every `$ref` in `node` pointing at a `components/schemas` entry that
+/// `defined` does not hold, each paired with the JSON pointer it was found at.
+///
+/// The pointer is the whole value of the assertion: `openapi-typescript`
+/// reports a failure as `#/paths/~1v1~1inventory~1config~1export/get/...`, and
+/// a test that said only *which* schema was missing would leave the reader to
+/// find where it was asked for. Built in the same shape so the two read alike.
+///
+/// Refs are resolved against `#/components/schemas/` only. The document has no
+/// others — no external files, no `#/components/parameters` — and a ref to
+/// something this does not understand is better left to the assertion above
+/// than silently treated as fine.
+fn collect_dangling_refs(
+    node: &serde_json::Value,
+    pointer: &mut String,
+    defined: &std::collections::BTreeSet<&str>,
+    out: &mut Vec<String>,
+) {
+    const PREFIX: &str = "#/components/schemas/";
+
+    match node {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "$ref" {
+                    let target = value.as_str().unwrap_or_default();
+                    if let Some(name) = target.strip_prefix(PREFIX)
+                        && !defined.contains(name)
+                    {
+                        out.push(format!("{target} referenced at {pointer}"));
+                    }
+                    continue;
+                }
+                let restore = pointer.len();
+                pointer.push('/');
+                pointer.push_str(key);
+                collect_dangling_refs(value, pointer, defined, out);
+                pointer.truncate(restore);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                let restore = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+                collect_dangling_refs(value, pointer, defined, out);
+                pointer.truncate(restore);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn the_export_format_is_documented_as_the_three_the_loader_takes() {
+    // The specific ref that dangled, pinned from the front: the `format` query
+    // parameter is the one place the document tells a client which spellings
+    // the export route accepts, and it says so by reference. A generated client
+    // gets a three-arm union from this and nothing from a bare string.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    let format = &doc["paths"]["/v1/inventory/config/export"]["get"]["parameters"][0];
+    assert_eq!(format["name"], "format", "got {format}");
+
+    let schema = &doc["components"]["schemas"]["ExportFormat"];
+    assert_eq!(
+        schema["enum"],
+        // Lowercase, because that is what the devices-file loader dispatches
+        // on and what `serde(rename_all)` puts on the wire — the variants are
+        // `Toml`, `Yaml`, `Json` in Rust and would arrive capitalized without
+        // it, which no `?format=` a reader would write.
+        serde_json::json!(["toml", "yaml", "json"]),
+        "got {schema}"
+    );
 }
 
 #[tokio::test]

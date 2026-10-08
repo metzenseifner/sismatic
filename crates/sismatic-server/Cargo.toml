@@ -34,7 +34,12 @@ sismatic-core = { workspace = true, features = ["ssh", "toml", "yaml"] }
 # It already arrives transitively through every other internal crate here; the
 # explicit edge is so the root does not depend on that being true.
 sismatic-api-types = { workspace = true }
-sismatic-http-api = { workspace = true }
+# `ui` embeds the http-ui frontend, served from `/ui`. The root is where this
+# belongs *as a decision* — the deployable artifact is the thing that either
+# carries an operator-facing UI or does not — while the bytes and the routing
+# stay in the crate whose OpenAPI document the frontend is generated from. See
+# `sismatic_http_api::ui`.
+sismatic-http-api = { workspace = true, features = ["ui"] }
 sismatic-store = { workspace = true }
 sismatic-store-memory = { workspace = true }
 sismatic-sync = { workspace = true, features = ["driver"] }

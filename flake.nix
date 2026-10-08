@@ -198,6 +198,8 @@
               pname = "sismatic-server";
               cargoExtraArgs = "-p sismatic-server";
               meta.mainProgram = "sismatic-server";
+              # The frontend this binary serves from `/ui`.
+              env = uiEnv;
             }
           );
 
@@ -273,6 +275,9 @@
                 cargoArtifacts = craneLibMusl.buildDepsOnly muslArgs;
                 doCheck = false;
                 meta.mainProgram = "sismatic-server";
+                # The published artifact carries the same frontend the
+                # `nix build .#server` one does.
+                env = uiEnv;
               }
             );
 
@@ -480,6 +485,204 @@
             '';
           };
 
+          # Node for the http-ui/ frontend (vite + react-ts). nixpkgs attribute
+          # names carry only the MAJOR version — there is no `nodejs_26_4` —
+          # because the minor/patch is a property of the nixpkgs *revision*,
+          # not of the attribute. That revision is pinned in flake.lock, so
+          # `nodejs_26` resolves to exactly one version (today 26.4.0) on
+          # every machine and in every CI run until someone runs
+          # `nix flake update`. The pin is the lock, not the attribute name.
+          #
+          # The guard below makes that implicit pin explicit: a minor bump
+          # riding along with an unrelated `nix flake update` becomes an
+          # eval-time error naming both versions, instead of a silent change
+          # in everyone's dev shell. To accept a bump, edit nodeVersion.
+          #
+          # Switching majors: nodejs_22 (maintenance LTS until 2027-04),
+          # nodejs_24 (LTS, but see below), nodejs_26 (current, LTS from
+          # 2026-10). Vite needs >= 20.19 / >= 22.12. The nodejs derivation
+          # bundles npm + npx.
+          #
+          # NOT nodejs_24: 24.16.0 aborts `pnpm add` (SIGABRT, exit 134).
+          # Node tracks the raw fds a worker thread opens via fs.open/fs.close
+          # and closes them on worker exit (the `trackUnmanagedFds` Worker
+          # option, on by default). 24.16.0 miscounts — it warns "File
+          # descriptor N closed but not opened in unmanaged mode" — and on
+          # worker exit closes an fd it does not own, which is libuv's own
+          # async pipe. The next uv_async_send() write gets EBADF, and libuv
+          # answers that with abort():
+          #   Worker::Exit -> Environment::ExitEnv -> uv_async_send -> abort
+          # The install itself completes first, so the lockfile is written and
+          # only the exit status is lost — which makes it easy to mistake for
+          # a pnpm bug. It is not: pnpm 11.9.0 is clean on both neighbouring
+          # majors, and pnpm exposes no knob for trackUnmanagedFds. Measured
+          # in http-ui/, 3 runs each: 22.23.1 and 26.4.0 both exit 0 with zero
+          # fd warnings; 24.16.0 exits 134 with 9, every run. Revisit 24 only
+          # if a later patch fixes it.
+          nodeVersion = "26.4.0";
+          nodejs =
+            # without this guard, a minor bump arrives silently as a side effect
+            # of nix flake update. this forces manual decision to accept the
+            # incremented minor version.
+            if pkgs.nodejs_26.version == nodeVersion then
+              pkgs.nodejs_26
+            else
+              throw ''
+                flake.nix: Node is pinned to ${nodeVersion}, but the locked
+                nixpkgs now ships ${pkgs.nodejs_26.version}. To accept the bump set
+                  nodeVersion = "${pkgs.nodejs_26.version}";
+                and re-run `pnpm install` in http-ui/ so the lockfile is rebuilt.
+              '';
+
+          # pnpm, pinned the same way as Node. There IS coupling to Node, in
+          # three directions that behave quite differently:
+          #
+          # 1. pnpm declares `engines.node`: 11.9.0 wants >= 22.13, 10.x wants
+          #    >= 18.12. pnpmRequiresNode records the pinned pnpm's figure and
+          #    the assert checks the pinned Node against it, so an
+          #    incompatible pair is an eval error, not a runtime surprise.
+          #    Re-read it after a bump with:
+          #      nix eval --raw --impure --expr '(builtins.fromJSON (builtins.readFile "${(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem}.pnpm_11}/libexec/pnpm/package.json")).engines.node'
+          #
+          # 2. The `pnpm` CLI does not run on the `nodejs` above. nixpkgs
+          #    builds it with its own nodejs-slim and `patchShebangs` bakes
+          #    that absolute store path into bin/pnpm.mjs, so pnpm's
+          #    interpreter is fixed at build time and the Node on PATH only
+          #    reaches the scripts pnpm *spawns* (`pnpm run dev`). Left alone
+          #    that interpreter is nixpkgs' choice: nodejs-slim_24 (24.16.0)
+          #    in this revision, which is exactly the build that aborts
+          #    `pnpm add` — see the nodeVersion comment. Repinning nodeVersion
+          #    does NOT fix that, because it never touches this shebang. So
+          #    the override below pins the interpreter too, to the slim build
+          #    of the same major as `nodeVersion`. Keep the two in step.
+          #    That is also why (1) is a recorded constant rather than a check
+          #    against pnpm's real interpreter: the two remain independent
+          #    knobs, now both set deliberately.
+          #
+          # 3. pnpm 11 replaces itself, and Node, at runtime. A
+          #    `packageManager` or `devEngines.packageManager` field naming a
+          #    different pnpm makes it download and exec that version
+          #    (`pmOnFail` defaults to "download"); `devEngines.runtime` does
+          #    the same for Node via `runtimeOnFail`. Either silently defeats
+          #    this pin. The only places that switch it off are
+          #    `pnpm-workspace.yaml` (`pmOnFail: ignore`) and the CLI flag
+          #    (`--pm-on-fail=ignore`) — measured, not assumed: `.npmrc` is
+          #    not consulted for it, nor is any npm_config_* env var, and the
+          #    pnpm 10 spelling (`manage-package-manager-versions`) is gone.
+          #    The shellHook warns when http-ui/ is missing the setting.
+          #
+          # Note: pnpm_9 is marked insecure in this nixpkgs revision, so 10 or
+          # 11 are the real choices.
+          pnpmVersion = "11.9.0";
+          pnpmRequiresNode = "22.13";
+          pnpm =
+            assert lib.assertMsg (lib.versionAtLeast nodeVersion pnpmRequiresNode) ''
+              flake.nix: pnpm ${pnpmVersion} requires Node >= ${pnpmRequiresNode}, but Node
+              is pinned to ${nodeVersion}. Raise nodeVersion (and the nodejs_NN
+              attribute it reads) or pin an older pnpm.
+            '';
+            assert lib.assertMsg (pkgs.nodejs-slim_26.version == nodeVersion) ''
+              flake.nix: pnpm's interpreter is pinned to nodejs-slim_26
+              (${pkgs.nodejs-slim_26.version}) but nodeVersion is ${nodeVersion}.
+              These must be the same build: the whole point of the override is
+              that pnpm runs on the Node we chose, not on whichever one nixpkgs
+              happened to build it against. Move both attributes together.
+            '';
+            if pkgs.pnpm_11.version == pnpmVersion then
+              # nodejs-slim, not nodejs: generic.nix warns on the `nodejs` arg
+              # and tells you to override this one. It is the interpreter
+              # patchShebangs stamps into bin/pnpm.mjs.
+              pkgs.pnpm_11.override { nodejs-slim = pkgs.nodejs-slim_26; }
+            else
+              throw ''
+                flake.nix: pnpm is pinned to ${pnpmVersion}, but the locked
+                nixpkgs now ships ${pkgs.pnpm_11.version}. To accept the bump set
+                  pnpmVersion = "${pkgs.pnpm_11.version}";
+                and re-check pnpmRequiresNode against the new pnpm's engines.node.
+              '';
+
+          #------------------------------------------------------------------#
+          #                    The http-ui frontend                          #
+          #------------------------------------------------------------------#
+          # Built by nix so that the bytes `sismatic-http-api` embeds are a
+          # *derivation input* rather than something a developer has to remember
+          # to rebuild. That is the whole reason this exists rather than a
+          # committed `dist/`: `crates/sismatic-http-api/src/ui.rs` makes the
+          # same claim the Scalar bundle does — "the UI a server shows is the UI
+          # that server was built with" — and a checked-in build output is
+          # exactly the skippable, version-skewable step that claim rules out.
+          # Here the frontend's sources and `pnpm-lock.yaml` are inputs to this
+          # derivation, this derivation is an input to every binary that serves
+          # it, and skew stops being representable.
+          #
+          # `src` is the flake source, which is the git tree: `node_modules/`
+          # and `dist/` are gitignored and therefore already absent from the
+          # sandbox, so there is nothing to filter out.
+          httpUi = pkgs.stdenv.mkDerivation (finalAttrs: {
+            pname = "sismatic-http-ui";
+            inherit version;
+            src = ./http-ui;
+
+            # The offline pnpm store, as a fixed-output derivation — the one
+            # place in this flake that is allowed to reach the network, and it
+            # is pinned by `hash` to exactly what `pnpm-lock.yaml` resolves to.
+            # Re-run after any `pnpm install`: set `hash = lib.fakeHash;`, build,
+            # and take the hash the mismatch reports.
+            # `fetchPnpmDeps` resolves the lockfile by *running* pnpm, so it is
+            # overridden onto the pnpm pinned above rather than taken as it
+            # comes — otherwise the store would be built by whichever pnpm
+            # nixpkgs happens to default to, which is the pin's whole purpose.
+            # (`pnpm.fetchDeps` is the deprecated alias of the same thing.)
+            pnpmDeps = (pkgs.fetchPnpmDeps.override { inherit pnpm; }) {
+              inherit (finalAttrs) pname version src;
+              fetcherVersion = 3;
+              hash = "sha256-GRhGa5SBUkionozzLYgQQDmHrNfYMo4E/18FmY+fJGU=";
+            };
+
+            # `pnpmConfigHook` needs no override: it resolves `pnpm` off `PATH`,
+            # which is what the pinned one beside it puts there. The hook links
+            # `pnpmDeps` into an offline store and installs from it, so the build
+            # below never reaches the network.
+            nativeBuildInputs = [
+              nodejs
+              pnpm
+              pkgs.pnpmConfigHook
+            ];
+
+            # `pnpm build` is `tsc -b && vite build`, so a frontend that does
+            # not type-check fails this derivation — which is why it is also
+            # registered as a check below rather than only as a package.
+            buildPhase = ''
+              runHook preBuild
+              pnpm build
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              cp -r dist $out
+              runHook postInstall
+            '';
+          });
+
+          # Handed to every derivation that compiles `sismatic-http-api` with
+          # its `ui` feature on: the server binaries, and the workspace-wide
+          # lint/test/coverage runs that compile the server as a member.
+          #
+          # Deliberately NOT part of `commonArgs`. `cargoArtifacts` is built
+          # from those, so a CSS edit would invalidate the shared third-party
+          # dependency layer that every check in this file stands on — tens of
+          # minutes of rebuild for a change no dependency can see. Nothing is
+          # lost by leaving it out: crane builds that layer over dummy sources,
+          # so no workspace member's build script runs there at all.
+          #
+          # A derivation that compiles the crate *without* this (the `doc`
+          # check, scoped to core; a bare `cargo build`) is not a failure — see
+          # `dist_dir` in that crate's `build.rs`.
+          uiEnv = {
+            SISMATIC_HTTP_UI_DIST = "${httpUi}";
+          };
+
           # Named binding (not just an output attr) so the devShell can
           # reference it locally instead of going through self.checks —
           # this keeps working even if the checks projection is disabled.
@@ -490,6 +693,12 @@
             # CI builds it on each architecture anyway.
             inherit cli server;
 
+            # The frontend building at all, on the same principle — and since
+            # `pnpm build` is `tsc -b && vite build`, this is where a type error
+            # in `http-ui/` fails the check run. The pipeline enumerates checks
+            # dynamically, so it needs no workflow change to pick this up.
+            http-ui = httpUi;
+
             # Clippy as a separate derivation: CI blocks on lints, but
             # downstream consumers can still build the package without
             # being subject to them.
@@ -498,6 +707,9 @@
               // {
                 inherit cargoArtifacts;
                 cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+                # Lints the frontend's embed path too: without this the `ui`
+                # feature would be linted against the placeholder.
+                env = uiEnv;
               }
             );
 
@@ -961,6 +1173,9 @@
                 partitionType = "count";
                 # Don't fail if a crate has no tests yet.
                 cargoNextestPartitionsExtraArgs = "--no-tests=pass";
+                # `tests/ui.rs` and `ui::tests` assert against the *real*
+                # frontend, so the test run is given one.
+                env = uiEnv;
               }
             );
           }
@@ -972,6 +1187,10 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
+                # The same frontend `nextest` is given: this runs the same
+                # tests, and a `ui::tests` compiled against the placeholder
+                # would cover a different branch than the one that ships.
+                env = uiEnv;
                 # `--engine llvm` rather than tarpaulin's default, which is
                 # ptrace: that one single-steps the test binary through an INT3
                 # written over every address DWARF calls a statement, and crane
@@ -1006,6 +1225,12 @@
             inherit cli server;
             # `nix build .#wheel` -> result/sismatic-*.whl
             inherit wheel;
+
+            # `nix build .#http-ui` -> the frontend's dist on its own, which is
+            # also what `.#server` embeds. Worth an output of its own so the
+            # thing the Rust build takes as an input can be built and inspected
+            # without building the binary around it.
+            http-ui = httpUi;
 
             # The dependency layer on its own. Nothing consumes this directly —
             # it exists so one machine (locally, or one CI job) can compile the
@@ -1090,6 +1315,13 @@
                 # Doc site: `mkdocs serve` / `mkdocs build` (same toolchain the
                 # `nix run .#docs` app uses).
                 docsEnv
+                # Frontend toolchain for http-ui/ (vite + react-ts). Pinned by the
+                # flake like every other tool, so `npm` here is the same npm on
+                # a laptop and in CI rather than whatever the host happens to
+                # have on PATH. Scaffold with:
+                #   pnpm install   (in http-ui/)
+                nodejs
+                pnpm
                 # zero2prod chapter 3+: database tooling
                 # pkgs.sqlx-cli
                 # pkgs.postgresql
@@ -1134,6 +1366,19 @@
                 [ -d "$SIS_VENV" ] || python3 -m venv "$SIS_VENV"
                 export VIRTUAL_ENV="$SIS_VENV"
                 export PATH="$SIS_VENV/bin:$PATH"
+
+                # pnpm can swap itself (and Node) out at runtime on the
+                # strength of a package.json field, which would quietly undo
+                # the pins above. Only http-ui/pnpm-workspace.yaml can disable
+                # that, and the flake cannot write a file into a project that
+                # does not exist yet -- so warn rather than imply the pin is
+                # airtight. See the pnpm binding for the mechanism.
+                SIS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+                if [ -f "$SIS_ROOT/http-ui/package.json" ] \
+                  && ! grep -qs pmOnFail "$SIS_ROOT/http-ui/pnpm-workspace.yaml"; then
+                  echo "warning: http-ui/pnpm-workspace.yaml does not set 'pmOnFail: ignore', so a" >&2
+                  echo "         packageManager field can override this flake's pnpm ${pnpmVersion}." >&2
+                fi
               '';
             }
             // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
