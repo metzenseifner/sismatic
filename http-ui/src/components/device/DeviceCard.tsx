@@ -1,20 +1,33 @@
 import {useId, type ReactNode} from "react";
+import {Clapdown} from "../ui/Clapdown";
 import {RecordingBadge} from "../ui/RecordingBadge";
 import type {MemberRow, DeviceView} from "./deviceView";
 import styles from "./DeviceCard.module.css";
 
 type DeviceCardProps = {
   view: DeviceView;
-  /** Optional slot for buttons such as Start and Stop, added later. */
+  /**
+   * Under the title: the recording controls. The slot lays itself out — it is
+   * given the full width of the card, not a row of inline buttons — because
+   * what goes in it is one component with its own notes and errors underneath.
+   */
   actions?: ReactNode;
+  /**
+   * A fold of its own above "Details", for the registers. Kept a slot rather
+   * than built in so that this file stays a drawing of a `DeviceView` and
+   * nothing in it can write to a device; `LiveDeviceCard` is where the two
+   * meet.
+   */
+  registers?: ReactNode;
 };
 
 /**
  * One recorder or one group of recorders.
- * Always visible: name, recording status, recording title.
+ * Always visible: name, recording status, recording title, the controls.
+ * Behind "Registers": the metadata to record the next take under.
  * Behind "Details": everything else.
  */
-export function DeviceCard({view, actions}: DeviceCardProps) {
+export function DeviceCard({view, actions, registers}: DeviceCardProps) {
   const headingId = useId();
   const memberCount = view.members?.length ?? 0;
 
@@ -45,58 +58,56 @@ export function DeviceCard({view, actions}: DeviceCardProps) {
 
         {actions && <div className={styles.actions}>{actions}</div>}
 
-        <details className={styles.details}>
-          <summary className={styles.summary}>Details</summary>
+        {registers}
 
-          <div className={styles.detailsBody}>
-            {view.kind === "group" && (
-              <dl className={styles.list}>
-                <Row label="Devices in sync" value={syncLabel(view.sync)} />
-                <Row
-                  label="Requested state"
-                  value={requestedLabel(view.requested)}
-                />
-              </dl>
-            )}
+        <Clapdown title="Details">
+          {view.kind === "group" && (
+            <dl className={styles.list}>
+              <Row label="Devices in sync" value={syncLabel(view.sync)} />
+              <Row
+                label="Requested state"
+                value={requestedLabel(view.requested)}
+              />
+            </dl>
+          )}
 
-            {view.members && view.members.length > 0 && (
-              <section>
-                <h4 className={styles.subheading}>Devices</h4>
-                <ul className={styles.members}>
-                  {view.members.map(member => (
-                    <MemberItem key={member.id} member={member} />
-                  ))}
-                </ul>
-              </section>
-            )}
+          {view.members && view.members.length > 0 && (
+            <section>
+              <h4 className={styles.subheading}>Devices</h4>
+              <ul className={styles.members}>
+                {view.members.map(member => (
+                  <MemberItem key={member.id} member={member} />
+                ))}
+              </ul>
+            </section>
+          )}
 
-            {view.details.length > 0 && (
-              <section>
-                {view.kind === "group" && (
-                  <h4 className={styles.subheading}>Fields</h4>
-                )}
-                <dl className={styles.list}>
-                  {view.details.map(row => (
-                    <Row key={row.label} label={row.label} value={row.value} />
-                  ))}
-                </dl>
-              </section>
-            )}
-
-            <p className={styles.updated}>
-              {view.updatedAt ? (
-                <>
-                  Last read{" "}
-                  <time dateTime={view.updatedAt}>
-                    {timeAgo(view.updatedAt)}
-                  </time>
-                </>
-              ) : (
-                "Not read yet"
+          {view.details.length > 0 && (
+            <section>
+              {view.kind === "group" && (
+                <h4 className={styles.subheading}>Fields</h4>
               )}
-            </p>
-          </div>
-        </details>
+              <dl className={styles.list}>
+                {view.details.map(row => (
+                  <Row key={row.label} label={row.label} value={row.value} />
+                ))}
+              </dl>
+            </section>
+          )}
+
+          <p className={styles.updated}>
+            {view.updatedAt ? (
+              <>
+                Last read{" "}
+                <time dateTime={view.updatedAt}>
+                  {timeAgo(view.updatedAt)}
+                </time>
+              </>
+            ) : (
+              "Not read yet"
+            )}
+          </p>
+        </Clapdown>
       </div>
     </article>
   );

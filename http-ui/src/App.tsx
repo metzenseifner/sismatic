@@ -3,7 +3,7 @@ import {useMemo} from "react";
 import {Container} from "./components/layout/Container";
 import {Stack} from "./components/layout/Stack";
 import {Grid} from "./components/layout/Grid";
-import {DeviceCard} from "./components/device/DeviceCard";
+import {LiveDeviceCard} from "./components/device/LiveDeviceCard";
 import {fromDeviceReads, fromGroupState} from "./components/device/deviceView";
 import type {DeviceView} from "./components/device/deviceView";
 import {useDevices, useGroups} from "./api/queries";
@@ -51,7 +51,7 @@ export default function App() {
         {!error && views.length > 0 && (
           <Grid minItemWidth="22rem">
             {views.map(view => (
-              <DeviceCard key={`${view.kind}:${view.id}`} view={view} />
+              <LiveDeviceCard key={`${view.kind}:${view.id}`} view={view} />
             ))}
           </Grid>
         )}

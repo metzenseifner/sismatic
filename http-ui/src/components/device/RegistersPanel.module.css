@@ -1,0 +1,113 @@
+.rows {
+  display: grid;
+  gap: var(--space-sm, 0.5rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.name {
+  font-weight: 600;
+}
+
+/* Pushed to the far end of the label line: the row's own state has to be
+   findable by scanning down one edge, not by reading every label. */
+.mark {
+  margin-inline-start: auto;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.mark[data-kind="unsaved"] {
+  color: var(--color-paused, #92400e);
+}
+.mark[data-kind="sent"] {
+  font-weight: 500;
+  color: var(--color-muted, #71717a);
+}
+
+.control {
+  display: flex;
+  gap: var(--space-xs, 0.25rem);
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--tap-size, 44px);
+  padding: 0 var(--space-sm, 0.5rem);
+  font: inherit;
+  color: var(--color-text, #1a1a1a);
+  background: var(--color-bg, #ffffff);
+  border: 1px solid var(--color-border, #e4e4e7);
+  border-radius: calc(var(--radius, 0.75rem) / 2);
+}
+.input:disabled {
+  color: var(--color-muted, #71717a);
+  background: var(--color-surface-strong, #e4e4e7);
+}
+
+/* A square the width of a tap target, so it is hittable on a phone without
+   being mistaken for the save button beside the boxes. */
+.clear {
+  flex: 0 0 auto;
+  width: var(--tap-size, 44px);
+  min-height: var(--tap-size, 44px);
+  font: inherit;
+  line-height: 1;
+  color: var(--color-muted, #71717a);
+  background: transparent;
+  border: 1px solid var(--color-border, #e4e4e7);
+  border-radius: calc(var(--radius, 0.75rem) / 2);
+  cursor: pointer;
+}
+.clear:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+@media (hover: hover) {
+  .clear:not(:disabled):hover {
+    color: var(--color-recording, #dc2626);
+  }
+}
+
+.current {
+  margin: 0;
+  color: var(--color-muted, #71717a);
+  overflow-wrap: anywhere;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm, 0.5rem);
+  align-items: center;
+}
+
+.frozen {
+  margin: 0;
+  color: var(--color-paused, #92400e);
+}
+
+.error {
+  margin: 0;
+  color: var(--color-recording, #dc2626);
+}
+
+/* On the fold's summary line, so a refused save is visible while shut. */
+.noteError {
+  color: var(--color-recording, #dc2626);
+}

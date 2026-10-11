@@ -10,6 +10,9 @@ import type {
   ReadValue,
 } from "../../api/types";
 
+/** One field of a group, with every member's latest value — a row of `fields`. */
+type GroupFieldState = GroupFieldStateList["fields"][number];
+
 export const RUNNING_STATE = "RUNNING_STATE";
 export const TITLE = "TITLE";
 
@@ -17,6 +20,23 @@ export const TITLE = "TITLE";
 export type RecordingStatus = "recording" | "paused" | "stopped" | "unknown" | "mixed";
 
 export type DetailRow = { label: string; value: string };
+
+/**
+ * What the fleet behind this card holds for one field.
+ *
+ * `read` is the decoded value when there is one answer to give — one device, or
+ * a group whose answering devices agree on it. A group that disagrees has no
+ * single value to put in an input box, so `read` is absent and `mixed` says
+ * why; a field nothing has answered yet has neither. `display` is the same
+ * three cases rendered for a reader.
+ */
+export type FieldState = {
+  read?: ReadValue;
+  /** The value, "Differs across devices", or "Not read yet". */
+  display: string;
+  /** True for a group whose answering devices disagree. */
+  mixed: boolean;
+};
 
 export type MemberRow = {
   id: string;
@@ -38,6 +58,15 @@ export type DeviceView = {
   updatedAt: string | null;
   /** Everything else, shown under "Details". */
   details: DetailRow[];
+  /**
+   * Every field behind this card, keyed by its canonical name.
+   *
+   * The raw material `details` is rendered from, and what the Registers panel
+   * seeds its input boxes from. Keyed rather than a list because the two ask
+   * different questions: a panel wants one field by name ("what is TITLE?"),
+   * a card wants all of them in a stable order.
+   */
+  values: Map<string, FieldState>;
   /** Groups only. */
   members?: MemberRow[];
   sync?: GroupSyncState;
@@ -47,19 +76,24 @@ export type DeviceView = {
 // ─── Adapters ────────────────────────────────────────────────────────────────
 
 export function fromDeviceReads(device: DeviceReads): DeviceView {
-  const byField = new Map(device.latest.map((read) => [read.field, read]));
+  // One device is its own quorum: every field it answered has exactly one
+  // value, so nothing here can be `mixed`.
+  const values = new Map<string, FieldState>(
+    device.latest.map((read) => [
+      read.field,
+      { read: read.value, display: formatValue(read.value), mixed: false },
+    ]),
+  );
 
   return {
     kind: "device",
     id: device.device,
-    status: statusOf(byField.get(RUNNING_STATE)?.value),
-    title: titleOf(byField.get(TITLE)?.value),
+    status: statusOf(values.get(RUNNING_STATE)?.read),
+    title: titleOf(values.get(TITLE)?.read),
     titleMixed: false,
     updatedAt: newest(device.latest.map((read) => read.at)),
-    details: device.latest
-      .filter((read) => read.field !== RUNNING_STATE && read.field !== TITLE)
-      .sort(byFieldName)
-      .map((read) => ({ label: labelOf(read.field), value: formatValue(read.value) })),
+    details: detailRows(values),
+    values,
   };
 }
 
@@ -67,6 +101,10 @@ export function fromGroupState(group: GroupFieldStateList): DeviceView {
   const fields = new Map(group.fields.map((field) => [field.field, field]));
   const running = fields.get(RUNNING_STATE);
   const titles = fields.get(TITLE);
+
+  const values = new Map<string, FieldState>(
+    group.fields.map((field) => [field.field, rollUp(field)]),
+  );
 
   // Member ids come from whichever field lists them; every field lists the
   // same members, so the first one is enough.
@@ -113,28 +151,8 @@ export function fromGroupState(group: GroupFieldStateList): DeviceView {
     title: reportedTitles.size === 1 ? [...reportedTitles][0] : null,
     titleMixed: reportedTitles.size > 1,
     updatedAt: newest(allReads.map((read) => read.at)),
-    details: group.fields
-      .filter((field) => field.field !== RUNNING_STATE && field.field !== TITLE)
-      .sort(byFieldName)
-      .map((field) => {
-        // Silent members are skipped for the same reason the status roll-up
-        // skips them: "Differs across devices" should mean the devices that
-        // answered disagree, not that one of them is quiet.
-        const values = new Set(
-          field.members.flatMap((member) =>
-            member.read ? [formatValue(member.read.value)] : [],
-          ),
-        );
-        return {
-          label: labelOf(field.field),
-          value:
-            values.size === 0
-              ? "Not read yet"
-              : values.size === 1
-                ? [...values][0]
-                : "Differs across devices",
-        };
-      }),
+    details: detailRows(values),
+    values,
     members,
     sync: group.sync,
     requested: group.desired_recording_state ?? null,
@@ -196,8 +214,33 @@ function newest(timestamps: string[]): string | null {
   return timestamps.length === 0 ? null : timestamps.reduce((a, b) => (a > b ? a : b));
 }
 
-function byFieldName(a: { field: string }, b: { field: string }): number {
-  return a.field.localeCompare(b.field);
+/**
+ * One group field, rolled up to the single answer a card can show.
+ *
+ * Silent members are skipped rather than counted as disagreement: "Differs
+ * across devices" should mean the devices that answered disagree, not that one
+ * of them is quiet. The server's own `uniform` flag reads the same way —
+ * vacuously true until two members have reported.
+ */
+function rollUp(field: GroupFieldState): FieldState {
+  const reads = field.members.flatMap((member) => (member.read ? [member.read] : []));
+  const distinct = new Set(reads.map((read) => formatValue(read.value)));
+
+  if (reads.length === 0) return { display: "Not read yet", mixed: false };
+  if (distinct.size > 1) return { display: "Differs across devices", mixed: true };
+  // Every answering member said the same thing, so any one of them will do.
+  return { read: reads[0].value, display: [...distinct][0], mixed: false };
+}
+
+/**
+ * Everything except the two fields the card shows above the fold, in
+ * field-name order so the list does not reshuffle between refetches.
+ */
+function detailRows(values: Map<string, FieldState>): DetailRow[] {
+  return [...values]
+    .filter(([field]) => field !== RUNNING_STATE && field !== TITLE)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([field, state]) => ({ label: labelOf(field), value: state.display }));
 }
 
 export type { Read };

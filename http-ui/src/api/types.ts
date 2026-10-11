@@ -24,3 +24,11 @@ export type GroupSyncState = Schemas["GroupSyncState"];
 export type DesiredRecordingState = Schemas["DesiredRecordingState"];
 /** The error body every failing route returns. */
 export type ApiError = Schemas["ApiError"];
+/** Everything a write can name, in three lists — the body of `GET /v1/writes`. */
+export type WritesCatalog = Schemas["WritesCatalog"];
+/** One catalog entry: the canonical `name`, its `aliases`, and a one-line `description`. */
+export type InstructionSummary = Schemas["InstructionSummary"];
+/** The `202 Accepted` body: one entry per device the submission produced. */
+export type Acceptance = Schemas["Acceptance"];
+/** Which precondition refused a write. Every one of these arrives as a `409`. */
+export type Rejection = Schemas["Rejection"];

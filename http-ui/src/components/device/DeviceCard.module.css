@@ -65,57 +65,16 @@
   color: var(--color-muted, #71717a);
 }
 
+/* One full-width row, not a strip of inline buttons: what goes in here carries
+   its own notes and errors underneath the controls. */
 .actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: var(--space-sm, 0.5rem);
 }
 
-/* ─── Details ─────────────────────────────────────────────── */
-
-.details {
-  border-top: 1px solid var(--color-border, #e4e4e7);
-}
-
-.summary {
-  display: flex;
-  align-items: center;
-  min-height: var(--tap-size, 44px);
-  cursor: pointer;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--color-primary, #2563eb);
-  list-style: none;
-}
-.summary::-webkit-details-marker {
-  display: none;
-}
-.summary::after {
-  content: "";
-  width: 0.45em;
-  height: 0.45em;
-  margin: 0 0 0.2em 0.6em;
-  border-right: 2px solid currentColor;
-  border-bottom: 2px solid currentColor;
-  transform: rotate(45deg); /* points down: "there is more" */
-  transition: transform 150ms;
-}
-.details[open] > .summary::after {
-  margin-bottom: -0.2em;
-  transform: rotate(-135deg); /* points up: "fold it away" */
-}
-@media (prefers-reduced-motion: reduce) {
-  .summary::after {
-    transition: none;
-  }
-}
-
-.detailsBody {
-  display: grid;
-  gap: var(--space-md, 1rem);
-  padding-bottom: var(--space-sm, 0.5rem);
-  font-size: 0.875rem;
-}
+/* ─── Inside the folds ────────────────────────────────────── */
+/* The folds themselves are `ui/Clapdown`; what follows is only what the
+   Details body puts inside one. */
 
 .subheading {
   margin: 0 0 var(--space-xs, 0.25rem);

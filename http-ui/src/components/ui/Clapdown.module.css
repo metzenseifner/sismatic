@@ -1,0 +1,60 @@
+/* The fold a card is built out of. Lifted out of DeviceCard.module.css when
+   "Registers" became a second one: two copies of a chevron that has to rotate
+   in step is one copy too many. */
+
+.clapdown {
+  border-top: 1px solid var(--color-border, #e4e4e7);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem);
+  min-height: var(--tap-size, 44px);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-primary, #2563eb);
+  list-style: none;
+}
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+/* The chevron hangs off the title rather than off the summary, so that a note
+   pushed to the far end does not drag the arrow away from the word it marks. */
+.title::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin: 0 0 0.2em 0.6em;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg); /* points down: "there is more" */
+  transition: transform 150ms;
+}
+.clapdown[open] > .summary > .title::after {
+  margin-bottom: -0.2em;
+  transform: rotate(-135deg); /* points up: "fold it away" */
+}
+@media (prefers-reduced-motion: reduce) {
+  .title::after {
+    transition: none;
+  }
+}
+
+/* Readable with the fold shut, which is the only reason a note exists. */
+.note {
+  margin-inline-start: auto;
+  font-weight: 500;
+  color: var(--color-muted, #71717a);
+  white-space: nowrap;
+}
+
+.body {
+  display: grid;
+  gap: var(--space-md, 1rem);
+  padding-bottom: var(--space-sm, 0.5rem);
+  font-size: 0.875rem;
+}
