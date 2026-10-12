@@ -58,3 +58,40 @@
   padding-bottom: var(--space-sm, 0.5rem);
   font-size: 0.875rem;
 }
+
+/* ─── Opening and shutting ────────────────────────────────── */
+/* A fold that snapped open would take the cards under it with it, in one jump
+   of several hundred pixels; the eye has nothing to follow and has to find its
+   place on the page again. Animating the height of the content instead means
+   the card below slides down out of the way, because it is a row of the same
+   column grid and follows the height it is given.
+
+   `interpolate-size` is what makes `auto` a height a transition can arrive at,
+   and `allow-discrete` keeps `content-visibility` on for the whole of the
+   closing one — without it the content vanishes first and the fold animates
+   empty. Scoped to the fold rather than `:root`: it is the only thing here
+   that needs to interpolate a keyword.
+
+   Both are progressive. A browser with no `::details-content` ignores the lot
+   and folds instantly, which is what every browser did until recently. */
+.clapdown {
+  interpolate-size: allow-keywords;
+}
+
+.clapdown::details-content {
+  block-size: 0;
+  overflow: hidden;
+  transition:
+    block-size 200ms ease,
+    content-visibility 200ms;
+  transition-behavior: allow-discrete;
+}
+.clapdown[open]::details-content {
+  block-size: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clapdown::details-content {
+    transition: none;
+  }
+}
