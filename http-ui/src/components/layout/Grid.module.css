@@ -1,0 +1,26 @@
+.grid {
+  /* Named so the column arithmetic below can use the same figure `gap` does;
+     a calc that assumed a different gap would be off by a card every time. */
+  --grid-gap: var(--space-lg, 2rem);
+
+  display: grid;
+  gap: var(--grid-gap);
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(var(--grid-min, 16rem), 100%), 1fr)
+  );
+}
+
+/* A requested column count, obeyed only where there is room to obey it.
+   Below this width the automatic layout above stands, and that is the point:
+   on a phone the only honest answer to "six per row" is one, and no amount of
+   arithmetic over the available width will say so as plainly as refusing to
+   apply the setting at all. */
+@media (min-width: 48rem) {
+  .capped {
+    grid-template-columns: repeat(
+      auto-fill,
+      minmax(min(100%, max(var(--grid-floor), var(--grid-exact))), 1fr)
+    );
+  }
+}

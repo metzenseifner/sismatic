@@ -19,7 +19,29 @@ export const TITLE = "TITLE";
 /** What the badge shows. "mixed" only happens for a group whose devices disagree. */
 export type RecordingStatus = "recording" | "paused" | "stopped" | "unknown" | "mixed";
 
-export type DetailRow = { label: string; value: string };
+/**
+ * How each status is written for a reader.
+ *
+ * Lives here rather than in the badge because three places need the same
+ * words: the badge, the control bar's state filter, and the text a free-text
+ * filter searches through. A card findable by typing "paused" has to be
+ * findable by the word the badge actually shows.
+ */
+export const STATUS_LABELS: Record<RecordingStatus, string> = {
+  recording: "Recording",
+  paused: "Paused",
+  stopped: "Not recording",
+  unknown: "Unknown",
+  mixed: "Mixed",
+};
+
+export type DetailRow = {
+  /** Canonical field name — what a "which details to show" setting keys on. */
+  field: string;
+  /** `FIRMWARE_VERSION` → `Firmware version`. */
+  label: string;
+  value: string;
+};
 
 /**
  * What the fleet behind this card holds for one field.
@@ -233,14 +255,23 @@ function rollUp(field: GroupFieldState): FieldState {
 }
 
 /**
- * Everything except the two fields the card shows above the fold, in
- * field-name order so the list does not reshuffle between refetches.
+ * Every field a card could list, in field-name order so the list does not
+ * reshuffle between refetches.
+ *
+ * `RUNNING_STATE` is the one exclusion, because it is the recording badge and
+ * repeating it as a row would be saying the same thing twice. The title is
+ * *not* excluded any more: where it goes is a setting now — pinned above the
+ * fold by default — and this list is what that setting chooses from.
  */
 function detailRows(values: Map<string, FieldState>): DetailRow[] {
   return [...values]
-    .filter(([field]) => field !== RUNNING_STATE && field !== TITLE)
+    .filter(([field]) => field !== RUNNING_STATE)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([field, state]) => ({ label: labelOf(field), value: state.display }));
+    .map(([field, state]) => ({
+      field,
+      label: labelOf(field),
+      value: state.display,
+    }));
 }
 
 export type { Read };

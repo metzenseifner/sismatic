@@ -1,4 +1,4 @@
-import type {ReactNode} from "react";
+import {useState, type ReactNode} from "react";
 import styles from "./Clapdown.module.css";
 
 type ClapdownProps = {
@@ -11,10 +11,19 @@ type ClapdownProps = {
    */
   note?: ReactNode;
   /**
-   * Open on first render. The element owns its state from then on, which is
-   * what makes this a *default* rather than a value.
+   * Whether the fold is open — a signal rather than a value.
+   *
+   * Every time it *changes* the fold snaps to it, which is what lets one
+   * control in the bar open or shut every fold on the page at once. Between
+   * those moments the fold belongs to whoever is reading it: a card opened by
+   * hand stays open while the rest stay shut, until the page-wide setting
+   * moves again and takes them all with it.
+   *
+   * Neither a plain default (which could never be changed from outside after
+   * mount) nor fully controlled (which would make a click on the summary do
+   * nothing until the page agreed).
    */
-  defaultOpen?: boolean;
+  open?: boolean;
   children: ReactNode;
 };
 
@@ -26,14 +35,25 @@ type ClapdownProps = {
  * reimplementation gets for free, and all of which an operator on a phone
  * notices the absence of.
  */
-export function Clapdown({
-  title,
-  note,
-  defaultOpen = false,
-  children,
-}: ClapdownProps) {
+export function Clapdown({title, note, open = false, children}: ClapdownProps) {
+  const [isOpen, setIsOpen] = useState(open);
+  // Adjusting state during render on a changed prop, rather than in an effect:
+  // an effect would open the fold one paint after the click that asked for it,
+  // and forty folds blinking a frame late is visible.
+  const [lastSignal, setLastSignal] = useState(open);
+  if (lastSignal !== open) {
+    setLastSignal(open);
+    setIsOpen(open);
+  }
+
   return (
-    <details className={styles.clapdown} open={defaultOpen}>
+    <details
+      className={styles.clapdown}
+      open={isOpen}
+      // The browser has already toggled the element by the time this fires;
+      // this is the state catching up with the DOM, not driving it.
+      onToggle={event => setIsOpen(event.currentTarget.open)}
+    >
       <summary className={styles.summary}>
         <span className={styles.title}>{title}</span>
         {note !== undefined && <span className={styles.note}>{note}</span>}

@@ -14,6 +14,7 @@ import {DeviceCard} from "./DeviceCard";
 import {RecordingControl} from "./RecordingControl";
 import {RegistersPanel} from "./RegistersPanel";
 import {useRegisterDrafts} from "./registerDrafts";
+import type {CardDisplay} from "../fleet/fleetDisplay";
 import type {DeviceView, RecordingStatus} from "./deviceView";
 
 /** The reported status that confirms a verb this page submitted. */
@@ -37,7 +38,13 @@ const CONFIRMS: Record<RecordingVerb, RecordingStatus> = {
  */
 const BELIEF_MS = 15_000;
 
-export function LiveDeviceCard({view}: {view: DeviceView}) {
+export function LiveDeviceCard({
+  view,
+  display,
+}: {
+  view: DeviceView;
+  display: CardDisplay;
+}) {
   const target = useMemo<WriteTarget>(
     () => ({kind: view.kind, id: view.id}),
     [view.kind, view.id],
@@ -116,6 +123,7 @@ export function LiveDeviceCard({view}: {view: DeviceView}) {
   return (
     <DeviceCard
       view={view}
+      display={display}
       actions={
         <RecordingControl
           status={status}

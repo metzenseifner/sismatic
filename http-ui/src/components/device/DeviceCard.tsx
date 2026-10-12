@@ -1,7 +1,12 @@
 import {useId, type ReactNode} from "react";
 import {Clapdown} from "../ui/Clapdown";
 import {RecordingBadge} from "../ui/RecordingBadge";
-import type {MemberRow, DeviceView} from "./deviceView";
+import {
+  DEFAULT_DISPLAY,
+  placementOf,
+  type CardDisplay,
+} from "../fleet/fleetDisplay";
+import {labelOf, TITLE, type MemberRow, type DeviceView} from "./deviceView";
 import styles from "./DeviceCard.module.css";
 
 type DeviceCardProps = {
@@ -19,17 +24,53 @@ type DeviceCardProps = {
    * meet.
    */
   registers?: ReactNode;
+  /**
+   * How much of the card to unfold, and which detail rows to leave out. One
+   * object for the page's answer to both, since it is one setting as far as
+   * the control bar is concerned.
+   */
+  display?: CardDisplay;
 };
 
 /**
  * One recorder or one group of recorders.
- * Always visible: name, recording status, recording title, the controls.
+ * Always visible: name, recording status, the controls, and whichever fields
+ * have been pinned — the recording title, until someone says otherwise.
  * Behind "Registers": the metadata to record the next take under.
  * Behind "Details": everything else.
  */
-export function DeviceCard({view, actions, registers}: DeviceCardProps) {
+export function DeviceCard({
+  view,
+  actions,
+  registers,
+  display = DEFAULT_DISPLAY,
+}: DeviceCardProps) {
   const headingId = useId();
   const memberCount = view.members?.length ?? 0;
+
+  // Split here rather than in the view model: where a field goes is this
+  // page's business, and a field moved out of sight is still part of the card
+  // as far as anything else is concerned — the text filter included.
+  const details = view.details.filter(
+    row => placementOf(display, row.field) === "details",
+  );
+
+  // The title keeps its own prominent treatment when it is pinned, so it is
+  // not repeated among the rows below it.
+  const titlePinned = placementOf(display, TITLE) === "pinned";
+
+  // Read from `values` rather than from `details`, because a pin means *always
+  // visible*: a field nobody has reported yet has no detail row, and a pinned
+  // row that waited for one would leave an operator who had just pinned it
+  // wondering where it went.
+  const pinned = [...display.placement]
+    .filter(([field, place]) => place === "pinned" && field !== TITLE)
+    .map(([field]) => ({
+      field,
+      label: labelOf(field),
+      value: view.values.get(field)?.display ?? "Not read yet",
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
 
   return (
     <article className={styles.wrapper} aria-labelledby={headingId}>
@@ -48,19 +89,29 @@ export function DeviceCard({view, actions, registers}: DeviceCardProps) {
           <RecordingBadge status={view.status} />
         </header>
 
-        <p
-          className={styles.title}
-          data-empty={view.title === null || undefined}
-        >
-          {view.title ??
-            (view.titleMixed ? "Titles differ across devices" : "No title")}
-        </p>
+        {titlePinned && (
+          <p
+            className={styles.title}
+            data-empty={view.title === null || undefined}
+          >
+            {view.title ??
+              (view.titleMixed ? "Titles differ across devices" : "No title")}
+          </p>
+        )}
+
+        {pinned.length > 0 && (
+          <dl className={`${styles.list} ${styles.pinned}`}>
+            {pinned.map(row => (
+              <Row key={row.field} label={row.label} value={row.value} />
+            ))}
+          </dl>
+        )}
 
         {actions && <div className={styles.actions}>{actions}</div>}
 
         {registers}
 
-        <Clapdown title="Details">
+        <Clapdown title="Details" open={display.detailsOpen}>
           {view.kind === "group" && (
             <dl className={styles.list}>
               <Row label="Devices in sync" value={syncLabel(view.sync)} />
@@ -82,14 +133,14 @@ export function DeviceCard({view, actions, registers}: DeviceCardProps) {
             </section>
           )}
 
-          {view.details.length > 0 && (
+          {details.length > 0 && (
             <section>
               {view.kind === "group" && (
                 <h4 className={styles.subheading}>Fields</h4>
               )}
               <dl className={styles.list}>
-                {view.details.map(row => (
-                  <Row key={row.label} label={row.label} value={row.value} />
+                {details.map(row => (
+                  <Row key={row.field} label={row.label} value={row.value} />
                 ))}
               </dl>
             </section>

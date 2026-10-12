@@ -145,3 +145,10 @@
     font-size: var(--text-lg, 1.25rem);
   }
 }
+
+/* Pinned fields sit above the fold, so they are smaller than the title and
+   plainer than the rows inside a fold: they are there to be glanced at on a
+   wall of cards, not read. */
+.pinned {
+  font-size: 0.875rem;
+}

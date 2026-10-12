@@ -24,14 +24,35 @@ import type {
   Acceptance,
   ApiError,
   DeviceReads,
+  FieldCatalog,
   GroupFieldStateList,
   Rejection,
   WritesCatalog,
 } from "./types";
 
-/** How often the fleet pages are refetched. The server polls devices on its own
- *  schedule; this is only how stale a card on screen is allowed to look. */
-const REFETCH_MS = 5_000;
+/**
+ * How often the fleet pages are refetched when the page has not been told
+ * otherwise — the control bar's starting value.
+ *
+ * This is only how stale a card on screen is allowed to look, never how fresh
+ * the server's own reads are: the server polls devices on its own schedule
+ * (`sync.interval_secs` in its configuration), so asking for a tenth of a
+ * second here would not make a recorder answer any sooner. It would only add
+ * requests that return what the last one did.
+ */
+export const DEFAULT_POLL_MS = 5_000;
+
+/**
+ * Bounds on a poll interval, wherever one comes from — a typed-in figure or a
+ * value restored from a previous session.
+ *
+ * The floor keeps a slip of the keyboard from turning the page into a load
+ * generator against a server with nothing new to say. The ceiling is an hour,
+ * past which the page is not meaningfully polling and should say so rather
+ * than pretend.
+ */
+export const MIN_POLL_MS = 1_000;
+export const MAX_POLL_MS = 3_600_000;
 
 /** Guards against a server that kept returning a non-null `next` forever. */
 const MAX_PAGES = 100;
@@ -40,6 +61,7 @@ export const queryKeys = {
   devices: ["reads", "devices"] as const,
   groups: ["reads", "groups"] as const,
   writesCatalog: ["writes", "catalog"] as const,
+  readsCatalog: ["reads", "catalog"] as const,
 };
 
 /** An API call that answered, but with an error status. */
@@ -72,10 +94,12 @@ export class ApiCallError extends Error {
  * A device that has never answered is a row with an empty `latest` rather than
  * an absent one — that row is the point, so it is passed through untouched.
  */
-export function useDevices(): UseQueryResult<DeviceReads[], ApiCallError> {
+export function useDevices(
+  pollMs: number = DEFAULT_POLL_MS,
+): UseQueryResult<DeviceReads[], ApiCallError> {
   return useQuery({
     queryKey: queryKeys.devices,
-    refetchInterval: REFETCH_MS,
+    refetchInterval: pollMs,
     queryFn: ({signal}) =>
       collectPages(signal, async after => {
         const {data, error, response} = await api.GET("/v1/reads/devices", {
@@ -89,13 +113,12 @@ export function useDevices(): UseQueryResult<DeviceReads[], ApiCallError> {
 }
 
 /** Every configured device group's state, one row per group, ordered by id. */
-export function useGroups(): UseQueryResult<
-  GroupFieldStateList[],
-  ApiCallError
-> {
+export function useGroups(
+  pollMs: number = DEFAULT_POLL_MS,
+): UseQueryResult<GroupFieldStateList[], ApiCallError> {
   return useQuery({
     queryKey: queryKeys.groups,
-    refetchInterval: REFETCH_MS,
+    refetchInterval: pollMs,
     queryFn: ({signal}) =>
       collectPages(signal, async after => {
         const {data, error, response} = await api.GET("/v1/reads/groups", {
@@ -149,6 +172,35 @@ export function useWritesCatalog(): UseQueryResult<WritesCatalog, ApiCallError> 
       // anyway: an auth middleware or a proxy in front of the server can
       // answer something the document does not describe.
       const {data, response} = await api.GET("/v1/writes", {signal});
+      const {status} = response;
+      if (!data) throw new ApiCallError(status, undefined);
+      return data;
+    },
+  });
+}
+
+/**
+ * Every field a read can be asked for.
+ *
+ * Fetched once and never refetched, for the same reason as the write catalog:
+ * it is an enum compiled into the server.
+ *
+ * This is what the field picker lists, rather than the fields the cards happen
+ * to be reporting. A name here is one the server knows how to *ask* for, not a
+ * promise that anything has answered — which is exactly the difference that
+ * matters to a picker. A fleet that is unreachable, or simply not polled yet,
+ * reports nothing, and a picker built from what it reported would be an empty
+ * list at the one moment someone is most likely to be setting the page up.
+ */
+export function useReadsCatalog(): UseQueryResult<FieldCatalog, ApiCallError> {
+  return useQuery({
+    queryKey: queryKeys.readsCatalog,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    queryFn: async ({signal}) => {
+      // No error branch in the generated types, so the status is read before
+      // the guard — see `useWritesCatalog`.
+      const {data, response} = await api.GET("/v1/reads", {signal});
       const {status} = response;
       if (!data) throw new ApiCallError(status, undefined);
       return data;

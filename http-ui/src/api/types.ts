@@ -32,3 +32,5 @@ export type InstructionSummary = Schemas["InstructionSummary"];
 export type Acceptance = Schemas["Acceptance"];
 /** Which precondition refused a write. Every one of these arrives as a `409`. */
 export type Rejection = Schemas["Rejection"];
+/** Every field a read can be asked for — the body of `GET /v1/reads`. */
+export type FieldCatalog = Schemas["FieldCatalog"];
