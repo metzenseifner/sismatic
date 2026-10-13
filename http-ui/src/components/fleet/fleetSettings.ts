@@ -24,6 +24,7 @@ import {
   MIN_POLL_MS,
 } from "../../api/queries";
 import type {Columns} from "../layout/Grid";
+import {DEFAULT_THEME, THEME_CHOICES, type ThemeMode} from "../../styles/theme";
 import {NO_FILTERS, type Filters} from "./fleetFilters";
 import {
   DEFAULT_DISPLAY,
@@ -62,6 +63,13 @@ export type FleetSettings = {
   display: CardDisplay;
   pollMs: number;
   columns: Columns;
+  /**
+   * Light, dark, or whatever the machine says. Stored with the rest because it
+   * is a preference like any other — and the only thing kept here that no
+   * component ever reads: it reaches the page as an attribute, and the
+   * stylesheet takes it from there. See `styles/theme.ts`.
+   */
+  theme: ThemeMode;
 };
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -69,6 +77,7 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   display: DEFAULT_DISPLAY,
   pollMs: DEFAULT_POLL_MS,
   columns: "auto",
+  theme: DEFAULT_THEME,
 };
 
 /**
@@ -132,6 +141,7 @@ export function loadSettings(): FleetSettings {
     columns: COLUMN_CHOICES.includes(stored.columns as Columns)
       ? (stored.columns as Columns)
       : DEFAULT_SETTINGS.columns,
+    theme: oneOf(THEME_CHOICES, stored.theme, DEFAULT_THEME),
   };
 }
 
@@ -149,6 +159,7 @@ export function saveSettings(settings: FleetSettings): void {
       placement: Object.fromEntries(settings.display.placement),
       pollMs: settings.pollMs,
       columns: settings.columns,
+      theme: settings.theme,
     }),
   );
 }

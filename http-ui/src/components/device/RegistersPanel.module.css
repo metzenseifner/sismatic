@@ -32,11 +32,11 @@
   white-space: nowrap;
 }
 .mark[data-kind="unsaved"] {
-  color: var(--color-paused, #92400e);
+  color: var(--color-paused);
 }
 .mark[data-kind="sent"] {
   font-weight: 500;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 .control {
@@ -50,14 +50,14 @@
   min-height: var(--tap-size, 44px);
   padding: 0 var(--space-sm, 0.5rem);
   font: inherit;
-  color: var(--color-text, #1a1a1a);
-  background: var(--color-bg, #ffffff);
-  border: 1px solid var(--color-border, #e4e4e7);
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
   border-radius: calc(var(--radius, 0.75rem) / 2);
 }
 .input:disabled {
-  color: var(--color-muted, #71717a);
-  background: var(--color-surface-strong, #e4e4e7);
+  color: var(--color-muted);
+  background: var(--color-surface-strong);
 }
 
 /* A square the width of a tap target, so it is hittable on a phone without
@@ -68,9 +68,9 @@
   min-height: var(--tap-size, 44px);
   font: inherit;
   line-height: 1;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
   background: transparent;
-  border: 1px solid var(--color-border, #e4e4e7);
+  border: 1px solid var(--color-border);
   border-radius: calc(var(--radius, 0.75rem) / 2);
   cursor: pointer;
 }
@@ -80,13 +80,13 @@
 }
 @media (hover: hover) {
   .clear:not(:disabled):hover {
-    color: var(--color-recording, #dc2626);
+    color: var(--color-alert);
   }
 }
 
 .current {
   margin: 0;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 
@@ -99,15 +99,15 @@
 
 .frozen {
   margin: 0;
-  color: var(--color-paused, #92400e);
+  color: var(--color-paused);
 }
 
 .error {
   margin: 0;
-  color: var(--color-recording, #dc2626);
+  color: var(--color-alert);
 }
 
 /* On the fold's summary line, so a refused save is visible while shut. */
 .noteError {
-  color: var(--color-recording, #dc2626);
+  color: var(--color-alert);
 }

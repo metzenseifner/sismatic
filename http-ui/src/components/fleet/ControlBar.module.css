@@ -6,8 +6,8 @@
 .bar {
   margin-block-end: var(--space-lg, 2rem);
   padding: var(--space-sm, 0.5rem) var(--space-md, 1rem);
-  background: var(--color-surface, #f4f4f5);
-  border: 1px solid var(--color-border, #e4e4e7);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius, 0.75rem);
 }
 
@@ -37,7 +37,7 @@
   font-size: 0.875rem;
   font-weight: 600;
   white-space: nowrap;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 .field {
@@ -45,9 +45,9 @@
   max-width: 100%;
   padding: 0 var(--space-sm, 0.5rem);
   font: inherit;
-  color: var(--color-text, #1a1a1a);
-  background: var(--color-bg, #ffffff);
-  border: 1px solid var(--color-border, #e4e4e7);
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
   border-radius: calc(var(--radius, 0.75rem) / 2);
 }
 
@@ -59,7 +59,7 @@
   margin: 0;
   font-size: 0.875rem;
   white-space: nowrap;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 /* Pushed to the far end: these two are settings for the page, not questions
@@ -110,5 +110,5 @@
 
 .error {
   margin: 0;
-  color: var(--color-recording, #dc2626);
+  color: var(--color-alert);
 }

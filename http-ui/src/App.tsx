@@ -6,6 +6,7 @@ import {Grid} from "./components/layout/Grid";
 import {ControlBar} from "./components/fleet/ControlBar";
 import {applyFilters, searchable, NO_FILTERS} from "./components/fleet/fleetFilters";
 import {useFleetSettings} from "./components/fleet/fleetSettings";
+import {useThemeMode} from "./styles/theme";
 import {LiveDeviceCard} from "./components/device/LiveDeviceCard";
 import {fromDeviceReads, fromGroupState} from "./components/device/deviceView";
 import type {DeviceView} from "./components/device/deviceView";
@@ -19,6 +20,10 @@ export default function App() {
   // between the two. Restored from the last visit — see `useFleetSettings`.
   const [settings, setSettings] = useFleetSettings();
   const {filters, display, pollMs, columns} = settings;
+
+  // The one line of theming outside `styles/`. Nothing below this point —
+  // no card, no badge, no fold — is aware that modes exist.
+  useThemeMode(settings.theme);
 
   const devices = useDevices(pollMs);
   const groups = useGroups(pollMs);

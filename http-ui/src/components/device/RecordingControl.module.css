@@ -12,15 +12,15 @@
 .note {
   margin: 0;
   font-size: 0.875rem;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 .error {
   margin: 0;
   font-size: 0.875rem;
-  color: var(--color-recording, #dc2626);
+  color: var(--color-alert);
 }
 /* An "already stopped" is feedback, not a fault; it should not look like one. */
 .error[data-benign] {
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }

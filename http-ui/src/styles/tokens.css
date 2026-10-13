@@ -1,4 +1,39 @@
+/* Design tokens: the only file in this tree that names a colour.
+ *
+ * # The contract
+ *
+ * A component asks for a *role* — `var(--color-surface)`, `var(--color-muted)`
+ * — and never for a colour, a mode, or a palette. Nothing outside this file
+ * mentions a hex value, and no component stylesheet or `.tsx` anywhere refers
+ * to light or dark. That is the whole architecture: a mode is a different
+ * mapping of the same roles, so switching one is a change here and nowhere
+ * else, and a component written today keeps working in a mode added next year.
+ *
+ * Two rules follow from it, and both are checkable rather than aspirational:
+ *
+ *   1. every `--color-*` a component uses is declared below. A token that is
+ *      not declared cannot be remapped, so it is invisible to theming — which
+ *      is exactly the bug this file was written to fix: `--color-muted` and
+ *      five others used to exist only as hardcoded fallbacks inside sixteen
+ *      component rules, so a dark mode could not have reached them.
+ *   2. component stylesheets carry no `var(--color-x, #fallback)`. A fallback
+ *      is a second definition that nothing can see and that wins silently if
+ *      the token is ever renamed, and what it produces then is a light value
+ *      in a dark page with no clue where it came from.
+ *
+ * # Roles that look like one role but are two
+ *
+ * `--color-accent` fills a surface and carries `--color-on-accent` on top of
+ * it; `--color-link` is the same accent used as text on the page. One value
+ * cannot be both in dark mode — a blue light enough to read against a dark
+ * background is too light to put white text on — so they are separate roles
+ * and happen to coincide in light mode. `--color-recording` and
+ * `--color-alert` are the same story in red.
+ */
+
 :root {
+  /* ── Geometry and rhythm: the same whatever the mode ──────────────── */
+
   /* Spacing grows gently with screen width */
   --space-xs: 0.25rem;
   --space-sm: 0.5rem;
@@ -14,8 +49,125 @@
   --tap-size: 44px; /* Apple's recommended minimum touch target */
   --max-width: 72rem;
 
-  --color-bg: #ffffff;
-  --color-text: #1a1a1a;
-  --color-primary: #2563eb;
-  --color-surface: #f4f4f5;
+  /* ── The palettes ─────────────────────────────────────────────────── */
+  /* Raw values, each written once. Nothing outside this file reads these:
+     components read the roles below, and a role is what a mode remaps. */
+
+  --light-bg: #ffffff;
+  --light-surface: #f4f4f5;
+  --light-surface-strong: #e4e4e7;
+  --light-border: #e4e4e7;
+  --light-text: #1a1a1a;
+  --light-muted: #71717a;
+  --light-accent: #2563eb;
+  --light-on-accent: #ffffff;
+  --light-link: #2563eb;
+  --light-recording: #dc2626;
+  --light-alert: #dc2626;
+  --light-paused: #92400e;
+  --light-paused-bg: #fef3c7;
+
+  /* Not pure black: a near-black lets the card surfaces lift off the page
+     instead of being outlined against a hole, and it is easier to read a wall
+     of these on for an afternoon. The foregrounds are pulled light enough to
+     clear 7:1 against it, and the two fills — a recording badge, a primary
+     button — keep their saturated light-mode value, because white text has to
+     stay readable on top of them and a lighter red or blue would not carry it. */
+  --dark-bg: #121214;
+  --dark-surface: #1c1c20;
+  --dark-surface-strong: #2a2a30;
+  --dark-border: #33333b;
+  --dark-text: #ececee;
+  --dark-muted: #a1a1aa;
+  --dark-accent: #2563eb;
+  --dark-on-accent: #ffffff;
+  --dark-link: #93c5fd;
+  --dark-recording: #dc2626;
+  --dark-alert: #fca5a5;
+  --dark-paused: #fcd34d;
+  --dark-paused-bg: #422006;
+}
+
+/* ── Light, and what the page is until something says otherwise ─────── */
+
+:root {
+  /* Native widgets — the bar is full of selects, inputs and checkboxes — plus
+     scrollbars and form control text, none of which this stylesheet reaches.
+     This one declaration is what makes the browser draw its own parts to
+     match, and it is why the mode is worth expressing as `color-scheme` and
+     not only as our own variables. */
+  color-scheme: light;
+
+  --color-bg: var(--light-bg);
+  --color-surface: var(--light-surface);
+  --color-surface-strong: var(--light-surface-strong);
+  --color-border: var(--light-border);
+  --color-text: var(--light-text);
+  --color-muted: var(--light-muted);
+  --color-accent: var(--light-accent);
+  --color-on-accent: var(--light-on-accent);
+  --color-link: var(--light-link);
+  --color-recording: var(--light-recording);
+  --color-alert: var(--light-alert);
+  --color-paused: var(--light-paused);
+  --color-paused-bg: var(--light-paused-bg);
+}
+
+/* ── Dark ───────────────────────────────────────────────────────────── */
+/*
+ * The same mapping twice, on purpose, because the two selectors answer two
+ * different questions and CSS has no way to write one rule that is both:
+ *
+ *   - no `data-theme` at all means *follow the machine*, which the media query
+ *     decides. Keeping that in CSS is worth the repetition: it needs no script,
+ *     it is right before the first paint so a dark-mode reader never sees a
+ *     white flash, and a system that flips while the page is open follows
+ *     along with nothing listening.
+ *   - `data-theme="dark"` means *dark regardless*, which no media query can
+ *     express. `:not([data-theme="light"])` above is the other half of that:
+ *     an explicit light choice has to survive a dark machine.
+ *
+ * Adding a role means adding it to both blocks. Forgetting shows up at once as
+ * a light colour in a dark page, which is the cheapest kind of mistake to
+ * find. The one-declaration-per-role version of all this is CSS `light-dark()`,
+ * which is worth moving to when Safari 17.5 is an acceptable floor — until
+ * then its failure mode is every colour going invalid at once.
+ */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --color-bg: var(--dark-bg);
+    --color-surface: var(--dark-surface);
+    --color-surface-strong: var(--dark-surface-strong);
+    --color-border: var(--dark-border);
+    --color-text: var(--dark-text);
+    --color-muted: var(--dark-muted);
+    --color-accent: var(--dark-accent);
+    --color-on-accent: var(--dark-on-accent);
+    --color-link: var(--dark-link);
+    --color-recording: var(--dark-recording);
+    --color-alert: var(--dark-alert);
+    --color-paused: var(--dark-paused);
+    --color-paused-bg: var(--dark-paused-bg);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: var(--dark-bg);
+  --color-surface: var(--dark-surface);
+  --color-surface-strong: var(--dark-surface-strong);
+  --color-border: var(--dark-border);
+  --color-text: var(--dark-text);
+  --color-muted: var(--dark-muted);
+  --color-accent: var(--dark-accent);
+  --color-on-accent: var(--dark-on-accent);
+  --color-link: var(--dark-link);
+  --color-recording: var(--dark-recording);
+  --color-alert: var(--dark-alert);
+  --color-paused: var(--dark-paused);
+  --color-paused-bg: var(--dark-paused-bg);
 }

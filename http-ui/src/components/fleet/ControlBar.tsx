@@ -25,6 +25,7 @@ import {
   MIN_POLL_MS,
   useReadsCatalog,
 } from "../../api/queries";
+import {THEME_CHOICES, type ThemeMode} from "../../styles/theme";
 import styles from "./ControlBar.module.css";
 
 /** Poll intervals offered by name, in milliseconds. */
@@ -42,6 +43,12 @@ const PLACEMENT_LABELS: Record<Placement, string> = {
   pinned: "Pinned",
   details: "In details",
   hidden: "Hidden",
+};
+
+const THEME_LABELS: Record<ThemeMode, string> = {
+  system: "System",
+  light: "Light",
+  dark: "Dark",
 };
 
 type ControlBarProps = {
@@ -75,7 +82,7 @@ export function ControlBar({
   total,
 }: ControlBarProps) {
   const ids = useId();
-  const {filters, display, pollMs, columns} = settings;
+  const {filters, display, pollMs, columns, theme} = settings;
 
   /** One setting replaced, the rest carried over. */
   const set = <K extends keyof FleetSettings>(
@@ -212,6 +219,29 @@ export function ControlBar({
             onChange={ms => set("pollMs", ms)}
             selectId={`${ids}-poll`}
           />
+
+          {/* The only control here whose value no component ever sees: it
+              leaves as an attribute on the root element and the stylesheet
+              does the rest. See `styles/theme.ts`. */}
+          <div className={styles.group}>
+            <label className={styles.label} htmlFor={`${ids}-theme`}>
+              Theme
+            </label>
+            <select
+              id={`${ids}-theme`}
+              className={styles.field}
+              value={theme}
+              onChange={event =>
+                set("theme", event.target.value as ThemeMode)
+              }
+            >
+              {THEME_CHOICES.map(mode => (
+                <option key={mode} value={mode}>
+                  {THEME_LABELS[mode]}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 

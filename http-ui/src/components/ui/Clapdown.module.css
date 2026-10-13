@@ -3,7 +3,7 @@
    in step is one copy too many. */
 
 .clapdown {
-  border-top: 1px solid var(--color-border, #e4e4e7);
+  border-top: 1px solid var(--color-border);
 }
 
 .summary {
@@ -14,7 +14,7 @@
   cursor: pointer;
   font-size: 0.875rem;
   font-weight: 600;
-  color: var(--color-primary, #2563eb);
+  color: var(--color-link);
   list-style: none;
 }
 .summary::-webkit-details-marker {
@@ -48,7 +48,7 @@
 .note {
   margin-inline-start: auto;
   font-weight: 500;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
   white-space: nowrap;
 }
 

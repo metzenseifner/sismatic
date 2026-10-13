@@ -9,17 +9,17 @@
   flex-direction: column;
   gap: var(--space-sm, 0.5rem);
   padding: var(--space-md, 1rem);
-  background: var(--color-surface, #f4f4f5);
+  background: var(--color-surface);
   border-radius: var(--radius, 0.75rem);
   /* A colored edge so a recording card stands out even when scrolled past fast. */
   border-left: 4px solid transparent;
 }
 .card[data-status="recording"] {
-  border-left-color: var(--color-recording, #dc2626);
+  border-left-color: var(--color-recording);
 }
 .card[data-status="paused"],
 .card[data-status="mixed"] {
-  border-left-color: var(--color-paused, #92400e);
+  border-left-color: var(--color-paused);
 }
 
 .header {
@@ -39,7 +39,7 @@
   font-size: 0.75rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 .name {
@@ -62,7 +62,7 @@
 .title[data-empty] {
   font-style: italic;
   font-weight: 400;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 /* One full-width row, not a strip of inline buttons: what goes in here carries
@@ -81,7 +81,7 @@
   font-size: 0.75rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 .list {
@@ -95,7 +95,7 @@
   gap: 0 var(--space-sm, 0.5rem);
 }
 .row dt {
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 .row dd {
   margin: 0;
@@ -122,17 +122,17 @@
 }
 .memberTitle {
   grid-column: 1 / -1;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 .drift {
   font-weight: 400;
-  color: var(--color-paused, #92400e);
+  color: var(--color-paused);
 }
 
 .updated {
   margin: 0;
-  color: var(--color-muted, #71717a);
+  color: var(--color-muted);
 }
 
 /* ─── Wider cards: labels beside values ───────────────────── */
