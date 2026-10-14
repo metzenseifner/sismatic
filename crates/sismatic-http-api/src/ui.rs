@@ -10,10 +10,14 @@
 //! # Why this crate and not the composition root
 //!
 //! The frontend's compile-time contract is *this crate's* OpenAPI document:
-//! `http-ui/src/api/schema.d.ts` is generated from `/api-docs/openapi.json` by
-//! `pnpm gen:api`, which is to say from [`ApiDoc`](crate::ApiDoc). Client and
-//! contract therefore belong to one unit, and keeping them in one crate makes a
-//! renamed field a build-order fact rather than a thing to stay vigilant about.
+//! `http-ui/src/api/schema.d.ts` (beside this crate) is generated from
+//! `/api-docs/openapi.json` by `pnpm gen:api`, which is to say from
+//! [`ApiDoc`](crate::ApiDoc). Client and contract therefore belong to one unit,
+//! and keeping them in one crate makes a renamed field a build-order fact
+//! rather than a thing to stay vigilant about. The frontend's sources live in
+//! this crate's own directory for a second, unrelated reason — it is the only
+//! way release-plz sees a UI change as a change worth releasing; see
+//! release-plz.toml.
 //! The composition root contributes nothing to that contract, and holding an
 //! asset table, a content-type map and a cache policy would be the first
 //! delivery-mechanism detail it ever carried.

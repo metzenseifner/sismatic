@@ -71,12 +71,12 @@ const DIST_ENV: &str = "SISMATIC_HTTP_UI_DIST";
 /// The prefix every subresource URL in the embedded page has to carry.
 ///
 /// The same decision is stated in three places and has to read the same in all
-/// three: `base` in `http-ui/vite.config.ts`, which writes these URLs;
-/// [`ui::UI_PATH`] (`crates/sismatic-http-api/src/ui.rs`), which is the only
-/// subtree that serves them; and here, which is the only one of the three that
-/// can fail a build. A build script can see neither of the others — `src/` is
-/// not in scope and vite does not run from here — so this is a copy out of
-/// necessity, and `check_base` is what makes a disagreement loud.
+/// three: `base` in `http-ui/vite.config.ts` (beside this crate), which writes
+/// these URLs; [`ui::UI_PATH`] (`src/ui.rs`), which is the only subtree that
+/// serves them; and here, which is the only one of the three that can fail a
+/// build. A build script can see neither of the others — `src/` is not in scope
+/// and vite does not run from here — so this is a copy out of necessity, and
+/// `check_base` is what makes a disagreement loud.
 const UI_BASE: &str = "/ui/";
 
 fn main() {
@@ -146,18 +146,23 @@ fn embed_ui(out: &Path) {
             // `http-ui/dist` bumps `http-ui`'s own mtime, which is what makes
             // the parent the right thing to watch.
             //
+            // Watching `http-ui` itself — not the crate root — is also what
+            // keeps this cheap. The crate root holds `src/`, so a watch on it
+            // would re-run this script, and re-compress the Scalar bundle, on
+            // every edit to a Rust file in the crate.
+            //
             // Guarded on existence rather than emitted unconditionally, because
             // cargo cannot stat a path that is not there and re-runs the script
             // on every build when it cannot — which would re-compress the 4 MB
             // Scalar bundle every time. In the packaged crate, which is the
             // build that gets here on purpose, there is nothing to watch and so
             // nothing to re-run for.
-            let sibling = PathBuf::from(
+            let ui_dir = PathBuf::from(
                 std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"),
             )
-            .join("../../http-ui");
-            if sibling.is_dir() {
-                println!("cargo::rerun-if-changed={}", sibling.display());
+            .join("http-ui");
+            if ui_dir.is_dir() {
+                println!("cargo::rerun-if-changed={}", ui_dir.display());
             }
 
             // No dist, and this is not a failure: see `dist_dir`. A page that
@@ -165,7 +170,7 @@ fn embed_ui(out: &Path) {
             // route is wrong or the build was.
             println!(
                 "cargo::warning=no frontend to embed (set {DIST_ENV} or run `pnpm build` in \
-                 http-ui/); /ui will serve a placeholder"
+                 crates/sismatic-http-api/http-ui/); /ui will serve a placeholder"
             );
             rows.push(write_bytes(
                 out,
@@ -194,16 +199,20 @@ fn embed_ui(out: &Path) {
 /// 1. `SISMATIC_HTTP_UI_DIST`, which is how the flake hands over a frontend it
 ///    built itself. This is the answer every CI build and every release
 ///    artifact takes.
-/// 2. `http-ui/dist` beside this crate, so `cargo build` on a laptop picks up
+/// 2. `http-ui/dist` under this crate, so `cargo build` on a laptop picks up
 ///    whatever `pnpm build` last wrote without any environment to remember.
-/// 3. None, and *this one is why the function returns an `Option`*. Under
-///    release-plz's `git_only` mode, `cargo package --allow-dirty --workspace`
-///    packages this crate and verify-builds the extracted copy — in which
-///    `../../http-ui/dist` resolves to `target/package/http-ui/dist`, a
-///    directory that does not exist and never will, because `cargo package`
-///    includes only files under the crate root. A script that panicked here
-///    would therefore not fail a developer's build; it would fail the release
-///    PR, which is a failure this workspace has already paid for twice (see
+/// 3. None, and *this one is why the function returns an `Option`*. The
+///    packaged crate carries the frontend's *source* but no build of it:
+///    `cargo package` enumerates git-tracked files and `http-ui/dist` is
+///    gitignored, so a dist is never in the tarball. Whatever then compiles
+///    that extracted copy — cargo-semver-checks building a baseline from it,
+///    or a `cargo package` without `--no-verify` — runs this script with no
+///    answer to give. (Before the frontend moved under this crate the same
+///    answer was reached for a different reason: `../../http-ui/dist` escaped
+///    the crate root, which `cargo package` drops outright. The move fixed the
+///    escape, not the absence of a dist.) A script that panicked here would
+///    therefore not fail a developer's build; it would fail the release PR,
+///    which is a failure this workspace has already paid for twice (see
 ///    release-plz.toml). So the third answer embeds a placeholder, and the
 ///    property that keeps a *shipped* binary from carrying it is that the flake
 ///    always answers (1).
@@ -221,8 +230,8 @@ fn dist_dir() -> Option<PathBuf> {
     let manifest = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
     );
-    let sibling = manifest.join("../../http-ui/dist");
-    sibling.is_dir().then_some(sibling)
+    let local = manifest.join("http-ui/dist");
+    local.is_dir().then_some(local)
 }
 
 /// Every file under `dir`, as paths relative to `root` with `/` separators.
@@ -280,8 +289,8 @@ fn check_base(index: &Path) {
         wrong.is_empty(),
         "{} loads {wrong:?}, which is not under {UI_BASE} — the server mounts the frontend \
          nowhere else, so these 404 and the page renders blank. Rebuild the dist against the \
-         current vite config (`cd http-ui && pnpm build`), whose `base` is what writes these \
-         URLs.",
+         current vite config (`cd crates/sismatic-http-api/http-ui && pnpm build`), whose \
+         `base` is what writes these URLs.",
         index.display()
     );
 }
@@ -425,7 +434,7 @@ const PLACEHOLDER: &str = r#"<!doctype html>
     <p>To build one, either</p>
     <pre>nix build .#server</pre>
     <p>which builds the frontend as an input, or</p>
-    <pre>cd http-ui &amp;&amp; pnpm build
+    <pre>cd crates/sismatic-http-api/http-ui &amp;&amp; pnpm build
 cargo build -p sismatic-server</pre>
   </body>
 </html>

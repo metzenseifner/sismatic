@@ -99,6 +99,16 @@
           # section present in the YAML and absent from `RawServerConfig` is a
           # startup failure — and the unit test that answers it has to be able
           # to read the file.
+          #
+          # The frontend under `crates/sismatic-http-api/http-ui/` is NOT kept,
+          # and that is the point. `filterCargoSources` drops `.ts`/`.tsx`/
+          # `.css`/`.json`/`.html`, so a CSS edit changes none of the inputs to
+          # `cargoArtifacts` and cannot invalidate the shared dependency layer
+          # every check here stands on — the same property the `uiEnv` comment
+          # below protects from the other direction. The frontend reaches the
+          # Rust build only as the `httpUi` derivation, through
+          # `SISMATIC_HTTP_UI_DIST`. It sits inside the crate for release-plz's
+          # benefit, not cargo's; see the comment on `httpUi`.
           src = lib.cleanSourceWith {
             src = ./.;
             filter =
@@ -531,7 +541,8 @@
                 flake.nix: Node is pinned to ${nodeVersion}, but the locked
                 nixpkgs now ships ${pkgs.nodejs_26.version}. To accept the bump set
                   nodeVersion = "${pkgs.nodejs_26.version}";
-                and re-run `pnpm install` in http-ui/ so the lockfile is rebuilt.
+                and re-run `pnpm install` in crates/sismatic-http-api/http-ui/ so the
+                lockfile is rebuilt.
               '';
 
           # pnpm, pinned the same way as Node. There IS coupling to Node, in
@@ -614,10 +625,19 @@
           # `src` is the flake source, which is the git tree: `node_modules/`
           # and `dist/` are gitignored and therefore already absent from the
           # sandbox, so there is nothing to filter out.
+          #
+          # The frontend lives *inside* `sismatic-http-api` rather than at the
+          # repo root, and that location is load-bearing for releases rather
+          # than cosmetic. release-plz decides which commits belong to a package
+          # by asking whether they touched that package's directory — its only
+          # other watched path is a `readme` pointing outside it, and there is no
+          # "extra paths" knob. A frontend at the repo root is therefore
+          # invisible to version determination: every commit under it would ship
+          # with no version bump at all. See release-plz.toml.
           httpUi = pkgs.stdenv.mkDerivation (finalAttrs: {
             pname = "sismatic-http-ui";
             inherit version;
-            src = ./http-ui;
+            src = ./crates/sismatic-http-api/http-ui;
 
             # The offline pnpm store, as a fixed-output derivation — the one
             # place in this flake that is allowed to reach the network, and it
@@ -809,13 +829,19 @@
                   t != null && lib.hasInfix "{{package}}" (builtins.replaceStrings [ " " ] [ "" ] t);
                 isReleased = p: (p.release or true) == true;
 
+                # Both halves are vacuous while every member is released, and both
+                # must stay: half one is the check that a newly added crate — the
+                # only kind that is ever `release = false` now — is scoped during
+                # the one release it spends unreleased.
+                #
                 # Half one: an unreleased member with an unscoped template is the
                 # intent-relay bug, armed and waiting for the next new crate.
                 unscopedUnreleased = map (p: p.name) (
                   builtins.filter (p: !(isReleased p) && !(isScoped p)) entries
                 );
                 # Half two: a released member with a scoped template loses its
-                # changelog baseline.
+                # changelog baseline — and then votes on the version with its
+                # entire history, which is a breaking bump every release.
                 scopedReleased = map (p: p.name) (builtins.filter (p: isReleased p && isScoped p) entries);
 
                 # Promoting a crate to released is the one case this check cannot
@@ -823,10 +849,26 @@
                 # last tag, which needs history the sandbox does not have. Pin the
                 # set so that decision is made by a human editing this list, who can
                 # then check the tag by hand.
+                #
+                # Every member is released today — that is the point of the config,
+                # so that a change in any crate produces a version. The pin's job is
+                # therefore no longer to hold a minority open: it is the thing that
+                # catches a *newly added* crate, which cannot be released in the same
+                # PR that introduces it (it does not exist at the last tag, so the
+                # workspace-shaped template sends release-plz looking for it in a
+                # worktree that has never heard of it). A new member must ship once
+                # as `release = false` + scoped, then join this list.
                 expectedReleased = [
+                  "sismatic-api-types"
+                  "sismatic-cli"
                   "sismatic-core"
-                  "sismatic-python-sdk"
                   "sismatic-http-api"
+                  "sismatic-intent-relay"
+                  "sismatic-python-sdk"
+                  "sismatic-server"
+                  "sismatic-store"
+                  "sismatic-store-memory"
+                  "sismatic-sync"
                 ];
                 actualReleased = map (p: p.name) (builtins.filter isReleased entries);
                 newlyReleased = lib.subtractLists expectedReleased actualReleased;
@@ -1315,7 +1357,7 @@
                 # flake like every other tool, so `npm` here is the same npm on
                 # a laptop and in CI rather than whatever the host happens to
                 # have on PATH. Scaffold with:
-                #   pnpm install   (in http-ui/)
+                #   pnpm install   (in crates/sismatic-http-api/http-ui/)
                 nodejs
                 pnpm
                 # zero2prod chapter 3+: database tooling
@@ -1365,14 +1407,14 @@
 
                 # pnpm can swap itself (and Node) out at runtime on the
                 # strength of a package.json field, which would quietly undo
-                # the pins above. Only http-ui/pnpm-workspace.yaml can disable
-                # that, and the flake cannot write a file into a project that
-                # does not exist yet -- so warn rather than imply the pin is
-                # airtight. See the pnpm binding for the mechanism.
+                # the pins above. Only the frontend's `pnpm-workspace.yaml` can
+                # disable that, and the flake cannot write a file into a project
+                # that does not exist yet -- so warn rather than imply the pin
+                # is airtight. See the pnpm binding for the mechanism.
                 SIS_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-                if [ -f "$SIS_ROOT/http-ui/package.json" ] \
-                  && ! grep -qs pmOnFail "$SIS_ROOT/http-ui/pnpm-workspace.yaml"; then
-                  echo "warning: http-ui/pnpm-workspace.yaml does not set 'pmOnFail: ignore', so a" >&2
+                if [ -f "$SIS_ROOT/crates/sismatic-http-api/http-ui/package.json" ] \
+                  && ! grep -qs pmOnFail "$SIS_ROOT/crates/sismatic-http-api/http-ui/pnpm-workspace.yaml"; then
+                  echo "warning: crates/sismatic-http-api/http-ui/pnpm-workspace.yaml does not set 'pmOnFail: ignore', so a" >&2
                   echo "         packageManager field can override this flake's pnpm ${pnpmVersion}." >&2
                 fi
               '';
