@@ -632,7 +632,7 @@
             pnpmDeps = (pkgs.fetchPnpmDeps.override { inherit pnpm; }) {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 3;
-              hash = "sha256-GRhGa5SBUkionozzLYgQQDmHrNfYMo4E/18FmY+fJGU=";
+              hash = "sha256-vQgFcvqyrm8wtgxPn5I02TKDYVwr/y1rC/ntczFd/EA=";
             };
 
             # `pnpmConfigHook` needs no override: it resolves `pnpm` off `PATH`,

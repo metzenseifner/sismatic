@@ -7,20 +7,29 @@ export type Columns = "auto" | number;
 /**
  * The narrowest a card may be squeezed before a column is dropped instead.
  *
- * Low on purpose, and tuned rather than guessed. Six cards across a 72rem page
- * come to about 10rem each, which is cramped — and is exactly what "six per
- * row" asks for, so it is granted. The figure has to sit under that with room
- * to spare, because `--space-lg` keeps growing with the viewport after
- * `--max-width` has stopped: the gaps on a 120rem monitor are wider than those
- * on a 72rem one while the content is no wider, so the same six columns have
- * slightly less to share. At 10rem that tipped over and a wide monitor showed
- * five where a smaller window showed six; 9rem holds six from 72rem upwards.
+ * Measured against the card, not against a column count anyone wanted. On a
+ * 72rem page the cards come out 544px at two per row, 355px at three, 260px at
+ * four, and 165px at six; the control row stops fitting on one line below
+ * about 22rem, and by 10rem a 165px card is trying to hold a "Recording" badge
+ * and a "Stop recording" button in 121px of usable width. 16rem is the far
+ * side of that — tight, still legible.
+ *
+ * This figure decides the column count, and not the other way round. An
+ * earlier version of it was picked by working backwards from "make six fit at
+ * 72rem", which is how it came to be 9rem and how six per row came to mean six
+ * unreadable slivers. A floor exists to say how narrow a card may get; what
+ * then fits is arithmetic.
+ *
+ * So a requested count is a ceiling and never a promise — `Up to 4` is what the
+ * menu says — and on a 72rem container the honest answer to five or six is
+ * four. Raising `--max-width` is what makes the larger counts mean anything;
+ * six needs about 106rem of container before this floor will allow it.
  *
  * What keeps any of this off a phone is not this number but the width the
- * stylesheet demands before it honours a count at all. Between the two, a
- * narrow desktop asking for six gets five, rather than six unreadable slivers.
+ * stylesheet demands before it honours a count at all. See the media query in
+ * `Grid.module.css`.
  */
-const CARD_FLOOR = "9rem";
+const CARD_FLOOR = "16rem";
 
 export function Grid({
   children,

@@ -119,7 +119,19 @@ export function fromDeviceReads(device: DeviceReads): DeviceView {
   };
 }
 
-export function fromGroupState(group: GroupFieldStateList): DeviceView {
+/**
+ * @param configured
+ *   The group's members as the inventory lists them, when that has been
+ *   fetched. It is the better source and takes precedence: a group whose
+ *   devices have never answered has no fields at all, so the reads below can
+ *   name nobody, and a card that cannot say what is in a group is least useful
+ *   exactly when the devices are unreachable. Falls back to the reads so the
+ *   adapter still works on its own.
+ */
+export function fromGroupState(
+  group: GroupFieldStateList,
+  configured?: readonly string[],
+): DeviceView {
   const fields = new Map(group.fields.map((field) => [field.field, field]));
   const running = fields.get(RUNNING_STATE);
   const titles = fields.get(TITLE);
@@ -128,10 +140,16 @@ export function fromGroupState(group: GroupFieldStateList): DeviceView {
     group.fields.map((field) => [field.field, rollUp(field)]),
   );
 
-  // Member ids come from whichever field lists them; every field lists the
-  // same members, so the first one is enough.
-  const memberIds = group.fields[0]?.members.map((member) => member.device) ?? [];
+  // Within the reads, member ids come from whichever field lists them: every
+  // field lists the same members, so the first one is enough. It is the
+  // fallback rather than the source, because it is empty for precisely the
+  // group an operator is squinting at — see `configured` above.
+  const memberIds =
+    configured ?? group.fields[0]?.members.map((member) => member.device) ?? [];
 
+  // A member the inventory lists and the reads have never mentioned comes out
+  // of this with "unknown" throughout, which is the honest answer and the one
+  // the badge already knows how to draw.
   const members: MemberRow[] = memberIds.map((id) => {
     const runningMember = running?.members.find((member) => member.device === id);
     const titleMember = titles?.members.find((member) => member.device === id);

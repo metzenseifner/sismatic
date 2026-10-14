@@ -186,7 +186,7 @@ function Row({
 /**
  * The one thing worth reading with the fold shut.
  *
- * A failed save comes first, and in the alarming colour, because of where the
+ * A failed save comes first, and in the alarming color, because of where the
  * failure usually comes from: Start writes the unsaved registers before it
  * starts anything, so a refusal there means the recording did not begin and the
  * reason is inside a fold that may well be closed. The summary line is what

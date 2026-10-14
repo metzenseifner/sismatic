@@ -10,7 +10,7 @@ import {useThemeMode} from "./styles/theme";
 import {LiveDeviceCard} from "./components/device/LiveDeviceCard";
 import {fromDeviceReads, fromGroupState} from "./components/device/deviceView";
 import type {DeviceView} from "./components/device/deviceView";
-import {useDevices, useGroups} from "./api/queries";
+import {useDevices, useGroups, useInventoryGroups} from "./api/queries";
 import type {ApiCallError} from "./api/queries";
 
 export default function App() {
@@ -27,16 +27,29 @@ export default function App() {
 
   const devices = useDevices(pollMs);
   const groups = useGroups(pollMs);
+  // Membership, which the read routes cannot give for a group that has never
+  // answered. Deliberately not folded into `error` below: a card that knows
+  // what is recording but not who is in the group is worth far more than no
+  // page at all, so a failure here degrades to the reads instead of blanking
+  // the fleet.
+  const inventory = useInventoryGroups(pollMs);
+
+  const membersByGroup = useMemo(
+    () => new Map((inventory.data ?? []).map(g => [g.id, g.members])),
+    [inventory.data],
+  );
 
   // Groups first: a room is the thing an operator looks at, and a device is the
   // thing they drill into. Within each kind, the server's id order is kept so
   // the page does not reshuffle between refetches.
   const views = useMemo<DeviceView[]>(
     () => [
-      ...(groups.data ?? []).map(fromGroupState),
+      ...(groups.data ?? []).map(group =>
+        fromGroupState(group, membersByGroup.get(group.group)),
+      ),
       ...(devices.data ?? []).map(fromDeviceReads),
     ],
-    [groups.data, devices.data],
+    [groups.data, devices.data, membersByGroup],
   );
 
   // Two memos, not one: the fields a text search reads are rebuilt when the

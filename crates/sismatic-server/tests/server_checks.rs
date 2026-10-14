@@ -57,8 +57,18 @@ fn inventory_config_path_resolves_next_to_the_config_file_and_loads() {
 
     let devices = config::load(&cfg.inventory.config_path).expect("loading the devices it names");
     let ids: Vec<&str> = devices.devices.iter().map(|d| d.id.as_str()).collect();
-    assert_eq!(ids, ["fixture-atrium", "fixture-annex"]);
-    assert_eq!(devices.groups.len(), 1);
+    assert_eq!(
+        ids,
+        [
+            "atrium-a",
+            "atrium-b",
+            "audimax-a",
+            "audimax-b",
+            "lecture-hall-1-a",
+            "lecture-hall-1-b",
+        ]
+    );
+    assert_eq!(devices.groups.len(), 3);
 }
 
 /// `inventory.runtime_config_path` is anchored the same way `config_path` beside
@@ -254,9 +264,11 @@ fn the_real_environment_reaches_the_real_binary() {
         stderr.contains(MISSING),
         "expected the environment's devices path to have been used, got: {stderr}"
     );
-    // The fixture's own devices path is what it displaced.
+    // The fixture's own devices path is what it displaced. The needle has to be
+    // an id the fixture really defines, or the assertion passes by naming
+    // something that was never going to appear.
     assert!(
-        !stderr.contains("fixture-atrium"),
+        !stderr.contains("atrium-a"),
         "the fixture's devices file should not have been read at all: {stderr}"
     );
 }

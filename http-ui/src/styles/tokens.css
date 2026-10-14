@@ -1,9 +1,9 @@
-/* Design tokens: the only file in this tree that names a colour.
+/* Design tokens: the only file in this tree that names a color.
  *
  * # The contract
  *
  * A component asks for a *role* — `var(--color-surface)`, `var(--color-muted)`
- * — and never for a colour, a mode, or a palette. Nothing outside this file
+ * — and never for a color, a mode, or a palette. Nothing outside this file
  * mentions a hex value, and no component stylesheet or `.tsx` anywhere refers
  * to light or dark. That is the whole architecture: a mode is a different
  * mapping of the same roles, so switching one is a change here and nowhere
@@ -47,7 +47,12 @@
 
   --radius: 0.75rem;
   --tap-size: 44px; /* Apple's recommended minimum touch target */
-  --max-width: 72rem;
+  /* Wide enough for six cards at `CARD_FLOOR`, which is what sets it:
+     6 x 16rem + 5 x 1.5rem of gutter + 2 x 1.25rem of container padding =
+     106rem. The half rem on top is slack, because the column arithmetic lands
+     exactly on the boundary at 106 and `auto-fill` rounding down there would
+     silently give five. Any window narrower than this still just fills. */
+  --max-width: 106.5rem;
 
   /* ── The palettes ─────────────────────────────────────────────────── */
   /* Raw values, each written once. Nothing outside this file reads these:
@@ -128,10 +133,10 @@
  *     an explicit light choice has to survive a dark machine.
  *
  * Adding a role means adding it to both blocks. Forgetting shows up at once as
- * a light colour in a dark page, which is the cheapest kind of mistake to
+ * a light color in a dark page, which is the cheapest kind of mistake to
  * find. The one-declaration-per-role version of all this is CSS `light-dark()`,
  * which is worth moving to when Safari 17.5 is an acceptable floor — until
- * then its failure mode is every colour going invalid at once.
+ * then its failure mode is every color going invalid at once.
  */
 
 @media (prefers-color-scheme: dark) {

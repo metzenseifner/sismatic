@@ -10,7 +10,7 @@
 .primary { background: var(--color-accent); color: var(--color-on-accent); }
 /* The stronger fill, not `--color-surface`: a secondary button sits on a card
    or on the control bar, and both of those *are* `--color-surface`, so it had
-   been painting itself the colour of its own background. Visible in light mode
+   been painting itself the color of its own background. Visible in light mode
    once you look for it, and invisible in dark mode, which is how it got
    noticed. */
 .secondary {

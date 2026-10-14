@@ -34,3 +34,7 @@ export type Acceptance = Schemas["Acceptance"];
 export type Rejection = Schemas["Rejection"];
 /** Every field a read can be asked for — the body of `GET /v1/reads`. */
 export type FieldCatalog = Schemas["FieldCatalog"];
+/** One configured group: its id, its members, and its barrier policy. */
+export type GroupSummary = Schemas["GroupSummary"];
+/** Every configured group — the body of `GET /v1/inventory/groups`. */
+export type GroupList = Schemas["GroupList"];

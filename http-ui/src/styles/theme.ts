@@ -1,7 +1,7 @@
 // The one piece of JavaScript that knows a mode exists.
 //
 // It sets an attribute. That is deliberately all it does: `tokens.css` holds
-// every colour and every decision about which colour belongs to which mode, so
+// every color and every decision about which color belongs to which mode, so
 // nothing here, and nothing in any component, needs to know what dark *looks*
 // like. A component asks for `var(--color-surface)` and is right in every mode
 // without having been told there are modes.

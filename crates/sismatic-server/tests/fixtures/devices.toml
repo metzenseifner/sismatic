@@ -6,13 +6,37 @@ username = "admin"
 password = "extron"
 
 [[device]]
-id = "fixture-atrium"
+id = "atrium-a"
 host = "10.0.0.7"
 
 [[device]]
-id = "fixture-annex"
+id = "atrium-b"
 host = "10.9.40.12"
 
+[[device]]
+id = "audimax-a"
+host = "10.10.40.12"
+
+[[device]]
+id = "audimax-b"
+host = "10.10.40.13"
+
+[[device]]
+id = "lecture-hall-1-a"
+host = "10.10.40.14"
+
+[[device]]
+id = "lecture-hall-1-b"
+host = "10.10.40.14"
+
 [[group]]
-id = "fixture-room"
-devices = ["fixture-atrium", "fixture-annex"]
+id = "atrium"
+devices = ["atrium-a", "atrium-b"]
+
+[[group]]
+id = "audimax"
+devices = ["audimax-a", "audimax-b"]
+
+[[group]]
+id = "lecture-hall-1"
+devices = ["lecture-hall-1-a", "lecture-hall-1-b"]

@@ -21,6 +21,14 @@
   display: none;
 }
 
+/* Never broken from its chevron. In a narrow card — six per row is 10rem of
+   card — the summary line runs out of room and the arrow wraps onto a line of
+   its own underneath the word, with the note still sitting beside it. The
+   titles here are one word, so refusing the break costs nothing. */
+.title {
+  white-space: nowrap;
+}
+
 /* The chevron hangs off the title rather than off the summary, so that a note
    pushed to the far end does not drag the arrow away from the word it marks. */
 .title::after {

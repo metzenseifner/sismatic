@@ -1,7 +1,25 @@
 .grid {
-  /* Named so the column arithmetic below can use the same figure `gap` does;
-     a calc that assumed a different gap would be off by a card every time. */
-  --grid-gap: var(--space-lg, 2rem);
+  /* A fixed gutter, and the one place in this stylesheet that does not use the
+     responsive spacing scale.
+     *
+     * `--space-lg` grows with the viewport — `clamp(1rem, 0.75rem + 1.5vw,
+     * 2rem)` — and the content it is dividing does not: `--max-width` caps at
+     * 72rem. Past that point every extra pixel of window widened the gutters
+     * while the row stayed the same size, so the grid fitted *fewer* cards the
+     * larger the screen got. Measured, before this was changed: three 22rem
+     * cards plus two 2rem gaps need 1120px and the content box is 1112px, so a
+     * 1440px window showed two columns — while a 1152px window, with its
+     * smaller gaps, showed three.
+     *
+     * Non-monotonic in the window width, which is indefensible on its own
+     * terms and not something a different card minimum would have fixed. A
+     * gutter that does not move is what makes the column arithmetic depend on
+     * one variable instead of two.
+     *
+     * Named, rather than written inline, so the column arithmetic below uses
+     * the same figure `gap` does; a calc that assumed a different gap would be
+     * off by a card every time. */
+  --grid-gap: 1.5rem;
 
   display: grid;
   gap: var(--grid-gap);

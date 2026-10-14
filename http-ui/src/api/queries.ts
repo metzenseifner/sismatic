@@ -26,6 +26,7 @@ import type {
   DeviceReads,
   FieldCatalog,
   GroupFieldStateList,
+  GroupSummary,
   Rejection,
   WritesCatalog,
 } from "./types";
@@ -62,6 +63,7 @@ export const queryKeys = {
   groups: ["reads", "groups"] as const,
   writesCatalog: ["writes", "catalog"] as const,
   readsCatalog: ["reads", "catalog"] as const,
+  inventoryGroups: ["inventory", "groups"] as const,
 };
 
 /** An API call that answered, but with an error status. */
@@ -175,6 +177,39 @@ export function useWritesCatalog(): UseQueryResult<WritesCatalog, ApiCallError> 
       const {status} = response;
       if (!data) throw new ApiCallError(status, undefined);
       return data;
+    },
+  });
+}
+
+/**
+ * Every configured group, with the devices in it.
+ *
+ * The read routes cannot answer this. `GET /v1/reads/groups` reports a group's
+ * *fields*, and a group whose devices have never answered has none — the row
+ * comes back as `{group, sync, fields: []}`, which says nothing about who is in
+ * it. So a fleet that is unreachable, or simply not polled yet, draws a group
+ * card that cannot name a single member, which is the moment someone most
+ * wants to know what the group is supposed to contain.
+ *
+ * Membership is configuration rather than a reading, and this is the route that
+ * serves configuration. Polled on the same interval as the fleet rather than
+ * fetched once, because the inventory routes can add and remove members while
+ * the server runs.
+ */
+export function useInventoryGroups(
+  pollMs: number = DEFAULT_POLL_MS,
+): UseQueryResult<GroupSummary[], ApiCallError> {
+  return useQuery({
+    queryKey: queryKeys.inventoryGroups,
+    refetchInterval: pollMs,
+    queryFn: async ({signal}) => {
+      // One request, no paging: `GroupList` carries no `next`, unlike the two
+      // fleet routes. And no error branch in the generated types, so the
+      // status is read before the guard — see `useWritesCatalog`.
+      const {data, response} = await api.GET("/v1/inventory/groups", {signal});
+      const {status} = response;
+      if (!data) throw new ApiCallError(status, undefined);
+      return data.groups;
     },
   });
 }
