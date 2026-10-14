@@ -124,6 +124,7 @@ pub mod inventory;
 pub mod openapi;
 pub mod stamp;
 pub mod startup;
+pub mod ui;
 
 pub use config::{ConfigRefusal, DynLiveConfig, LiveConfig};
 pub use handlers::health_check;

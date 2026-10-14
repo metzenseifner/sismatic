@@ -51,9 +51,11 @@
 # on the PR rather than after merge. `publish = false` is fine on leaf members
 # nothing else depends on: the CLI/web/server binaries and the pyo3 cdylib.
 git_only = true
-# Default everything OFF; the crates that should release opt in below. This
-# keeps the CLI/web binaries and the pyo3 cdylib from ever being pushed to
-# crates.io or tagged by accident.
+# Default publishing and tagging OFF for every member; sismatic-core opts back
+# into tagging below and nothing opts into publishing. This is what keeps the
+# CLI/web binaries and the pyo3 cdylib from ever being pushed to crates.io or
+# tagged by accident — note that it is independent of `release`, which is on
+# everywhere (see below) and governs version determination, not publication.
 publish = false
 git_tag_enable = false
 # pipeline.yml is the single owner of the GitHub Release (it attaches the wheels,
@@ -63,33 +65,85 @@ git_release_enable = false
 # One tag for the whole workspace (`v0.2.17`), not per-crate
 # `sismatic-core-v0.2.17` tags — this is the pattern pipeline.yml matches.
 #
-# This template is also what makes the `git_tag_name` overrides below load-
-# bearing. It carries no `{{ package }}`, so under git_only it matches `v0.2.25`
-# for *every* member — including a crate added after that tag, which release-plz
-# then goes looking for in a worktree checked out at it. That is what wedged main
-# when sismatic-intent-relay landed: `Failed to find package
-# "sismatic-intent-relay"`, unrecoverable, because the tag only moves via the
-# release PR that is now failing. See docs/Release-Plz-Package-Baselines.md.
+# Carrying no `{{ package }}`, this template matches `v{current}` for *every*
+# member under git_only. That is exactly what gives all ten a diff baseline, and
+# it is also the one footgun this file has already fired: a crate added *after*
+# the last tag matches it too, and release-plz goes looking for that crate in a
+# worktree checked out there. That is what wedged main when sismatic-intent-relay
+# landed: `Failed to find package "sismatic-intent-relay"`, unrecoverable,
+# because the tag only moves via the release PR that is now failing. The
+# two-step procedure for adding a crate is below.
+# See docs/Release-Plz-Package-Baselines.md.
 git_tag_name = "v{{ version }}"
 
-# Released members (release defaults to true). These keep the workspace-shaped
-# template above, because they must retain a real diff baseline: it is what
-# release-plz diffs their CHANGELOG against. Scoping one of these makes
-# release-plz treat it as an initial release and regenerate its changelog from
-# the whole git history. Both are old enough to exist at every tag.
+# Every member is released (`release` defaults to true), and every member
+# therefore keeps the workspace-shaped template above. Both halves of that are
+# deliberate, and the reason is "a change anywhere must produce a version".
 #
-# These two are also the only members that ever reach `determining next version`
-# — `release = false` below exempts the rest from version determination (though
-# NOT from the packaging pass, which is the distinction that caused the bug).
-# So these two, and only these two, drive the shared version.
+# How release-plz decides a member changed. It attributes a commit to a package
+# by asking whether the commit touched that package's *directory* — plus a
+# `readme` path pointing outside it, which is the only exception and is a single
+# file (`pathbufs_to_check`, release_plz_core). There is no "extra paths" knob.
+# So a member only ever votes on the version if it is released, and only on the
+# commits that landed inside it.
+#
+# Why they all need the unscoped template. A scoped `{{ package }}-v{{ version
+# }}` matches no tag, so release-plz finds no baseline, logs "will be treated as
+# initial release", and walks the member's *entire* history — every old `feat!`
+# included. For an unreleased member that is harmless (it never reaches version
+# determination). For a released one it would mean a breaking bump on every
+# release, forever. Released member <=> unscoped template, enforced below by
+# `nix flake check`.
+#
+# What this costs: measurably almost nothing, and an earlier revision of this
+# comment was wrong about it. It claimed ~18 min vs ~2, on the theory that each
+# released member pays for its own `cargo package --workspace` run. It does not.
+# release-plz caches the reconstructed worktree *per release commit*
+# (`reconstructed_workspaces` in next_ver.rs), and the workspace-shaped template
+# means all ten members resolve to the same `v{version}` tag — so the packaging
+# pass runs once no matter how many members are released. Measured on 0.3.165
+# over this workspace at v0.7.1: one `cargo package --allow-dirty --workspace
+# --no-verify` (11.5s) and nine cache hits, ~75ms each, 15s for the whole
+# `update`. Going from three released members to ten cost about half a second.
+#
+# The proposed version is also still one number, because `version_group` below
+# collapses all ten votes into the highest one, and there is still exactly one
+# tag, because `git_tag_enable` stays off everywhere but sismatic-core. What
+# does grow is the changelog surface: every member now carries a CHANGELOG.md,
+# and a member that saw no commits of its own gets a version bump with no
+# changelog entry — which is correct, and is what a shared version means.
+#
+# Adding a new crate still needs two steps, and the hazard is unchanged — the
+# unscoped template above matches `v{current}` for a crate that did not exist at
+# that tag, and release-plz dies looking for it in the worktree, unrecoverably,
+# because the tag only moves via the release PR that is now failing. So: ship it
+# once as `release = false` + scoped, then promote it in a follow-up PR. The
+# `expectedReleased` pin in flake.nix is what forces that to be a decision
+# rather than an accident; see its assertion message.
+#
+# One thing deliberately NOT used here: `changelog_include`. It pulls another
+# package's commits into this one's diff, and contrary to the docs it does feed
+# version determination (`add_commits` runs before the bump is computed), so it
+# looks like a way to let one released member speak for an unreleased one. It is
+# not: it reads the included member's commit list, which for a baseline-less
+# member is that entire-history walk above. Same trap, one level removed.
+#
+# The frontend is the other half of the guarantee, and it is why
+# `http-ui/` lives under crates/sismatic-http-api/ rather than at the repo root:
+# a directory outside every package is a directory release-plz cannot see, so
+# UI-only commits used to ship with no bump at all. See flake.nix's `httpUi`.
 [[package]]
 git_tag_enable = true
 name = "sismatic-core"
 publish = false
 version_group = "sismatic"
 
-# `semver_check = false` here and on sismatic-http-api below: neither member can
-# be semver-checked, and neither ever has been.
+# `semver_check = false` here and on every member below except sismatic-core.
+# None of them can be semver-checked, and none ever has been. The rule is
+# mechanical — internal path dependency => the check cannot run — and only
+# sismatic-core and sismatic-api-types have none. core keeps the check because
+# it has always had it and it has always worked; api-types switches it off,
+# which is a decision rather than a consequence, and the entry below says why.
 #
 # cargo-semver-checks builds the baseline from the *packaged* crate release-plz
 # produces under `<worktree>/target/package/`. Packaging rewrites every internal
@@ -121,67 +175,76 @@ version_group = "sismatic"
 # stalled the release PR on the 2026-09-17 push.
 #
 # This flag therefore removes an error, not a guarantee: it makes explicit the
-# behaviour the workspace has had all along. Breaking changes in these two are
-# still caught the way they always have been — by `!` / BREAKING CHANGE markers
-# in conventional commits. sismatic-core deliberately keeps the check, and it
-# genuinely works there: core has no internal dependencies, so its packaged
-# baseline resolves against crates.io-free input.
+# behaviour the workspace has had all along. Breaking changes in these members
+# are still caught the way they always have been — by `!` / BREAKING CHANGE
+# markers in conventional commits. sismatic-core deliberately keeps the check,
+# and it genuinely works there: core has no internal dependencies, so its
+# packaged baseline resolves against crates.io-free input.
+#
+# `semver_check = false` on sismatic-cli is a no-op today and is set anyway: the
+# default is "on for a package containing a library" and the CLI is bin-only, so
+# the check never runs — but it depends on sismatic-core, so the day someone
+# gives it a `src/lib.rs` it would start failing for the structural reason
+# above, in the release PR rather than in the build.
 [[package]]
 name = "sismatic-python-sdk"
 semver_check = false
 version_group = "sismatic"
 
-# Unreleased members. Each carries a *scoped* git_tag_name whose regex can never
-# match: `git_tag_enable = false` means no `<crate>-v<version>` tag is ever
-# created. release-plz therefore finds no baseline, logs "will be treated as
-# initial release", and never opens a worktree — which is precisely the crash it
-# would otherwise hit for any crate newer than the last tag. Nothing is lost:
-# these members never reached version determination anyway, so the proposed
-# version and changelogs are byte-for-byte identical to the unscoped config, and
-# release-pr drops from ~18 min to ~2 by skipping 8 `cargo package --workspace`
-# runs.
-#
-# `nix flake check` (release-plz-config) enforces the biconditional both ways:
-# release = false <=> scoped template. Do not set one without the other.
+# The remaining members. All released, all on the workspace-shaped template,
+# for the reasons at the top of this file. The only axis they differ on is
+# whether their packaged baseline can be resolved, i.e. whether they carry an
+# internal path dependency.
 [[package]]
 name = "sismatic-cli"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
 [[package]]
 name = "sismatic-server"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
+# api-types is the one member that *could* be semver-checked and is not. It has
+# no internal path dependency, so by the rule above its packaged baseline would
+# resolve — and it is also the member where the check would be worth the most,
+# being the shared wire vocabulary. It is off because promoting this member to
+# released is a version-determination change, and turning on a check that has
+# never once executed in this repo is a different change with a different
+# failure mode: cargo-semver-checks is absent locally and crates.io is
+# unreachable from the sandbox here, so "it should resolve" is an argument, not
+# a measurement, and the place it would be measured for the first time is the
+# release PR.
+#
+# To turn it on, drop the flag in a PR of its own and watch that run. If it
+# trips, the flag goes back and nothing else is affected.
 [[package]]
 name = "sismatic-api-types"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
 [[package]]
 name = "sismatic-sync"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
 [[package]]
 name = "sismatic-store"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
 [[package]]
 name = "sismatic-store-memory"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false
 
 # `semver_check = false`: the internal path deps sismatic-api-types and
 # sismatic-store make this member's packaged baseline unresolvable. Full
 # reasoning in the block above the sismatic-python-sdk entry.
+#
+# This is also the member the frontend belongs to. `http-ui/` is a subdirectory
+# of it, so a commit touching nothing but `.tsx` or `.css` is a commit touching
+# this package, and votes on the version like any other.
 [[package]]
 name = "sismatic-http-api"
 semver_check = false
@@ -189,6 +252,5 @@ version_group = "sismatic"
 
 [[package]]
 name = "sismatic-intent-relay"
-git_tag_name = "{{ package }}-v{{ version }}"
+semver_check = false
 version_group = "sismatic"
-release = false

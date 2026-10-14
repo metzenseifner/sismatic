@@ -27,6 +27,8 @@ $ curl localhost:8080/v1/reads/devices/atrium-101/fields/RUNNING_STATE
 {"device":"atrium-101","field":"RUNNING_STATE","value":{"type":"state","value":"started"},"at":"2026-09-17T09:14:03Z"}
 ```
 
+![Fleet Overview](docs/fleet_overview.png)
+
 ---
 
 ## Table of contents
@@ -42,6 +44,9 @@ $ curl localhost:8080/v1/reads/devices/atrium-101/fields/RUNNING_STATE
   - [Environment variables](#environment-variables)
   - [Precedence](#precedence)
   - [Changing configuration while it runs](#changing-configuration-while-it-runs)
+- [Observability](#observability)
+  - [Fleet Overview](#fleet-overview)
+  - [Telemetry](#http-api)
 - [HTTP API](#http-api)
 - [Concepts](#concepts)
   - [Warm versus cold connections](#warm-versus-cold-connections)
@@ -633,6 +638,28 @@ particular change is a rolling restart rather than a reload.
 > There is no authentication in front of `/v1/config` yet, and unlike the rest of the
 > API it changes what the server does. Keep it behind whatever fronts the service — a
 > NetworkPolicy, an ingress rule, or by not exposing the port beyond the cluster.
+
+## Observability
+
+### Fleet Overview
+
+An overview of your devices and groups provides a realtime dashboard of your
+fleet. It is built into sismatic-server and reachable at the `/ui`. It has the
+following features:
+
+- Control how often to poll the store for keeping the UI in sync.
+- Filters using fuzzy search across all groups and devices to find information
+  faster.
+- Ad-hoc control over the recording state for both device groups and devices.
+- Details about each device can be hidden, shown, or pinned to the top of each
+  visual card for tighter control over what gets shown.
+
+### Telemetry
+
+Data is retrieved from the devices at an interval you control. The data is
+collected into a store whose lifecycle you also control. This data can be
+retrieved by other monitoring processes and persisted elsewhere. See the [HTTP
+API](#http-api) for respective endpoints.
 
 ## HTTP API
 

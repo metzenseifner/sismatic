@@ -1,0 +1,114 @@
+/* A panel the width of the grid below it, not a band across the window: it is
+   a direct sibling of the card grid inside the same container, so its left
+   edge lines up with the first card and its right edge with the last one. The
+   rounded border is what says it is a thing on the page rather than a strip of
+   browser chrome. */
+.bar {
+  margin-block-end: var(--space-lg, 2rem);
+  padding: var(--space-sm, 0.5rem) var(--space-md, 1rem);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 0.75rem);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem) var(--space-md, 1rem);
+}
+
+/* One group per control: the label stays glued to the thing it names when the
+   row wraps, which is the whole job of a bar that has to survive a phone. */
+.group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs, 0.25rem);
+}
+
+/* The only control that grows. It takes the slack at every width, so the
+   selects keep their own size and the row wraps rather than squeezing. */
+.search {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+.field {
+  min-height: var(--tap-size, 44px);
+  max-width: 100%;
+  padding: 0 var(--space-sm, 0.5rem);
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius, 0.75rem) / 2);
+}
+
+.seconds {
+  width: 5rem;
+}
+
+.count {
+  margin: 0;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+/* Pushed to the far end: these two are settings for the page, not questions
+   about the fleet, and keeping them apart from the filters says so. */
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem) var(--space-md, 1rem);
+  margin-inline-start: auto;
+}
+
+/* Narrow enough that nothing shares a line anyway, so the auto margin would
+   only push the settings to a lonely right edge of their own row. */
+@media (max-width: 40rem) {
+  .settings {
+    margin-inline-start: 0;
+  }
+}
+
+/* The field picker. Columns that fit rather than a fixed count, so forty
+   fields are a readable block on a desktop and one column on a phone. */
+.fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(19rem, 100%), 1fr));
+  gap: var(--space-xs, 0.25rem) var(--space-md, 1rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fieldRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem);
+  /* A full tap target per row: this is a list people go down with a thumb. */
+  min-height: var(--tap-size, 44px);
+}
+
+/* The name takes the slack and the control keeps its size, so a column of
+   these lines up down the right-hand edge however long the names are. */
+.fieldLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.error {
+  margin: 0;
+  color: var(--color-alert);
+}

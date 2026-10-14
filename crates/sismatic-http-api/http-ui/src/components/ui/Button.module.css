@@ -1,0 +1,25 @@
+/* Button.module.css */
+.button {
+  min-height: var(--tap-size);
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-radius: var(--radius);
+  font: inherit;
+  cursor: pointer;
+}
+.primary { background: var(--color-accent); color: var(--color-on-accent); }
+/* The stronger fill, not `--color-surface`: a secondary button sits on a card
+   or on the control bar, and both of those *are* `--color-surface`, so it had
+   been painting itself the color of its own background. Visible in light mode
+   once you look for it, and invisible in dark mode, which is how it got
+   noticed. */
+.secondary {
+  background: var(--color-surface-strong);
+  color: var(--color-text);
+}
+
+/* Only apply hover on devices with a mouse or trackpad,
+   so iPhone and iPad taps do not leave a "stuck" hover color */
+@media (hover: hover) {
+  .button:hover { filter: brightness(1.1); }
+}

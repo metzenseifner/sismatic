@@ -5,6 +5,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Off by default, and the default is the point: this crate stays usable as a
+# plain API that carries no frontend, and *whether a binary ships one* is a
+# composition decision rather than a property of the library. `sismatic-server`
+# turns it on; nothing else does. With it off, `src/ui.rs` compiles to a unit
+# struct whose route registration is empty, so no page, no asset and no byte of
+# `http-ui` reaches the binary.
+#
+# What the feature does NOT gate is where the bytes come from — see `build.rs`'s
+# `dist_dir`. A build with the feature on and no frontend to embed is a normal,
+# expected build (release-plz's packaging pass is one), and it produces a page
+# that says so rather than a failure.
+[features]
+ui = []
+
 [dependencies]
 actix-web.workspace = true
 # The store's ports are async traits and this crate declares one of its own:

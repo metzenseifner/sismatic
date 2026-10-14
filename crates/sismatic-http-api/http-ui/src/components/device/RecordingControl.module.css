@@ -1,0 +1,26 @@
+.control {
+  display: grid;
+  gap: var(--space-xs, 0.25rem);
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.note {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-muted);
+}
+
+.error {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--color-alert);
+}
+/* An "already stopped" is feedback, not a fault; it should not look like one. */
+.error[data-benign] {
+  color: var(--color-muted);
+}

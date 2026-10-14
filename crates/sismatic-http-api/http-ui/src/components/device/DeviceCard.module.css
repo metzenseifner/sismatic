@@ -1,0 +1,154 @@
+/* The card answers to its own width, not the screen's, so it looks right
+   in a one-column iPhone list and in a four-column desktop grid alike. */
+.wrapper {
+  container-type: inline-size;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 0.5rem);
+  padding: var(--space-md, 1rem);
+  background: var(--color-surface);
+  border-radius: var(--radius, 0.75rem);
+  /* A colored edge so a recording card stands out even when scrolled past fast. */
+  border-left: 4px solid transparent;
+}
+.card[data-status="recording"] {
+  border-left-color: var(--color-recording);
+}
+.card[data-status="paused"],
+.card[data-status="mixed"] {
+  border-left-color: var(--color-paused);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.identity {
+  min-width: 0;
+}
+
+.kind {
+  display: block;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.name {
+  margin: 0;
+  font-size: var(--text-lg, 1.25rem);
+  overflow-wrap: anywhere;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-base, 1rem);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  /* Long titles are cut at two lines visually; screen readers still read all of it. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.title[data-empty] {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
+/* One full-width row, not a strip of inline buttons: what goes in here carries
+   its own notes and errors underneath the controls. */
+.actions {
+  display: grid;
+  gap: var(--space-sm, 0.5rem);
+}
+
+/* ─── Inside the folds ────────────────────────────────────── */
+/* The folds themselves are `ui/Clapdown`; what follows is only what the
+   Details body puts inside one. */
+
+.subheading {
+  margin: 0 0 var(--space-xs, 0.25rem);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.list {
+  display: grid;
+  gap: var(--space-xs, 0.25rem);
+  margin: 0;
+}
+
+.row {
+  display: grid;
+  gap: 0 var(--space-sm, 0.5rem);
+}
+.row dt {
+  color: var(--color-muted);
+}
+.row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.members {
+  display: grid;
+  gap: var(--space-sm, 0.5rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.member {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.15rem var(--space-sm, 0.5rem);
+}
+.memberName {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.memberTitle {
+  grid-column: 1 / -1;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.drift {
+  font-weight: 400;
+  color: var(--color-paused);
+}
+
+.updated {
+  margin: 0;
+  color: var(--color-muted);
+}
+
+/* ─── Wider cards: labels beside values ───────────────────── */
+
+@container (min-width: 26rem) {
+  .row {
+    grid-template-columns: minmax(8rem, 40%) 1fr;
+  }
+  .title {
+    font-size: var(--text-lg, 1.25rem);
+  }
+}
+
+/* Pinned fields sit above the fold, so they are smaller than the title and
+   plainer than the rows inside a fold: they are there to be glanced at on a
+   wall of cards, not read. */
+.pinned {
+  font-size: 0.875rem;
+}

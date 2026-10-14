@@ -1,0 +1,105 @@
+/* The fold a card is built out of. Lifted out of DeviceCard.module.css when
+   "Registers" became a second one: two copies of a chevron that has to rotate
+   in step is one copy too many. */
+
+.clapdown {
+  border-top: 1px solid var(--color-border);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem);
+  min-height: var(--tap-size, 44px);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-link);
+  list-style: none;
+}
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Never broken from its chevron. In a narrow card — six per row is 10rem of
+   card — the summary line runs out of room and the arrow wraps onto a line of
+   its own underneath the word, with the note still sitting beside it. The
+   titles here are one word, so refusing the break costs nothing. */
+.title {
+  white-space: nowrap;
+}
+
+/* The chevron hangs off the title rather than off the summary, so that a note
+   pushed to the far end does not drag the arrow away from the word it marks. */
+.title::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin: 0 0 0.2em 0.6em;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg); /* points down: "there is more" */
+  transition: transform 150ms;
+}
+.clapdown[open] > .summary > .title::after {
+  margin-bottom: -0.2em;
+  transform: rotate(-135deg); /* points up: "fold it away" */
+}
+@media (prefers-reduced-motion: reduce) {
+  .title::after {
+    transition: none;
+  }
+}
+
+/* Readable with the fold shut, which is the only reason a note exists. */
+.note {
+  margin-inline-start: auto;
+  font-weight: 500;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+
+.body {
+  display: grid;
+  gap: var(--space-md, 1rem);
+  padding-bottom: var(--space-sm, 0.5rem);
+  font-size: 0.875rem;
+}
+
+/* ─── Opening and shutting ────────────────────────────────── */
+/* A fold that snapped open would take the cards under it with it, in one jump
+   of several hundred pixels; the eye has nothing to follow and has to find its
+   place on the page again. Animating the height of the content instead means
+   the card below slides down out of the way, because it is a row of the same
+   column grid and follows the height it is given.
+
+   `interpolate-size` is what makes `auto` a height a transition can arrive at,
+   and `allow-discrete` keeps `content-visibility` on for the whole of the
+   closing one — without it the content vanishes first and the fold animates
+   empty. Scoped to the fold rather than `:root`: it is the only thing here
+   that needs to interpolate a keyword.
+
+   Both are progressive. A browser with no `::details-content` ignores the lot
+   and folds instantly, which is what every browser did until recently. */
+.clapdown {
+  interpolate-size: allow-keywords;
+}
+
+.clapdown::details-content {
+  block-size: 0;
+  overflow: hidden;
+  transition:
+    block-size 200ms ease,
+    content-visibility 200ms;
+  transition-behavior: allow-discrete;
+}
+.clapdown[open]::details-content {
+  block-size: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clapdown::details-content {
+    transition: none;
+  }
+}

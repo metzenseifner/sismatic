@@ -1,0 +1,32 @@
+/* The card layout of the overview: columns that keep their own heights.
+
+   A plain `repeat(auto-fill, …)` grid cannot do this. Every item in a grid row
+   shares that row's height, so one card with a fold open lifts the whole row,
+   and the cards after it start below the tallest of them — a hand's width of
+   blank page under every card that was left shut. Columns that are each a grid
+   of their own have nothing to line up with: a card sits directly under the
+   card above it, and opening a fold moves only what is below it in that one
+   column.
+
+   The track list is still `auto-fill` and still lives here: `Masonry.tsx`
+   reads back how many tracks it resolved to, rather than redoing the same
+   arithmetic in JS against a width it would have to measure. */
+.masonry {
+  display: grid;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(var(--masonry-min, 16rem), 100%), 1fr)
+  );
+  gap: var(--space-lg);
+  align-items: start;
+}
+
+.column {
+  display: grid;
+  align-content: start;
+  gap: var(--space-lg);
+  /* Cards carry device ids and recording titles that do not break. Without
+     this a column refuses to go narrower than its widest word and the tracks
+     push the page sideways. */
+  min-width: 0;
+}
