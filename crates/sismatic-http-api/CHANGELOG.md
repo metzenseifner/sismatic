@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/metzenseifner/sismatic/compare/v0.7.1...v0.7.2) - 2026-10-14
+
+### Added
+
+- integrated sismatic ui into http-api
+- add generated typescript types from openapi schema
+
+### Other
+
+- all crates and http-ui contribute to release-plz version increments. Mov http-ui into sismatic-http-api.
+
 ## [0.7.0](https://github.com/metzenseifner/sismatic/compare/v0.6.1...v0.7.0) - 2026-09-17
 
 ### Added
