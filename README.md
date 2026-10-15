@@ -37,6 +37,7 @@ $ curl localhost:8080/v1/reads/devices/atrium-101/fields/RUNNING_STATE
 - [sismatic-server](#sismatic-server)
   - [Quickstart](#quickstart)
   - [Installation](#installation)
+  - [Container image](#container-image)
 - [Configuration](#configuration)
   - [Two documents, one process](#two-documents-one-process)
   - [Server configuration](#server-configuration)
@@ -178,6 +179,41 @@ $ tar -xzf sismatic-server-<version>-<target>.tar.gz
 $ ./sismatic-server-<version>-<target>/sismatic-server --help
 ```
 
+#### Container image
+
+Every tagged release publishes a multi-arch image (`linux/amd64` and
+`linux/arm64`) to three registries, identical on each:
+
+```console
+$ docker run --rm -p 8080:8080 ghcr.io/metzenseifner/sismatic:latest
+$ docker run --rm -p 8080:8080 quay.io/metzenseifner/sismatic:latest
+$ docker run --rm -p 8080:8080 docker.io/metzenseifner/sismatic:latest
+```
+
+That runs with nothing mounted: the image carries an empty fleet, so the server
+comes up healthy on `0.0.0.0:8080` with `GET /health_check` answering and
+`GET /v1/inventory/devices` answering `[]`. Give it a real fleet by mounting a
+file over `/etc/sismatic/devices.yaml`, or by posting to `/v1/inventory`.
+
+There is no base image and no Dockerfile. The content is the same statically
+linked musl binary the tarball above ships, plus two config files and an
+`/etc/passwd` — no shell, no package manager, no CA bundle. It runs as uid
+`65532` and needs no writable filesystem.
+
+Every setting is reachable from the environment, which is the whole of how the
+image is configured:
+
+```console
+$ docker run --rm -p 8080:8080 \
+    -e SISMATIC_SERVER__STORE__RETAIN=7d \
+    -e SISMATIC_SERVER__SYNC__INTERVAL_SECS=60 \
+    -v ./devices.yaml:/etc/sismatic/devices.yaml:ro \
+    ghcr.io/metzenseifner/sismatic:latest
+```
+
+See [Deployment](docs/deployment.md) for Kubernetes manifests, which
+`nix build .#k8s` generates for the version you are running.
+
 #### Nix
 
 The same artifact is one command away locally — CI runs exactly this, and nothing
@@ -186,6 +222,9 @@ about the build lives in the workflow:
 ```console
 $ nix run   .#server -- --help    # run it straight out of the flake
 $ nix build .#server-release      # -> result/sismatic-server-<version>-<target>.tar.gz
+$ nix build .#container           # -> result, a docker-archive: docker load < result
+$ nix build .#k8s                 # -> result/, example Kubernetes manifests
+$ nix build .#env-reference       # -> result, every setting as a Markdown table
 ```
 
 Each architecture is built on its own native runner, so `nix build .#server-release`
@@ -527,6 +566,33 @@ SISMATIC_SERVER__HTTP__PORT=8080
 
 `SISMATIC_SERVER__CONFIG` is the one variable that is not a config key: it names
 *which* document to load, so it must be answered before there is a document to look in.
+
+The list above is a sample, not the surface. The surface is derived from the
+config type itself, so the binary can print it:
+
+```console
+$ sismatic-server --env-schema
+{
+  "prefix": "SISMATIC_SERVER",
+  "separator": "__",
+  "list_separator": ",",
+  "keys": [
+    {
+      "path": "store.retain",
+      "var": "SISMATIC_SERVER__STORE__RETAIN",
+      "types": ["string", "integer"],
+      "list": false,
+      "description": "a duration (30d, 2 weeks, 1h 30min), an instant ..."
+    },
+    ...
+  ]
+}
+```
+
+That document is where the reference table, the example `ConfigMap` and the
+server's own list of comma-separated keys all come from — so adding a setting
+to the config struct adds it everywhere at once, with no list to keep in step.
+`nix build .#env-reference` renders it as a table.
 
 ### Precedence
 

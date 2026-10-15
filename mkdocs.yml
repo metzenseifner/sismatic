@@ -32,9 +32,24 @@ markdown_extensions:
   - admonition
   - pymdownx.superfences
   - pymdownx.highlight
+  # `--8<-- "env-reference.md"` in deployment.md. That table is generated from
+  # the server's config type by `nix build .#env-reference` and dropped into
+  # docs/ by the `docs` app, so it is included rather than committed — a
+  # committed copy is a second source of truth that only a human notices has
+  # gone stale.
+  - pymdownx.snippets:
+      base_path: [docs]
+      check_paths: true
   - toc:
       permalink: true
 
 nav:
   - Home: index.md
+  - Deployment: deployment.md
   - API Reference: reference.md
+
+# env-reference.md is a fragment that deployment.md pulls in, not a page of its
+# own. Naming it here is how mkdocs is told that, rather than reporting it on
+# every build as a page somebody forgot to link.
+not_in_nav: |
+  env-reference.md

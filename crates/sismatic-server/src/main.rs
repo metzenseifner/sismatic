@@ -86,6 +86,7 @@ use sismatic_core::devices::config;
 use sismatic_core::devices::config::RawConfig;
 use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides, ServerConfig};
 use sismatic_server::run;
+use sismatic_server::schema::EnvSchema;
 use tracing::{info, instrument, warn};
 
 #[derive(Parser, Debug)]
@@ -110,6 +111,15 @@ struct Args {
     /// [env: SISMATIC_SERVER__HTTP__PORT] [default: from config, else 8080]
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Print every environment variable this server accepts, as JSON, and exit
+    // `exclusive` because this answers a question about the binary rather than
+    // about a deployment: combining it with `--port` would suggest the output
+    // depended on the flags, and it does not. A `//` comment, not a doc one —
+    // clap prints doc comments as help, and this is a note to the next
+    // maintainer rather than to an operator.
+    #[arg(long, exclusive = true)]
+    env_schema: bool,
 }
 
 /// Which server config file to read. Pure and total: the environment is read by
@@ -146,9 +156,19 @@ fn exit_with_help(message: impl fmt::Display) -> ! {
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
+    let args = Args::parse();
+
+    // Before the subscriber, deliberately. `get_subscriber` formats bunyan onto
+    // *stdout*, so a logger installed first would interleave startup lines with
+    // the document and hand `jq` something that is not JSON. Nothing above this
+    // point logs, so there is nothing to lose by answering here and leaving.
+    if args.env_schema {
+        print_env_schema();
+        return Ok(());
+    }
+
     let subscriber = get_subscriber("sismatic-server".into(), "info".into());
     init_subscriber(subscriber);
-    let args = Args::parse();
 
     // Read by hand rather than through the config layer, because it decides
     // which document that layer reads. The name comes from `configuration` so
@@ -193,6 +213,28 @@ async fn main() -> Result<(), std::io::Error> {
     let devices = load_device_set(&cfg);
 
     run(cfg, source, devices, shutdown_signal()).await
+}
+
+/// Write the environment surface to stdout as JSON.
+///
+/// The machine-readable half of `--help`, and the input to everything in
+/// `flake.nix` that has to name these variables: the documentation table, the
+/// example `ConfigMap`, and the check that fails when either drifts. It is
+/// JSON rather than a table because the flake renders several shapes from it
+/// and a parser for a pretty table would be a second place to be wrong.
+///
+/// Derived, not written: see [`sismatic_server::schema`] for how the key set
+/// comes off `RawServerConfig`'s own type, and why that removed a bug rather
+/// than only a chore.
+fn print_env_schema() {
+    let schema = EnvSchema::of_server_config();
+    // Infallible in practice — the document is plain data — but a panic here
+    // would be a strange way for `--env-schema` to fail, so it is reported like
+    // any other usage problem.
+    match serde_json::to_string_pretty(&schema) {
+        Ok(json) => println!("{json}"),
+        Err(e) => exit_with_help(format_args!("rendering the environment schema: {e}")),
+    }
 }
 
 /// Wait for the operator's interrupt — the process's one shutdown trigger.

@@ -42,6 +42,9 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
+use utoipa::openapi::schema::Type;
+use utoipa::openapi::{RefOr, Schema};
+use utoipa::{PartialSchema, ToSchema};
 
 use crate::configuration::StoreConfig;
 use crate::units;
@@ -184,6 +187,26 @@ impl<'de> Deserialize<'de> for Retention {
         deserializer.deserialize_any(RetentionVisitor)
     }
 }
+
+/// The same three forms, as a schema.
+///
+/// Beside the `Deserialize` impl above rather than in `crate::schema`, on the
+/// same principle that puts `Display` beside `FromStr`: the spellings this
+/// accepts and the spellings it advertises are one decision, and splitting them
+/// across files is how they come to disagree. See
+/// [`configuration::spellings`](crate::configuration) for what a leaf is and
+/// why this one declares no properties.
+impl PartialSchema for Retention {
+    fn schema() -> RefOr<Schema> {
+        crate::configuration::spellings(
+            &[Type::String, Type::Integer],
+            "a duration (30d, 2 weeks, 1h 30min), an instant \
+             (2026-01-01T00:00:00Z, 2026-01-01), 'forever', or a number of seconds",
+        )
+    }
+}
+
+impl ToSchema for Retention {}
 
 /// Refuse a zero window, and say what the two things it might have meant are
 /// called.

@@ -1,0 +1,27 @@
+# The fleet the container image ships with: none.
+#
+# An empty list rather than no file, and the difference is what makes the image
+# runnable with nothing mounted. `load_device_set` panics when
+# `inventory.config_path` names a file it cannot read, so an image without this
+# would be one that cannot start until a ConfigMap is attached — a reasonable
+# design, and not the one chosen here: a pod that comes up healthy with an
+# empty fleet can be probed, scraped and talked to while the fleet is still
+# being decided, and `GET /v1/inventory/devices` answering `[]` is a clearer
+# first impression than CrashLoopBackOff.
+#
+# An empty document (`---` alone, or a zero-byte file) would not do: YAML reads
+# that as null rather than as a mapping, and `RawConfig` would fail to
+# deserialize. The key has to be present and empty.
+#
+# Two ways to give the image a real fleet, and they compose:
+#
+#   - mount a ConfigMap or Secret over /etc/sismatic/devices.yaml — the
+#     declarative route, and the one to prefer, since the fleet then lives
+#     where the rest of the deployment does. Note that a device's credentials
+#     live in this document, so anything beyond a lab fleet belongs in a Secret
+#     rather than a ConfigMap.
+#   - POST /v1/inventory/devices at runtime — which does not touch this file,
+#     and is lost on restart unless `inventory.runtime_config_path` is set and
+#     pointed at a writable volume. See the note in container_configuration.yaml
+#     about why that setting is not on by default.
+devices: []

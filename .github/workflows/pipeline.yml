@@ -158,6 +158,126 @@ jobs:
           path: result-server/*
           if-no-files-found: error
 
+  # The container image: one native runner per architecture, same as
+  # `binaries` and for the same reason — the image content is `serverStatic`,
+  # so building it elsewhere would mean cross-compiling aws-lc-sys' vendored C.
+  #
+  # Every run builds and inspects the image; only a tag pushes it. That split
+  # is deliberate. A pull request should fail when the image stops building or
+  # stops satisfying `container-config-check`, and a fork's pull request has a
+  # read-only token and no registry secrets, so a push step would be either
+  # skipped or red for reasons that have nothing to do with the change.
+  #
+  # What gets published, and when: on `v*` only, each runner pushes its own leg
+  # as `<version>-<arch>`, and `container-index` then writes the multi-arch
+  # `<version>` and `latest` over both. Nothing is published from `main`,
+  # matching every other artifact here.
+  container:
+    name: Container ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # ghcr.io authenticates with the job's own token rather than a secret.
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-linux }
+          - { runner: ubuntu-24.04-arm, target: aarch64-linux }
+    steps:
+      - uses: actions/checkout@v4
+      # Restore-only: `binaries` owns this family's cache on each of these
+      # architectures and builds the same musl closure, so the two share it
+      # and only one of them writes.
+      - uses: ./.github/actions/nix
+        with:
+          family: dist
+
+      - name: Build image
+        run: nix build .#container --out-link result-container --print-build-logs
+
+      # Entrypoint, uid, port, the config variable and the version label,
+      # asserted against the built image. Not in `nix flake check` because it
+      # stands on the musl toolchain — see the comment on the output.
+      - name: Check image configuration
+        run: nix build .#container-config-check --no-link --print-build-logs
+
+      # The flake names the version; the tag names it again. A mismatch would
+      # publish an image whose tag disagrees with the binary inside it, which
+      # is the one failure that survives the release and confuses everyone
+      # later. release-plz bumps Cargo.toml and then tags `v{version}`, so
+      # these agree unless something went wrong upstream of here.
+      - name: Verify tag matches flake version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          flake=$(nix eval --raw .#container.imageTag)
+          want="${GITHUB_REF_NAME#v}-${{ matrix.target == 'x86_64-linux' && 'amd64' || 'arm64' }}"
+          echo "flake tag: $flake"
+          echo "ref tag:   $want"
+          [ "$flake" = "$want" ] || {
+            echo "::error::image tag '$flake' does not match tag '$GITHUB_REF_NAME'"
+            exit 1
+          }
+
+      # Registries, credentials and tags all live in flake.nix; this step only
+      # supplies the secrets it names and runs the app.
+      - name: Push image
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: nix run .#push-container
+
+      # The example manifests, as a release asset. Built here rather than in
+      # its own job because it is three small files and this job already has
+      # the store warm.
+      - name: Build Kubernetes manifests
+        if: matrix.target == 'x86_64-linux'
+        run: nix build .#k8s --out-link result-k8s --print-build-logs
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-linux'
+        with:
+          name: k8s-manifests
+          path: result-k8s/*
+          if-no-files-found: error
+
+  # The second phase of publishing a multi-arch image: one index over the legs
+  # every `container` runner pushed. A job of its own because it cannot start
+  # until both have finished, and it touches no architecture of its own — it
+  # only rewrites manifests that are already in the registries.
+  container-index:
+    name: Container multi-arch index
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+        with:
+          family: check
+
+      - name: Publish multi-arch index
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: nix run .#push-container-index
+
   # Portable wheels: one native runner per platform, each running the same
   # `nix run .#build-wheel`. The cargo cache below keeps repeat runs from
   # recompiling aws-lc-sys (pulled in by russh) from scratch.
@@ -295,8 +415,10 @@ jobs:
   # all of them into one stable context, "All checks passed", which is the only
   # name the ruleset has to know.
   #
-  # `release` and `publish-pypi` are deliberately absent: both are refs/tags/
-  # only and would be permanently `skipped` on a pull request.
+  # `release`, `publish-pypi` and `container-index` are deliberately absent:
+  # all three are refs/tags/ only and would be permanently `skipped` on a pull
+  # request. `container` itself *is* here, because it builds and inspects the
+  # image on every run and only its push step is tag-gated.
   #
   # Consequence to keep in mind: `pipeline.yml` must never grow a `paths:`
   # filter. A required check that does not run is not "passed", it is *pending*,
@@ -307,7 +429,7 @@ jobs:
     # any red job, the required check never reports, and the PR blocks on a
     # check that will never arrive.
     if: always()
-    needs: [deps, check, crate, binaries, wheels, sdist, prune-cargo-cache]
+    needs: [deps, check, crate, binaries, container, wheels, sdist, prune-cargo-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -329,7 +451,7 @@ jobs:
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [check, crate, binaries, wheels, sdist]
+    needs: [check, crate, binaries, container, wheels, sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -351,6 +473,14 @@ jobs:
           if [ -d artifacts/crate ]; then
             tar -czf "release/sismatic-crate-${GITHUB_REF_NAME}.tar.gz" \
               -C artifacts/crate .
+          fi
+          # The example Kubernetes manifests, which name this exact version and
+          # this exact image. Packed after the find above rather than collected
+          # by it: they are loose .yaml files, and the release page wants one
+          # thing to download rather than four.
+          if [ -d artifacts/k8s-manifests ]; then
+            tar -czf "release/sismatic-k8s-${GITHUB_REF_NAME}.tar.gz" \
+              -C artifacts/k8s-manifests .
           fi
           ls -l release
 

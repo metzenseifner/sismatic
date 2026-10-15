@@ -29,6 +29,7 @@ pub mod configuration;
 pub mod dynamic;
 pub mod fleet;
 pub mod lifecycle;
+pub mod schema;
 pub mod status;
 pub mod telemetry;
 pub mod units;
