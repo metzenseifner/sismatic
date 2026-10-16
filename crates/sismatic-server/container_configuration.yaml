@@ -1,0 +1,51 @@
+# The server config baked into the container image, and the whole of it.
+#
+# Deliberately almost empty, which is the opposite of the sibling
+# `server_configuration.yaml`. That file is a worked example: it states values
+# an operator should read, argue with and change, and it states them even where
+# they match the built-in default, because its job is to show the document.
+# This file's job is to boot a pod, so it states only what the binary cannot
+# already get right on its own. Everything absent here resolves to the default
+# in `configuration.rs` — a 24h retention window, a 5min sweep, a 256MiB cap, a
+# 30s poll over `'*'`, a 250ms relay at 3 attempts — and when one of those
+# constants changes, the image changes with it rather than pinning the old
+# value behind the loader's back.
+#
+# Every key is still reachable from the environment, so a Deployment overrides
+# any of them without replacing this file:
+#
+#   SISMATIC_SERVER__STORE__RETAIN=7d
+#   SISMATIC_SERVER__SYNC__INTERVAL_SECS=60
+#
+# `sismatic-server --env-schema` lists the full set, read off the config type
+# itself. Mounting a ConfigMap over /etc/sismatic/configuration.yaml replaces
+# this file wholesale, which is the other way to configure the image; the
+# environment wins over whichever file is in place.
+
+# The one setting a container genuinely must override.
+#
+# The built-in default is 127.0.0.1, which is right for a binary on a host and
+# useless in a pod: the loopback a container binds is its own, so a Service
+# routing to the pod IP would find nothing listening. 0.0.0.0 is only safe
+# because the pod's network namespace is the boundary — the port is reachable
+# from where Kubernetes decides it is, not from the LAN.
+http:
+  host: 0.0.0.0
+  port: 8080
+
+# The fleet, relative to this file's directory — so /etc/sismatic/devices.yaml.
+#
+# The image ships that file holding an empty fleet, which is what lets the
+# image run with nothing mounted. Give it a real fleet by mounting a ConfigMap
+# over it, or add devices at runtime through POST /v1/inventory.
+#
+# `runtime_config_path` is deliberately unset, as it is in the sibling file and
+# for the same reason: with nothing persisted, the devices file is
+# unambiguously authoritative and a restarted pod returns to exactly what it
+# says — which is the behaviour a declarative deployment already expects of
+# every other file it mounts. Setting it in a container needs more than the
+# key: the path must land on a writable volume that outlives the pod, or the
+# state it exists to preserve is lost on the next reschedule while the devices
+# file it shadows is still ignored.
+inventory:
+  config_path: devices.yaml

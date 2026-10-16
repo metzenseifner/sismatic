@@ -88,6 +88,23 @@ tracing-bunyan-formatter.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true
 sismatic-intent-relay.workspace = true
+# The config document's *shape*, reflected rather than restated.
+#
+# Not for OpenAPI. `RawServerConfig` already earns every environment variable it
+# accepts — `config::Environment` maps `SISMATIC_SERVER__STORE__RETAIN` onto
+# `store.retain` by a prefix-and-separator rule and nothing else — but that
+# mapping only runs *backwards*. Nothing could ask the type which keys exist, so
+# the answer was restated by hand wherever it was needed: in the docs, in the
+# example manifests, and (the load-bearing one) in `env_source`'s
+# `with_list_parse_key` list. `ToSchema` turns the type itself into the answer;
+# see `crate::schema`.
+#
+# Free, in the only sense that matters here: `sismatic-http-api` already names
+# utoipa directly and this crate already depends on that, so the crate is
+# compiled in every build that produces this binary. This edge adds a line to
+# `cargo tree`, not a node — which is why reflection is affordable at all, and
+# why a schema crate (`schemars`) was not the answer.
+utoipa.workspace = true
 
 [dev-dependencies]
 # `sync` for the oneshot the end-to-end test shuts `run` down with — the library

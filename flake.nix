@@ -100,6 +100,14 @@
           # startup failure — and the unit test that answers it has to be able
           # to read the file.
           #
+          # container_configuration.yaml and container_devices.yaml are the two
+          # files the container image carries, kept on exactly that argument and
+          # with more riding on it: they are the config of an artifact nobody
+          # edits by hand, so the only thing standing between a renamed section
+          # and a crash-looping pod is `shipped_config_check` reading them here.
+          # They live in the crate rather than being generated in the image
+          # derivation *so that* a test can reach them.
+          #
           # The frontend under `crates/sismatic-http-api/http-ui/` is NOT kept,
           # and that is the point. `filterCargoSources` drops `.ts`/`.tsx`/
           # `.css`/`.json`/`.html`, so a CSS edit changes none of the inputs to
@@ -116,7 +124,9 @@
               (craneLib.filterCargoSources path type)
               || (lib.hasInfix "/python/" path)
               || (lib.hasInfix "/tests/fixtures/" path)
-              || (lib.hasSuffix "/server_configuration.yaml" path);
+              || (lib.hasSuffix "/server_configuration.yaml" path)
+              || (lib.hasSuffix "/container_configuration.yaml" path)
+              || (lib.hasSuffix "/container_devices.yaml" path);
           };
 
           # Version is shared by every workspace member (workspace.package),
@@ -352,6 +362,676 @@
             ( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
           '';
 
+          #------------------------------------------------------------------#
+          #                          Container image                          #
+          #------------------------------------------------------------------#
+          # A third publishable artifact alongside the tarball above, built the
+          # same way and for the same reason: `nix build .#container` produces
+          # on a laptop exactly what the pipeline publishes, so the workflow
+          # stays a dispatcher and nothing about the image is decided in YAML.
+          #
+          # There is no Dockerfile and no base image. The content is
+          # `serverStatic` — the musl binary with no ELF interpreter and no
+          # runtime libc — so the image is that binary, three small files and
+          # nothing else. That is not minimalism for its own sake: a base image
+          # is a second dependency tree with its own CVE feed, its own update
+          # cadence and no lockfile, and every distro package in it would be one
+          # this flake does not pin. `dockerTools` assembles the layers out of
+          # the store instead, which makes the image a function of flake.lock
+          # like every other output here.
+          #
+          # What the image does *not* carry matters as much as what it does: no
+          # shell, no package manager, no CA bundle — nothing here opens an
+          # outbound TLS connection, since devices are reached over SSH and
+          # their host keys come from the devices file. A `kubectl exec` into
+          # this pod finds nothing to run, which is the intent.
+
+          # The repository name under every registry.
+          containerName = "sismatic";
+
+          # Where the image is published, and what each registry authenticates
+          # with. A fork changes this list and nothing else: the workflow names
+          # no registry, and neither app below knows how many there are.
+          #
+          # The credentials are named rather than passed because the alternative
+          # is worse. A workflow that logged in itself would need the pinned
+          # `skopeo` on its PATH — either an unpinned `nix run nixpkgs#skopeo`,
+          # which defeats the point of a lockfile, or an extra output whose only
+          # job is to hand the workflow a binary. Naming the variables here
+          # keeps every registry fact in one list and leaves the workflow with
+          # one line: set the secrets, run the app.
+          containerRegistries = [
+            {
+              host = "ghcr.io";
+              namespace = "metzenseifner";
+              # GitHub's own token works here, so a fork needs no secret of its
+              # own for this one — only `packages: write` on the job.
+              userEnv = "GHCR_USERNAME";
+              tokenEnv = "GHCR_TOKEN";
+            }
+            {
+              host = "quay.io";
+              namespace = "metzenseifner";
+              userEnv = "QUAY_USERNAME";
+              tokenEnv = "QUAY_TOKEN";
+            }
+            {
+              host = "docker.io";
+              namespace = "metzenseifner";
+              userEnv = "DOCKERHUB_USERNAME";
+              tokenEnv = "DOCKERHUB_TOKEN";
+            }
+          ];
+
+          # The architectures the multi-arch index is assembled from. One native
+          # runner each, for the same reason `serverStatic` is built natively:
+          # the vendored C in aws-lc-sys stays on its well-trodden path and only
+          # ever sees a different libc, not a different machine.
+          containerArches = [
+            "amd64"
+            "arm64"
+          ];
+
+          # OCI's name for this machine's architecture, or null where there is
+          # no image to build. `null` rather than a `throw`, so the attribute can
+          # be *asked about* on a platform that has no answer — the outputs below
+          # are gated on it, and a throw here would take down evaluation of the
+          # whole flake on, say, riscv64.
+          containerArch =
+            {
+              x86_64 = "amd64";
+              aarch64 = "arm64";
+            }
+            .${pkgs.stdenv.hostPlatform.parsed.cpu.name} or null;
+
+          # Whether this system can produce the image at all. Linux because the
+          # artifact is a Linux image and `serverStatic` is only musl there; the
+          # architecture test because the index above covers two.
+          containerSupported = pkgs.stdenv.isLinux && containerArch != null;
+
+          # The uid the server runs as.
+          #
+          # 65532 — distroless' `nonroot`, and the number most `securityContext`
+          # templates already carry. Deliberately not 65534/`nobody`, which is
+          # the kernel's overflow uid: an id-mapped or NFS-backed volume squashes
+          # unknown owners onto it, so a file owned by "nobody" says nothing
+          # about who wrote it and two unrelated processes collide on one name.
+          containerUid = 65532;
+
+          # The image reference the generated manifests name. The first registry
+          # in the list, at this version — a concrete ref rather than a
+          # placeholder, so the manifests can be applied as they are.
+          containerRepo = registry: "${registry.host}/${registry.namespace}/${containerName}";
+          containerRef = "${containerRepo (builtins.head containerRegistries)}:${version}";
+
+          containerConfigFile = ./crates/sismatic-server/container_configuration.yaml;
+          containerDevicesFile = ./crates/sismatic-server/container_devices.yaml;
+
+          # The two files the image ships under /etc/sismatic.
+          #
+          # Copied from the crate rather than written here, and that is the
+          # point: as committed files they are reachable from `cargo test`, so
+          # `shipped_config_check` puts both through the real loader on every
+          # check run. A config generated inside this derivation could be tested
+          # by nothing short of building the image and watching a pod, and
+          # `deny_unknown_fields` makes "does this file still load" a question
+          # with teeth — a section renamed in `RawServerConfig` turns the baked
+          # config into a startup failure.
+          containerEtc = pkgs.runCommand "sismatic-container-etc" { } ''
+            install -Dm444 ${containerConfigFile} "$out/etc/sismatic/configuration.yaml"
+            install -Dm444 ${containerDevicesFile} "$out/etc/sismatic/devices.yaml"
+          '';
+
+          containerImage = pkgs.dockerTools.buildLayeredImage {
+            name = containerName;
+            # Arch-suffixed, because this is one leg of a multi-arch image
+            # rather than the image itself. `nix run .#push-container-index`
+            # publishes the unsuffixed tags over both legs.
+            tag = "${version}-${toString containerArch}";
+            architecture = containerArch;
+            # An uncompressed archive, against the `gz` default.
+            #
+            # `docker save` produces a plain tar and that is what the
+            # `docker-archive:` transport is specified against, so this is the
+            # format skopeo and `docker load` are unambiguously correct on.
+            # Compression here would buy nothing anyway: the only consumer is
+            # a push, and the registry protocol compresses each layer on the
+            # wire regardless of how the archive that held it was packed.
+            compressor = "none";
+            # `created` is left at its epoch default on purpose: a build
+            # timestamp would make every rebuild a different image even when
+            # nothing changed, which is the property `serverRelease` buys with
+            # `--mtime='@1'`. The version is carried by a tag and a label.
+
+            contents = [
+              serverStatic
+              containerEtc
+              # /etc/passwd and /etc/group, so the uid below resolves to a name
+              # and `getpwuid` has an answer; also /etc/nsswitch.conf, which
+              # states `hosts: files dns` rather than leaving it to a resolver's
+              # built-in guess.
+              (pkgs.dockerTools.fakeNss.override {
+                extraPasswdLines = [
+                  "sismatic:x:${toString containerUid}:${toString containerUid}:sismatic:/var/lib/sismatic:/noshell"
+                ];
+                extraGroupLines = [ "sismatic:x:${toString containerUid}:" ];
+              })
+            ];
+
+            extraCommands = ''
+              # /tmp, because a read-only root filesystem still needs somewhere
+              # to put a temporary file and the Deployment mounts an emptyDir
+              # here. Sticky, as /tmp always is.
+              mkdir -p tmp
+              chmod 1777 tmp
+
+              # A mount point, not a writable directory. `runtime_config_path`
+              # is unset by default (see container_configuration.yaml), and a
+              # deployment that turns it on has to mount a volume that outlives
+              # the pod — so this is root-owned and unwritable on purpose.
+              # Baking it writable would let that setting appear to work right
+              # up until the first reschedule.
+              mkdir -p var/lib/sismatic
+            '';
+
+            config = {
+              Entrypoint = [ "/bin/sismatic-server" ];
+              # The one variable the image sets for itself, and the one that
+              # cannot be a config key — it names *which* document to load. See
+              # `CONFIG_PATH_ENV`. Every other setting is left to the
+              # environment, to the mounted file, or to the binary's own default.
+              Env = [ "SISMATIC_SERVER__CONFIG=/etc/sismatic/configuration.yaml" ];
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
+              User = "${toString containerUid}:${toString containerUid}";
+              WorkingDir = "/var/lib/sismatic";
+              Labels = {
+                "org.opencontainers.image.title" = containerName;
+                "org.opencontainers.image.description" =
+                  "Sismatic server: polls Extron SIS devices over SSH and serves what it read";
+                "org.opencontainers.image.version" = version;
+                "org.opencontainers.image.licenses" = "ECL-2.0";
+                "org.opencontainers.image.source" = "https://github.com/metzenseifner/sismatic";
+                "org.opencontainers.image.url" = "https://metzenseifner.github.io/sismatic/";
+              };
+            };
+          };
+
+          #------------------------------------------------------------------#
+          #              The environment surface, and what reads it           #
+          #------------------------------------------------------------------#
+          # Everything below is generated from one JSON document, which the
+          # binary generates from the config type. The chain exists so that
+          # adding a key to `RawServerConfig` adds it to the reference table and
+          # to the example `ConfigMap` with no edit here — see
+          # `sismatic_server::schema` for the half of this that lives in Rust.
+
+          # One key's description, rendered for a human who is not reading
+          # rustdoc.
+          #
+          # The descriptions are the fields' own doc comments, which is what
+          # makes them free and what makes them need this: a doc comment is
+          # written for `cargo doc`, so it wraps across lines and links with
+          # rustdoc's `[`Type::method`]` syntax, neither of which means anything
+          # in a Markdown table or a YAML comment. Unwrapping and delinking here
+          # — rather than flattening the prose in the source — keeps the Rust
+          # docs properly linked and costs one jq expression, shared by both
+          # generators below so the two renderings cannot diverge.
+          envDescription = ''
+            (.description // "")
+            | gsub("\\s+"; " ")
+            | gsub("\\[(?<t>[^\\]]*)\\]\\([^)]*\\)"; .t)
+            | gsub("\\[(?<t>`[^\\]]*`)\\]"; .t)
+          '';
+
+          envSchema = pkgs.runCommand "sismatic-env-schema.json" { } ''
+            ${lib.getExe server} --env-schema > "$out"
+          '';
+
+          # The reference table, for the docs site and the README.
+          envReference =
+            pkgs.runCommand "sismatic-env-reference.md"
+              {
+                nativeBuildInputs = [ pkgs.jq ];
+              }
+              ''
+                {
+                  echo "<!-- Generated by \`nix build .#env-reference\`; do not edit."
+                  echo "     The source is \`RawServerConfig\` in crates/sismatic-server. -->"
+                  echo
+                  echo "| Variable | Type | Description |"
+                  echo "| --- | --- | --- |"
+                  jq -r '
+                    .keys[]
+                    | [
+                        "`" + .var + "`",
+                        (.types | join(" or ")) + (if .list then " (comma-separated)" else "" end),
+                        (${envDescription} | gsub("\\|"; "\\|"))
+                      ]
+                    | "| " + join(" | ") + " |"
+                  ' ${envSchema}
+                } > "$out"
+              '';
+
+          # Example Kubernetes manifests. Built, not committed, so they cannot
+          # go stale against the flake that produces the image they name.
+          #
+          # Self-validating: the derivation parses every file it wrote before it
+          # succeeds, so `nix build .#k8s` failing *is* the check. A manifest
+          # that is merely wrong is still possible, of course — what this rules
+          # out is a generator emitting something no cluster would accept.
+          #
+          # Every heredoc below is quoted. The YAML is full of `$` and backticks
+          # that mean nothing to a shell, and one unquoted delimiter would let
+          # the shell eat them silently.
+          k8sManifests =
+            pkgs.runCommand "sismatic-k8s-manifests"
+              {
+                nativeBuildInputs = [
+                  pkgs.jq
+                  pkgs.yq-go
+                ];
+              }
+              ''
+                mkdir -p "$out"
+
+                {
+                  cat <<'EOF'
+                # The two files the image already carries, restated so a cluster
+                # owns them. Mounting this ConfigMap over /etc/sismatic replaces
+                # both.
+                #
+                # devices.yaml carries credentials for any real fleet, so
+                # anything past a lab belongs in a Secret with the same two keys
+                # and a `secret:` volume in place of the `configMap:` one below.
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sismatic-config
+                  labels:
+                    app.kubernetes.io/name: sismatic
+                data:
+                  configuration.yaml: |
+                EOF
+                  sed 's/^/    /' ${containerConfigFile}
+                  cat <<'EOF'
+                  devices.yaml: |
+                EOF
+                  sed 's/^/    /' ${containerDevicesFile}
+                } > "$out/configmap.yaml"
+
+                # Every setting, as the environment spells it, commented out.
+                # This is a catalogue: an uncommented key here would silently
+                # outrank the file above, which is the surprise the whole
+                # document exists to prevent.
+                {
+                  cat <<'EOF'
+                # Every setting this server accepts, as an environment variable.
+                #
+                # Generated from the config type itself (`sismatic-server
+                # --env-schema`), so the list cannot fall behind the binary.
+                # Uncomment what you need: the environment wins over
+                # configuration.yaml at any key it names, and is silent at every
+                # key it does not.
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sismatic-env
+                  labels:
+                    app.kubernetes.io/name: sismatic
+                data:
+                EOF
+                  jq -r '
+                    .keys[]
+                    | "  # " + (${envDescription})
+                      + "\n  # " + .var + ": \"\""
+                  ' ${envSchema}
+                } > "$out/env-configmap.yaml"
+
+                cat > "$out/deployment.yaml" <<'EOF'
+                # A singleton, and that is a property of the server rather than
+                # a placeholder to scale up later.
+                #
+                # Two replicas would each open their own SSH session to every
+                # device in the fleet, doubling the connection count a recorder
+                # sees, and each would answer reads out of its *own* in-memory
+                # store — so one query would return different history depending
+                # on which pod the Service picked. `Recreate` for the same
+                # reason: a rolling update would briefly run two.
+                #
+                # The memory limit is deliberately above
+                # SISMATIC_SERVER__STORE__MAX_MEMORY (256MiB by default). That
+                # setting is the store's own cap, enforced on every write; the
+                # limit here is the kernel's, enforced by killing the process.
+                # The first has to bind before the second, or the pod is OOM
+                # killed instead of expiring its oldest reads — raise them
+                # together.
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: sismatic
+                  labels:
+                    app.kubernetes.io/name: sismatic
+                spec:
+                  replicas: 1
+                  strategy:
+                    type: Recreate
+                  selector:
+                    matchLabels:
+                      app.kubernetes.io/name: sismatic
+                  template:
+                    metadata:
+                      labels:
+                        app.kubernetes.io/name: sismatic
+                    spec:
+                      securityContext:
+                        runAsNonRoot: true
+                        runAsUser: @UID@
+                        runAsGroup: @UID@
+                        fsGroup: @UID@
+                        seccompProfile:
+                          type: RuntimeDefault
+                      containers:
+                        - name: sismatic
+                          image: "@IMAGE@"
+                          imagePullPolicy: IfNotPresent
+                          ports:
+                            - name: http
+                              containerPort: 8080
+                          envFrom:
+                            - configMapRef:
+                                name: sismatic-env
+                                optional: true
+                          # GET /health_check answers 200 as soon as the process
+                          # is routing requests. It deliberately says nothing
+                          # about whether devices are reachable — a probe that
+                          # failed because a recorder was unplugged would
+                          # restart a server that was working perfectly.
+                          startupProbe:
+                            httpGet:
+                              path: /health_check
+                              port: http
+                            failureThreshold: 30
+                            periodSeconds: 2
+                          readinessProbe:
+                            httpGet:
+                              path: /health_check
+                              port: http
+                            periodSeconds: 10
+                          livenessProbe:
+                            httpGet:
+                              path: /health_check
+                              port: http
+                            periodSeconds: 20
+                          resources:
+                            requests:
+                              cpu: 50m
+                              memory: 64Mi
+                            limits:
+                              memory: 384Mi
+                          securityContext:
+                            allowPrivilegeEscalation: false
+                            readOnlyRootFilesystem: true
+                            capabilities:
+                              drop: [ALL]
+                          volumeMounts:
+                            - name: config
+                              mountPath: /etc/sismatic
+                              readOnly: true
+                            - name: tmp
+                              mountPath: /tmp
+                      volumes:
+                        - name: config
+                          configMap:
+                            name: sismatic-config
+                        # readOnlyRootFilesystem leaves the image's own /tmp
+                        # unwritable, so it is replaced by a volume rather than
+                        # by a writable layer.
+                        - name: tmp
+                          emptyDir: {}
+                EOF
+
+                cat > "$out/service.yaml" <<'EOF'
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: sismatic
+                  labels:
+                    app.kubernetes.io/name: sismatic
+                spec:
+                  selector:
+                    app.kubernetes.io/name: sismatic
+                  ports:
+                    - name: http
+                      port: 80
+                      targetPort: http
+                EOF
+
+                # The two values the quoted heredoc could not interpolate. Done
+                # with placeholders rather than an unquoted delimiter so that
+                # exactly these two substitutions happen and nothing else does.
+                substituteInPlace "$out/deployment.yaml" \
+                  --replace-fail '@IMAGE@' '${containerRef}' \
+                  --replace-fail '@UID@' '${toString containerUid}'
+
+                # The validation this derivation's comment promises. Syntax,
+                # not schema: `kubeconform` would check these against the real
+                # Kubernetes OpenAPI definitions, but it fetches them over the
+                # network and this sandbox has none. So what is ruled out here
+                # is a generator that emitted something unparseable — a jq
+                # program that lost its indentation, a heredoc that swallowed a
+                # line — and not a field Kubernetes would reject.
+                for manifest in "$out"/*.yaml; do
+                  yq --exit-status 'true' "$manifest" > /dev/null \
+                    || { echo "error: generated $manifest is not valid YAML" >&2; exit 1; }
+                done
+              '';
+
+          #------------------------------------------------------------------#
+          #                       Publishing the image                        #
+          #------------------------------------------------------------------#
+          # Two apps rather than one, because a multi-arch image is published in
+          # two phases that happen on different machines: each architecture
+          # pushes its own leg from its own native runner, and one machine then
+          # writes an index over both. Neither step knows the registry list —
+          # both read `containerRegistries` above.
+          #
+          # Credentials: both tools read a Docker-format auth file. `skopeo`
+          # takes `REGISTRY_AUTH_FILE` (the file), `regctl` takes `DOCKER_CONFIG`
+          # (the directory holding config.json). Point both at one file and a
+          # single `skopeo login` per registry covers both phases.
+
+          containerRepos = map containerRepo containerRegistries;
+
+          # skopeo's trust policy, passed explicitly because it will not copy
+          # without one.
+          #
+          # nixpkgs installs upstream's default to
+          # `$out/etc/containers/default-policy.json` but does not patch the
+          # binary's compiled-in lookup path, which stays
+          # `/etc/containers/policy.json`. That file exists in no Nix build
+          # sandbox and is not guaranteed on a CI runner, so leaving it to the
+          # host means a push that works on one machine and dies on another.
+          # The policy is upstream's permissive default, which is the honest
+          # setting here: there is no signature to verify on an image this
+          # flake built locally thirty seconds ago.
+          skopeoPolicy = "${pkgs.skopeo}/etc/containers/default-policy.json";
+
+          # `skopeo login` / `regctl registry login` for every registry above,
+          # as shell. Both apps start with this, so a credential that is missing
+          # is named before anything is built or uploaded rather than halfway
+          # through a three-registry push.
+          #
+          # Strict on purpose: every registry in the list must have credentials.
+          # Skipping the ones without would turn "the release did not reach
+          # Docker Hub" into a line of log output nobody reads, and the list is
+          # already the one place to change if a deployment wants fewer.
+          # The two tools spell the same three arguments differently, so the
+          # spelling is data and the loop below is written once.
+          skopeoLogin = {
+            login = "skopeo login";
+            user = "--username";
+            stdin = "--password-stdin";
+          };
+          regctlLogin = {
+            login = "regctl registry login";
+            user = "--user";
+            stdin = "--pass-stdin";
+          };
+
+          containerLogin =
+            tool:
+            lib.concatMapStringsSep "\n" (registry: ''
+              if [ -z "''${${registry.userEnv}:-}" ] || [ -z "''${${registry.tokenEnv}:-}" ]; then
+                echo "error: ${registry.host} needs ${registry.userEnv} and ${registry.tokenEnv}" >&2
+                exit 1
+              fi
+              printf '%s' "''$${registry.tokenEnv}" \
+                | ${tool.login} "${registry.host}" ${tool.user} "''$${registry.userEnv}" ${tool.stdin}
+            '') containerRegistries;
+
+          # What an architecture's archive is called where the push app looks
+          # for it. The `container` job writes this name and this app reads it,
+          # so the convention is stated once and a disagreement is a missing
+          # file rather than a silent half-publish.
+          containerArchiveName = arch: "sismatic-${arch}.tar";
+
+          pushContainer = pkgs.writeShellApplication {
+            name = "sismatic-push-container";
+            runtimeInputs = [ pkgs.skopeo ];
+            text = ''
+              # Publish every architecture's leg, from archives on disk.
+              #
+              # Takes a directory rather than building the image, and that is
+              # the whole point of the signature. Referring to the image here
+              # would make this app *depend* on it, so the job that holds the
+              # registry credentials would also compile the musl toolchain —
+              # and the longer a credential is present on a machine, the more
+              # of that machine's work is inside its blast radius. The build
+              # happens in a job with no secrets; this one only uploads bytes.
+              #
+              # One runner pushes both legs because pushing is
+              # architecture-agnostic: skopeo copies a manifest and some blobs
+              # and never executes them, so an x86_64 runner publishes the
+              # arm64 image perfectly well. Only *building* needed a native
+              # machine.
+              if [ "$#" -ne 1 ]; then
+                {
+                  echo "usage: sismatic-push-container <dir>"
+                  echo
+                  echo "<dir> holds one archive per architecture:"
+              ${lib.concatMapStringsSep "\n" (arch: ''echo "  ${containerArchiveName arch}"'') containerArches}
+                } >&2
+                exit 2
+              fi
+              archives=$1
+
+              # Every archive is checked before a single credential is read.
+              # Authenticating and then discovering a missing leg would leave
+              # the registries half-populated and the index that follows built
+              # over an incomplete set — so the refusal comes first, while
+              # nothing has been logged into and nothing has been uploaded.
+              for arch in ${lib.concatStringsSep " " containerArches}; do
+                if [ ! -f "$archives/sismatic-$arch.tar" ]; then
+                  echo "error: no $arch archive at $archives/sismatic-$arch.tar" >&2
+                  exit 1
+                fi
+              done
+
+              ${containerLogin skopeoLogin}
+
+              for arch in ${lib.concatStringsSep " " containerArches}; do
+                for repo in ${lib.concatStringsSep " " containerRepos}; do
+                  echo "==> $repo:${version}-$arch"
+                  # `--format oci` so that the leg and the index that will wrap
+                  # it are the same kind of thing. `dockerTools` writes a Docker
+                  # v2s2 manifest and `regctl index create` writes an OCI index,
+                  # and an OCI index over v2s2 manifests — while legal, and
+                  # handled by every modern runtime — is a mixed artifact that
+                  # nothing here has a reason to produce. Converting is
+                  # manifest-level and deterministic: the layers are untouched
+                  # and all three registries still receive the same digest.
+                  skopeo --policy ${skopeoPolicy} copy --retry-times 3 --format oci \
+                    "docker-archive:$archives/sismatic-$arch.tar" \
+                    "docker://$repo:${version}-$arch"
+                done
+              done
+            '';
+          };
+
+          pushContainerIndex = pkgs.writeShellApplication {
+            name = "sismatic-push-container-index";
+            runtimeInputs = [ pkgs.regclient ];
+            text = ''
+              ${containerLogin regctlLogin}
+
+              # Write a multi-arch index over the per-architecture legs each
+              # runner has already pushed. With no arguments it publishes the
+              # version and `latest`.
+              tags=("$@")
+              if [ ''${#tags[@]} -eq 0 ]; then
+                tags=("${version}" "latest")
+              fi
+
+              for repo in ${lib.concatStringsSep " " containerRepos}; do
+                refs=()
+                for arch in ${lib.concatStringsSep " " containerArches}; do
+                  refs+=(--ref "$repo:${version}-$arch")
+                done
+                for tag in "''${tags[@]}"; do
+                  echo "==> $repo:$tag over ${lib.concatStringsSep ", " containerArches}"
+                  # Default media type, which is the OCI index — the half of
+                  # the agreement `--format oci` above makes good on.
+                  regctl index create "$repo:$tag" "''${refs[@]}"
+                done
+              done
+            '';
+          };
+
+          # What the image promises a cluster, asserted against the image itself
+          # rather than against the expression that built it.
+          #
+          # Worth a check of its own because each of these is a fault nothing
+          # else catches: a root `User` passes every unit test and is refused by
+          # `runAsNonRoot` at admission; a missing `SISMATIC_SERVER__CONFIG`
+          # leaves the binary looking for ./configuration.yaml and exiting 2; a
+          # port that drifted from the one the Service targets produces a pod
+          # that is perfectly healthy and unreachable.
+          containerConfigCheck =
+            pkgs.runCommand "sismatic-container-config-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.skopeo
+                  pkgs.jq
+                ];
+              }
+              ''
+                skopeo --policy ${skopeoPolicy} inspect --config \
+                  "docker-archive:${containerImage}" > config.json
+                jq . config.json
+
+                expect() {
+                  local filter=$1 want=$2 got
+                  got=$(jq -r "$filter" config.json)
+                  if [ "$got" != "$want" ]; then
+                    echo "error: $filter is '$got', expected '$want'" >&2
+                    exit 1
+                  fi
+                }
+
+                expect '.config.Entrypoint | join(" ")' '/bin/sismatic-server'
+                expect '.config.User' '${toString containerUid}:${toString containerUid}'
+                expect '.config.ExposedPorts | keys | join(",")' '8080/tcp'
+                expect '.architecture' '${toString containerArch}'
+                expect '.os' 'linux'
+                expect '.config.Env | map(select(startswith("SISMATIC_SERVER__CONFIG="))) | join("")' \
+                  'SISMATIC_SERVER__CONFIG=/etc/sismatic/configuration.yaml'
+                expect '.config.Labels["org.opencontainers.image.version"]' '${version}'
+
+                touch "$out"
+              '';
+
           # Source for the wheel: the cargo sources crane already filters,
           # plus the packaging files maturin reads (pyproject.toml and the
           # readme/license it points at, which cleanCargoSource drops) and the
@@ -487,6 +1167,15 @@
             name = "sismatic-docs";
             runtimeInputs = [ docsEnv ];
             text = ''
+              # The settings table is derived from the server's config type, not
+              # written by hand, so it is dropped here rather than committed —
+              # `docs/deployment.md` pulls it in with a `--8<--` snippet. Written
+              # into docs/ relative to the working directory, which mkdocs
+              # already requires to be the repo root because that is where
+              # mkdocs.yml is. Gitignored: it is a build output that happens to
+              # land in a source tree.
+              install -m644 ${envReference} docs/env-reference.md
+
               if [ "$#" -eq 0 ]; then
                 exec mkdocs build
               else
@@ -1252,6 +1941,20 @@
                 cargoTarpaulinExtraArgs = "--engine llvm --skip-clean --out xml --output-dir $out";
               }
             );
+          }
+          // {
+            # The generated Kubernetes manifests, which validate themselves —
+            # building this derivation parses every file it wrote. Cheap enough
+            # to be a check anywhere: it stands on the native `server` (already
+            # a check above) and not on `serverStatic`, so unlike the image it
+            # drags no musl toolchain in.
+            #
+            # What it actually guards is the generator. The manifests are built
+            # rather than committed precisely so they cannot go stale, and the
+            # cost of that is that nobody reads them before they are published;
+            # this is what notices when a schema change turns the env catalogue
+            # into something no cluster would accept.
+            k8s = k8sManifests;
           };
         in
         {
@@ -1283,6 +1986,41 @@
             # as sismatic-server-<version>-<target>.tar.gz plus its SHA-256.
             server-portable = serverPortable;
             server-release = serverRelease;
+
+            # The environment surface, read off `RawServerConfig` by the binary
+            # itself. Available everywhere, unlike the image below: the question
+            # "what can I set" has the same answer on a laptop as in a pod, and
+            # the docs build needs it on whatever system runs it.
+            env-schema = envSchema;
+            env-reference = envReference;
+
+            # `nix build .#k8s` -> example manifests naming this exact version.
+            # Outside the gate below because it needs only the native `server`
+            # to read the schema off: the manifests describe the image without
+            # building it.
+            k8s = k8sManifests;
+          }
+          # The container image and everything derived from it. Linux only, and
+          # only on the two architectures the index covers: `serverStatic` is a
+          # musl build, which is a thing only Linux has, and the arch-suffixed
+          # tag has to be a name OCI recognises. On every other system these
+          # outputs are simply absent rather than present-and-failing, so
+          # `nix flake check` on a laptop checks what that laptop can build.
+          // lib.optionalAttrs containerSupported {
+            # `nix build .#container` -> a docker-archive tarball, loadable with
+            # `docker load < result` and pushable with `nix run .#push-container`.
+            container = containerImage;
+
+            # The image's own invariants, asserted against the built artifact.
+            #
+            # A package rather than a check, for exactly the reason
+            # `serverRelease` is not a check: it stands on `serverStatic`, and
+            # putting it in `checks` would drag the musl toolchain into every
+            # `nix flake check` — tens of minutes added to a run that is
+            # supposed to be the fast gate. The container job in the pipeline
+            # builds it alongside the image it inspects, where that toolchain
+            # is already paid for.
+            container-config-check = containerConfigCheck;
           };
 
           # Plain app definition (flake-utils.mkApp without flake-utils).
@@ -1313,6 +2051,29 @@
             docs = {
               type = "app";
               program = pkgs.lib.getExe docs;
+            };
+          }
+          # Publishing the image, in the two phases a multi-arch image needs.
+          #
+          # Deliberately *not* gated on `containerSupported`, unlike the image
+          # itself. Neither app refers to `containerImage` any more — one takes
+          # archives off disk, the other only rewrites manifests that are
+          # already in the registries — so neither needs a machine that can
+          # build a Linux image. That is what lets one x86_64 runner publish
+          # both legs, and it incidentally makes a release recoverable from a
+          # laptop.
+          // {
+            # `nix run .#push-container -- <dir>` — every architecture's leg,
+            # to every registry, from archives in <dir>.
+            push-container = {
+              type = "app";
+              program = pkgs.lib.getExe pushContainer;
+            };
+            # `nix run .#push-container-index` — the multi-arch index over
+            # the legs, once every architecture has pushed one.
+            push-container-index = {
+              type = "app";
+              program = pkgs.lib.getExe pushContainerIndex;
             };
           };
 

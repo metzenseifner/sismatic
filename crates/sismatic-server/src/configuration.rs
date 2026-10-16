@@ -15,8 +15,12 @@ use sismatic_api_types::config::{
     StorePatch, StoreSettings, SyncPatch, SyncSettings,
 };
 use sismatic_core::protocol::instructions::query::Query;
+use utoipa::openapi::schema::{ObjectBuilder, SchemaType, Type};
+use utoipa::openapi::{RefOr, Schema};
+use utoipa::{PartialSchema, ToSchema};
 
 use crate::lifecycle::{FOREVER, Retention};
+use crate::schema;
 use crate::units;
 
 /// Default devices config path relative to the configuration file.
@@ -69,9 +73,12 @@ const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 5 * 60;
 /// `max_memory: unlimited` and owns the consequence.
 const DEFAULT_MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
-const ENV_PREFIX: &str = "SISMATIC_SERVER";
-const ENV_SEPARATOR: &str = "__";
-const ENV_LIST_SEPARATOR: &str = ",";
+// `pub(crate)` rather than private: `crate::schema` derives every variable
+// name from these same three, so the surface it reports and the surface this
+// source parses cannot spell the rule differently.
+pub(crate) const ENV_PREFIX: &str = "SISMATIC_SERVER";
+pub(crate) const ENV_SEPARATOR: &str = "__";
+pub(crate) const ENV_LIST_SEPARATOR: &str = ",";
 /// The key [`CONFIG_PATH_ENV`] collapses to once the prefix is stripped, and so
 /// the one [`env_source`] must drop before the document is deserialized.
 const ENV_CONFIG_PATH_KEY: &str = "config";
@@ -128,7 +135,7 @@ pub struct IntentRelayConfig {
 /// The environment as a config source: every key of [`RawServerConfig`],
 /// addressable as `SISMATIC_SERVER__` + its path.
 pub fn env_source() -> EnvSource {
-    EnvSource(
+    EnvSource(with_list_keys(
         config::Environment::with_prefix(ENV_PREFIX)
             // separator of namespace prefix from the variable name
             .separator(ENV_SEPARATOR)
@@ -140,10 +147,27 @@ pub fn env_source() -> EnvSource {
             // obviously numbers, and — the reason it is not optional here — it is what gates
             // `list_separator` at all.
             .try_parsing(true)
-            .list_separator(ENV_LIST_SEPARATOR)
-            .with_list_parse_key("sync.fields")
-            .with_list_parse_key("defaults.fields"),
-    )
+            .list_separator(ENV_LIST_SEPARATOR),
+    ))
+}
+
+/// Register every list-valued key, so the environment splits it on
+/// [`ENV_LIST_SEPARATOR`].
+///
+/// `config` splits a variable only at keys named here, so this list used to be
+/// two literals — `sync.fields` and `defaults.fields` — correct on the day they
+/// were written and checked by nothing afterwards. A third `Vec`-typed key
+/// would simply not be in it, and the failure is quiet: the variable is still
+/// accepted and still reaches the right field, it just stops being a list.
+///
+/// So the list is no longer stated. [`schema::list_keys`] reads it off the
+/// types of `RawServerConfig`'s own fields — a `Vec<_>` is an array, and every
+/// array-shaped leaf is a list key — which makes "this key is a list" a single
+/// fact about the struct rather than two facts that have to agree.
+fn with_list_keys(env: config::Environment) -> config::Environment {
+    schema::list_keys()
+        .iter()
+        .fold(env, |env, key| env.with_list_parse_key(key))
 }
 
 /// The `SISMATIC_SERVER__` environment, restricted to the keys that are part of
@@ -425,7 +449,7 @@ fn canonical_name(name: &str) -> String {
 /// The config file exactly as written: every field optional, so a config may
 /// state only what it overrides. `deny_unknown_fields` turns a typo into an
 /// error at startup instead of a silently ignored setting.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawServerConfig {
     #[serde(default)]
@@ -439,12 +463,16 @@ pub struct RawServerConfig {
 
 /// Fallbacks for anything the sections above leave unset. Intentional flat structure usability
 /// until complexity grows beyond some threshold.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
+    /// The poll interval `sync` inherits when it states none of its own.
     pub interval_secs: Option<u64>,
+    /// The poll schedule `sync` inherits when it states none of its own.
     pub fields: Option<Vec<RawField>>,
+    /// The address `http` inherits when it states none of its own.
     pub host: Option<String>,
+    /// The port `http` inherits when it states none of its own.
     pub port: Option<u16>,
 }
 
@@ -453,22 +481,33 @@ pub struct Defaults {
 /// A section of its own rather than keys folded into [`Defaults`]: the two
 /// numbers only mean anything together with the relay, and nothing else in the
 /// document would ever want to inherit them.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawIntentRelay {
+    /// How long an accepted write may wait before a device hears about it. A
+    /// floor, so it trades idle wake-ups against apparent latency.
     pub poll_ms: Option<u64>,
+    /// Total tries per write, not retries: `1` means a write that fails once is
+    /// failed for good.
     pub max_attempts: Option<u32>,
 }
 
 /// The `inventory` section as written: where the fleet comes from, and where
 /// runtime changes to it go.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawInventory {
     /// The devices file. Absent means the built-in default.
+    // `value_type` because `utoipa` has no schema for `PathBuf`, and the honest
+    // one is `String`: a path arrives here as text either way. A `//` comment
+    // rather than a doc one on purpose — `crate::schema` publishes doc comments
+    // as the operator-facing description of each variable, and this is a note
+    // to the next maintainer, not to them.
+    #[schema(value_type = String)]
     pub config_path: Option<PathBuf>,
     /// Where to persist runtime changes to the device set. Absent means nowhere,
     /// which leaves [`config_path`](Self::config_path) authoritative.
+    #[schema(value_type = String)]
     pub runtime_config_path: Option<PathBuf>,
 }
 
@@ -499,11 +538,13 @@ pub struct InventoryConfig {
     pub runtime_config_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawSync {
     /// The interval every entry of `fields` inherits unless it pins its own.
     pub interval_secs: Option<u64>,
+    /// What to poll: a field name per entry, or a table pinning that field's
+    /// own interval. `*` stands for every field core can query.
     pub fields: Option<Vec<RawField>>,
 }
 
@@ -519,7 +560,7 @@ pub struct RawSync {
 /// document puts the unit in the key. See [`crate::units`] for why the
 /// two conventions coexist, and note that a bare integer still works at every
 /// key here, read as seconds and as bytes respectively.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawStore {
     /// The oldest read to keep: a rolling window (`30d`, `2 weeks`,
@@ -572,6 +613,27 @@ const UNLIMITED: &str = "unlimited";
 /// at all — converts `SISMATIC_SERVER__STORE__CLEANUP_INTERVAL=300` into an
 /// integer before this is reached, so a string-only visitor would make every
 /// numeric spelling unreachable from the environment.
+/// A leaf that accepts more than one spelling, as a schema.
+///
+/// The shared half of the four hand-written [`PartialSchema`] impls below. Each
+/// of those types hand-writes `Deserialize` because its value may be written
+/// two ways — `5min` or `300`, `512MiB` or `unlimited` — and each therefore
+/// has to hand-write its schema too, since a derive can only reflect a derived
+/// `Deserialize`.
+///
+/// Properties are deliberately absent, and that is what makes these *leaves*:
+/// [`crate::schema`]'s walk descends `properties` and stops where there are
+/// none, so `store.retain` is reported as one variable rather than as a
+/// subtree. The `description` is the same sentence the visitor's `expecting()`
+/// gives an operator who gets it wrong, so the documentation and the error
+/// message are one string.
+pub(crate) fn spellings(types: &[Type], description: &str) -> RefOr<Schema> {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::Array(types.to_vec()))
+        .description(Some(description.to_owned()))
+        .into()
+}
+
 impl<'de> Deserialize<'de> for RawDuration {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct DurationVisitor;
@@ -604,6 +666,17 @@ impl<'de> Deserialize<'de> for RawDuration {
         deserializer.deserialize_any(DurationVisitor)
     }
 }
+
+impl PartialSchema for RawDuration {
+    fn schema() -> RefOr<Schema> {
+        spellings(
+            &[Type::String, Type::Integer],
+            "a duration such as 5min, 1h 30min, a number of seconds, or 'never'",
+        )
+    }
+}
+
+impl ToSchema for RawDuration {}
 
 impl<'de> Deserialize<'de> for RawBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -638,10 +711,25 @@ impl<'de> Deserialize<'de> for RawBytes {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl PartialSchema for RawBytes {
+    fn schema() -> RefOr<Schema> {
+        spellings(
+            &[Type::String, Type::Integer],
+            "a size such as 512MiB, 2GB, a number of bytes, or 'unlimited'",
+        )
+    }
+}
+
+impl ToSchema for RawBytes {}
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RawHttp {
+    /// The address to bind. `127.0.0.1` by default, which is why a container
+    /// image has to say `0.0.0.0` for the port to be reachable from outside
+    /// the pod.
     pub host: Option<String>,
+    /// The port to bind.
     pub port: Option<u16>,
 }
 
@@ -717,6 +805,17 @@ impl<'de> Deserialize<'de> for RawField {
         deserializer.deserialize_any(FieldVisitor)
     }
 }
+
+impl PartialSchema for RawField {
+    fn schema() -> RefOr<Schema> {
+        spellings(
+            &[Type::String, Type::Object],
+            "a field name, or a table with `name` and an optional `interval_secs`",
+        )
+    }
+}
+
+impl ToSchema for RawField {}
 
 /// A fully-resolved server config: every field concrete, every path anchored.
 /// Deliberately *not* `Deserialize` — the only way to obtain one is
@@ -2778,5 +2877,83 @@ mod shipped_config_check {
                 cleanup_on_remove: false,
             }
         );
+    }
+
+    /// The same question for the config baked into the container image, which
+    /// `flake.nix` copies to /etc/sismatic/configuration.yaml rather than
+    /// generating — precisely so this test can reach it. A key renamed out from
+    /// under that file would otherwise be found by an operator watching a pod
+    /// crash-loop, which is a slow and expensive place to learn it.
+    #[test]
+    fn the_container_configuration_parses() {
+        let cfg = super::get_configuration(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/container_configuration.yaml"
+        ))
+        .expect("the shipped container_configuration.yaml must load");
+
+        // The one setting the image exists to change. 127.0.0.1 here would
+        // build an image whose port is bound inside its own netns and
+        // reachable from nowhere — a fault no probe catches, because the
+        // process is healthy and simply cannot be reached.
+        assert_eq!(cfg.http.host, "0.0.0.0");
+        assert_eq!(cfg.http.port, 8080);
+
+        // Relative, and therefore anchored to the config file's own directory
+        // — /etc/sismatic in the image. An absolute path here would still work
+        // in the image and would silently stop working for anyone running the
+        // same file outside one.
+        assert_eq!(
+            cfg.inventory.config_path,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("devices.yaml")
+        );
+
+        // Unset, and load-bearing: see the note in the file. A pod that
+        // persisted its fleet to the container filesystem would lose it on the
+        // next reschedule while still shadowing the devices file it was
+        // mounted with.
+        assert_eq!(cfg.inventory.runtime_config_path, None);
+
+        // Everything the file does not state falls through to the built-in
+        // defaults rather than to a copy of them. This pins that: the
+        // assertions below are the constants at the top of this module, so a
+        // deliberate change to one updates this test, and an image that
+        // quietly froze an old value fails it.
+        assert_eq!(
+            cfg.store,
+            super::StoreConfig {
+                retain: super::Retention::Age(std::time::Duration::from_secs(
+                    super::DEFAULT_RETAIN_SECS
+                )),
+                cleanup: Some(std::time::Duration::from_secs(
+                    super::DEFAULT_CLEANUP_INTERVAL_SECS
+                )),
+                max_memory: Some(super::DEFAULT_MAX_MEMORY_BYTES),
+                cleanup_on_remove: false,
+            }
+        );
+        assert_eq!(
+            cfg.intent_relay,
+            super::IntentRelayConfig {
+                poll: std::time::Duration::from_millis(super::DEFAULT_INTENT_RELAY_POLL_MS),
+                max_attempts: super::DEFAULT_MAX_ATTEMPTS,
+            }
+        );
+    }
+
+    /// The fleet the image ships with has to be one core can read. An empty
+    /// YAML document would not be — YAML reads it as null, and `RawConfig` is a
+    /// mapping — so "ships an empty fleet" and "ships a file that loads" are
+    /// two claims, and this is the second.
+    #[test]
+    fn the_container_device_set_parses() {
+        let devices = sismatic_core::devices::config::load_raw(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/container_devices.yaml"
+        ))
+        .expect("the shipped container_devices.yaml must load");
+
+        assert!(devices.devices.is_empty(), "the image ships an empty fleet");
+        assert!(devices.groups.is_empty());
     }
 }
