@@ -162,30 +162,27 @@ jobs:
   # `binaries` and for the same reason — the image content is `serverStatic`,
   # so building it elsewhere would mean cross-compiling aws-lc-sys' vendored C.
   #
-  # Every run builds and inspects the image; only a tag pushes it. That split
-  # is deliberate. A pull request should fail when the image stops building or
-  # stops satisfying `container-config-check`, and a fork's pull request has a
-  # read-only token and no registry secrets, so a push step would be either
-  # skipped or red for reasons that have nothing to do with the change.
-  #
-  # What gets published, and when: on `v*` only, each runner pushes its own leg
-  # as `<version>-<arch>`, and `container-index` then writes the multi-arch
-  # `<version>` and `latest` over both. Nothing is published from `main`,
-  # matching every other artifact here.
+  # This job holds no credentials and can reach no registry. It builds the
+  # image, asserts what the image promises a cluster, and hands the archive on
+  # as an artifact; `container-push` below is the only job that authenticates
+  # anywhere. The split is the security boundary — see
+  # docs/registry-secrets.md — and it is also what lets this job run on every
+  # pull request, including from forks, where no secret is available and none
+  # is wanted.
   container:
     name: Container ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # Note what is *not* here: no `packages: write`. Nothing in this job talks
+    # to a registry, so nothing in it needs the authority to publish.
     permissions:
       contents: read
-      # ghcr.io authenticates with the job's own token rather than a secret.
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest, target: x86_64-linux }
-          - { runner: ubuntu-24.04-arm, target: aarch64-linux }
+          - { runner: ubuntu-latest, target: x86_64-linux, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-linux, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
       # Restore-only: `binaries` owns this family's cache on each of these
@@ -204,28 +201,108 @@ jobs:
       - name: Check image configuration
         run: nix build .#container-config-check --no-link --print-build-logs
 
+      # The name `push-container` looks for. Copied out of the store rather
+      # than uploaded through the symlink so the artifact carries a stable
+      # name instead of a hash-prefixed one.
+      - name: Stage archive
+        run: install -m644 result-container "sismatic-${{ matrix.arch }}.tar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: container-${{ matrix.arch }}
+          path: sismatic-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          # These are large and only `container-push` (same run) reads them.
+          retention-days: 1
+
+      # The example manifests, as a release asset. Built here rather than in
+      # its own job because it is three small files and this job already has
+      # the store warm.
+      - name: Build Kubernetes manifests
+        if: matrix.arch == 'amd64'
+        run: nix build .#k8s --out-link result-k8s --print-build-logs
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'amd64'
+        with:
+          name: k8s-manifests
+          path: result-k8s/*
+          if-no-files-found: error
+
+  # The only job in this pipeline that holds a registry credential.
+  #
+  # One runner publishes every architecture, because pushing is
+  # architecture-agnostic: skopeo copies a manifest and some blobs and never
+  # executes them, so an x86_64 runner uploads the arm64 image perfectly well.
+  # Only *building* needed a native machine, and that already happened above.
+  #
+  # Three consequences, each of them the reason this job exists separately:
+  #
+  #   - `environment:` can be attached here and nowhere else. Environment
+  #     protection rules are evaluated for every run of the job that declares
+  #     them, so putting this on `container` would apply the `v*` tag rule to
+  #     pull requests too — whose ref is refs/pull/N/merge — and block them.
+  #   - One deployment instead of three. `container` is a two-cell matrix, so
+  #     attaching the environment there would mean two approvals, plus one for
+  #     the index, every time a reviewer is required.
+  #   - The credential coexists with as little else as possible. No compiler
+  #     runs here, no dependency is fetched from crates.io, nothing from the
+  #     workspace is executed — the job downloads two tarballs and uploads
+  #     them.
+  container-push:
+    name: Publish container
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: container
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Where the registry credentials live. Scoped by a deployment tag rule to
+    # `v*`, so no branch and no pull request can reach them even if a future
+    # edit to this file asks.
+    environment:
+      name: imageregistries
+    permissions:
+      contents: read
+      # ghcr.io authenticates with the job's own token rather than a secret.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+        with:
+          family: check
+
+      - name: Download image archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: container-*
+          merge-multiple: true
+          path: images
+
       # The flake names the version; the tag names it again. A mismatch would
       # publish an image whose tag disagrees with the binary inside it, which
       # is the one failure that survives the release and confuses everyone
       # later. release-plz bumps Cargo.toml and then tags `v{version}`, so
       # these agree unless something went wrong upstream of here.
+      #
+      # `nix eval` rather than `nix build`: imageTag is a passthru string, so
+      # this reads the flake without building anything.
       - name: Verify tag matches flake version
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
-          flake=$(nix eval --raw .#container.imageTag)
-          want="${GITHUB_REF_NAME#v}-${{ matrix.target == 'x86_64-linux' && 'amd64' || 'arm64' }}"
-          echo "flake tag: $flake"
-          echo "ref tag:   $want"
-          [ "$flake" = "$want" ] || {
-            echo "::error::image tag '$flake' does not match tag '$GITHUB_REF_NAME'"
+          flake_tag=$(nix eval --raw .#container.imageTag)   # e.g. 0.7.2-amd64
+          flake_version=${flake_tag%-*}
+          want=${GITHUB_REF_NAME#v}
+          echo "flake version: $flake_version"
+          echo "tag version:   $want"
+          [ "$flake_version" = "$want" ] || {
+            echo "::error::flake version '$flake_version' does not match tag '$GITHUB_REF_NAME'"
             exit 1
           }
 
-      # Registries, credentials and tags all live in flake.nix; this step only
-      # supplies the secrets it names and runs the app.
-      - name: Push image
-        if: startsWith(github.ref, 'refs/tags/')
+      # Registries, credentials and tags all live in flake.nix; these steps
+      # only supply the secrets it names and run the apps. The archives are
+      # checked before either app authenticates, so a missing leg cannot leave
+      # the registries half-populated.
+      - name: Push per-architecture images
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -233,40 +310,7 @@ jobs:
           QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: nix run .#push-container
-
-      # The example manifests, as a release asset. Built here rather than in
-      # its own job because it is three small files and this job already has
-      # the store warm.
-      - name: Build Kubernetes manifests
-        if: matrix.target == 'x86_64-linux'
-        run: nix build .#k8s --out-link result-k8s --print-build-logs
-
-      - uses: actions/upload-artifact@v4
-        if: matrix.target == 'x86_64-linux'
-        with:
-          name: k8s-manifests
-          path: result-k8s/*
-          if-no-files-found: error
-
-  # The second phase of publishing a multi-arch image: one index over the legs
-  # every `container` runner pushed. A job of its own because it cannot start
-  # until both have finished, and it touches no architecture of its own — it
-  # only rewrites manifests that are already in the registries.
-  container-index:
-    name: Container multi-arch index
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: container
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/nix
-        with:
-          family: check
+        run: nix run .#push-container -- images
 
       - name: Publish multi-arch index
         env:
@@ -415,10 +459,10 @@ jobs:
   # all of them into one stable context, "All checks passed", which is the only
   # name the ruleset has to know.
   #
-  # `release`, `publish-pypi` and `container-index` are deliberately absent:
+  # `release`, `publish-pypi` and `container-push` are deliberately absent:
   # all three are refs/tags/ only and would be permanently `skipped` on a pull
   # request. `container` itself *is* here, because it builds and inspects the
-  # image on every run and only its push step is tag-gated.
+  # image on every run and holds no credential that would need gating.
   #
   # Consequence to keep in mind: `pipeline.yml` must never grow a `paths:`
   # filter. A required check that does not run is not "passed", it is *pending*,

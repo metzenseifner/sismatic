@@ -891,22 +891,59 @@
                 | ${tool.login} "${registry.host}" ${tool.user} "''$${registry.userEnv}" ${tool.stdin}
             '') containerRegistries;
 
+          # What an architecture's archive is called where the push app looks
+          # for it. The `container` job writes this name and this app reads it,
+          # so the convention is stated once and a disagreement is a missing
+          # file rather than a silent half-publish.
+          containerArchiveName = arch: "sismatic-${arch}.tar";
+
           pushContainer = pkgs.writeShellApplication {
             name = "sismatic-push-container";
             runtimeInputs = [ pkgs.skopeo ];
             text = ''
+              # Publish every architecture's leg, from archives on disk.
+              #
+              # Takes a directory rather than building the image, and that is
+              # the whole point of the signature. Referring to the image here
+              # would make this app *depend* on it, so the job that holds the
+              # registry credentials would also compile the musl toolchain —
+              # and the longer a credential is present on a machine, the more
+              # of that machine's work is inside its blast radius. The build
+              # happens in a job with no secrets; this one only uploads bytes.
+              #
+              # One runner pushes both legs because pushing is
+              # architecture-agnostic: skopeo copies a manifest and some blobs
+              # and never executes them, so an x86_64 runner publishes the
+              # arm64 image perfectly well. Only *building* needed a native
+              # machine.
+              if [ "$#" -ne 1 ]; then
+                {
+                  echo "usage: sismatic-push-container <dir>"
+                  echo
+                  echo "<dir> holds one archive per architecture:"
+              ${lib.concatMapStringsSep "\n" (arch: ''echo "  ${containerArchiveName arch}"'') containerArches}
+                } >&2
+                exit 2
+              fi
+              archives=$1
+
+              # Every archive is checked before a single credential is read.
+              # Authenticating and then discovering a missing leg would leave
+              # the registries half-populated and the index that follows built
+              # over an incomplete set — so the refusal comes first, while
+              # nothing has been logged into and nothing has been uploaded.
+              for arch in ${lib.concatStringsSep " " containerArches}; do
+                if [ ! -f "$archives/sismatic-$arch.tar" ]; then
+                  echo "error: no $arch archive at $archives/sismatic-$arch.tar" >&2
+                  exit 1
+                fi
+              done
+
               ${containerLogin skopeoLogin}
 
-              # Push this architecture's leg. With no arguments it publishes the
-              # tag the image was built with; arguments replace the tag list.
-              tags=("$@")
-              if [ ''${#tags[@]} -eq 0 ]; then
-                tags=("${version}-${toString containerArch}")
-              fi
-
-              for repo in ${lib.concatStringsSep " " containerRepos}; do
-                for tag in "''${tags[@]}"; do
-                  echo "==> $repo:$tag"
+              for arch in ${lib.concatStringsSep " " containerArches}; do
+                for repo in ${lib.concatStringsSep " " containerRepos}; do
+                  echo "==> $repo:${version}-$arch"
                   # `--format oci` so that the leg and the index that will wrap
                   # it are the same kind of thing. `dockerTools` writes a Docker
                   # v2s2 manifest and `regctl index create` writes an OCI index,
@@ -916,8 +953,8 @@
                   # manifest-level and deterministic: the layers are untouched
                   # and all three registries still receive the same digest.
                   skopeo --policy ${skopeoPolicy} copy --retry-times 3 --format oci \
-                    "docker-archive:${containerImage}" \
-                    "docker://$repo:$tag"
+                    "docker-archive:$archives/sismatic-$arch.tar" \
+                    "docker://$repo:${version}-$arch"
                 done
               done
             '';
@@ -2017,12 +2054,17 @@
             };
           }
           # Publishing the image, in the two phases a multi-arch image needs.
-          # Gated with the image itself: an app that cannot build what it
-          # publishes is not worth exposing.
-          // lib.optionalAttrs containerSupported {
-            # `nix run .#push-container` — this architecture's leg, to every
-            # registry. `nix run .#push-container -- edge-amd64` to override
-            # the tag.
+          #
+          # Deliberately *not* gated on `containerSupported`, unlike the image
+          # itself. Neither app refers to `containerImage` any more — one takes
+          # archives off disk, the other only rewrites manifests that are
+          # already in the registries — so neither needs a machine that can
+          # build a Linux image. That is what lets one x86_64 runner publish
+          # both legs, and it incidentally makes a release recoverable from a
+          # laptop.
+          // {
+            # `nix run .#push-container -- <dir>` — every architecture's leg,
+            # to every registry, from archives in <dir>.
             push-container = {
               type = "app";
               program = pkgs.lib.getExe pushContainer;
