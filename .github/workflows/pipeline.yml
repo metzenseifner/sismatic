@@ -8,6 +8,7 @@ name: Build & Release
 #   nix run   .#build-sdist                 # source distribution
 #   nix run   .#export-container -- <dir>   # this machine's image archive
 #   nix run   .#publish-<registry> -- <dir> # one registry (publish-all: every one)
+#   nix run   .#publish-docs-<registry>     # that registry's own overview page
 # This workflow is only a dispatcher: it installs Nix (./.github/actions/nix)
 # and calls those outputs. No build logic lives here.
 #
@@ -87,6 +88,10 @@ jobs:
       # a `Publish <name>` job with no edit here. Each entry carries only a
       # name and the names of the variable and secret holding its credentials;
       # hosts, namespaces and how to push stay in the flake.
+      #
+      # `docsTokenSecret` is the same thing for the registry's overview page,
+      # and is the empty string for a registry that has none to write — which
+      # is how the publish job below knows whether that step applies at all.
       #
       # Enumerated on every run, not only on tags, so a broken `ci` output
       # fails the pull request that broke it rather than the next release.
@@ -360,6 +365,38 @@ jobs:
           REGISTRY_USERNAME: ${{ vars[matrix.registry.usernameVar] || secrets[matrix.registry.usernameVar] }}
           REGISTRY_TOKEN: ${{ secrets[matrix.registry.tokenSecret] }}
         run: nix run ".#publish-$REGISTRY" -- images
+
+      # The registry's own page: the overview a human lands on, which is a
+      # separate artifact going out over a separate API. The flake renders it
+      # per registry from docs/container-docs.md, substituting that
+      # registry's pull command and this version, so nothing about its content
+      # lives here; `nix build .#container-docs` is the same document.
+      #
+      # Skipped where the flake says there is nothing to write: ghcr.io has no
+      # description of its own — its package page renders this repository's
+      # README, linked to it by the image's own
+      # `org.opencontainers.image.source` label — so `docsTokenSecret` is
+      # empty for it and this step does not run.
+      #
+      # After the push rather than before it: both APIs address a repository,
+      # and on a first-ever release the repository does not exist until an
+      # image has been pushed to it. Keeping the two steps in one job makes
+      # that order a property of the cell rather than a `needs:` edge somebody
+      # could reorder.
+      #
+      # A failure here fails the job, deliberately. A release that published a
+      # new image and left the previous version's instructions beside it is
+      # the exact thing this step exists to prevent — and the page can be
+      # rewritten on its own afterwards with
+      # `nix run .#publish-docs-<registry>`, since the document is built from
+      # the flake rather than from the image.
+      - name: Publish overview to ${{ matrix.registry.name }}
+        if: matrix.registry.docsTokenSecret != ''
+        env:
+          REGISTRY: ${{ matrix.registry.name }}
+          REGISTRY_USERNAME: ${{ vars[matrix.registry.usernameVar] || secrets[matrix.registry.usernameVar] }}
+          REGISTRY_DOCS_TOKEN: ${{ secrets[matrix.registry.docsTokenSecret] }}
+        run: nix run ".#publish-docs-$REGISTRY"
 
   # Portable wheels: one native runner per platform, each running the same
   # `nix run .#build-wheel`. The cargo cache below keeps repeat runs from

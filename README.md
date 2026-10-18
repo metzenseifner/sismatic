@@ -225,6 +225,7 @@ $ nix build .#server-release      # -> result/sismatic-server-<version>-<target>
 $ nix build .#container           # -> result, a docker-archive: docker load < result
 $ nix build .#k8s                 # -> result/, example Kubernetes manifests
 $ nix build .#env-reference       # -> result, every setting as a Markdown table
+$ nix build .#container-docs  # -> result/, the page each registry shows
 ```
 
 Each architecture is built on its own native runner, so `nix build .#server-release`

@@ -53,3 +53,18 @@ nav:
 # every build as a page somebody forgot to link.
 not_in_nav: |
   env-reference.md
+
+# container-docs.md is excluded outright, where env-reference.md above is
+# merely absent from the nav, and the difference is that one of them is a
+# document and the other is a template. `not_in_nav` silences the warning and
+# still builds the page; this file would then be served at
+# /container-docs/ with its @@PLACEHOLDERS@@ intact, beside the three real
+# pages. It is rendered — per registry, with those placeholders substituted —
+# by `nix build .#container-docs`, and the registries are the only place it
+# is meant to be read.
+#
+# Snippets and this key are independent: mkdocs excludes the page from the
+# build, and pymdownx.snippets reads from the filesystem, so a future page
+# could still `--8<--` this one in.
+exclude_docs: |
+  container-docs.md
