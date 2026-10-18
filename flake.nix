@@ -80,6 +80,24 @@
       # The repository name under every registry.
       containerName = "sismatic";
 
+      # One sentence, in three places: the image's own
+      # `org.opencontainers.image.description` label — which is what GHCR
+      # renders as the package's About line — Docker Hub's `description` field,
+      # and the lead of the overview below. Stated here rather than inside the
+      # `Labels` block so those three cannot come to disagree.
+      #
+      # Docker Hub refuses a `description` over 100 characters, so the length
+      # is a property of this string rather than of a push: the failure lands
+      # at evaluation, next to the sentence somebody just lengthened, instead
+      # of in a release job.
+      containerDescription =
+        let
+          desc = "Sismatic server: polls Extron SIS devices over SSH and serves what it read";
+          len = builtins.stringLength desc;
+          tooLong = "containerDescription is ${toString len} characters; Docker Hub refuses more than 100";
+        in
+        lib.throwIf (len > 100) tooLong desc;
+
       # The architectures the multi-arch index is assembled from. One native
       # runner each, for the same reason `serverStatic` is built natively:
       # the vendored C in aws-lc-sys stays on its well-trodden path and only
@@ -95,6 +113,14 @@
       #   usernameVar  a repository *variable*; usernames are not secret,
       #                and a secret would mask them in every log line
       #   tokenSecret  a repository secret
+      #   docs         how this registry's *page* is written — the overview a
+      #                human lands on — or null where the registry grows it
+      #                from the image itself. `kind` selects the API in
+      #                `publishDocsTo`; `tokenSecret` is a second credential,
+      #                distinct from the push token above, because on both
+      #                registries that have an API it has to be; `maxChars`
+      #                is the destination's documented size limit, or null
+      #                where it publishes none.
       # Run locally, `publish-all` reads environment variables with these
       # same names, so one spelling serves the workflow and a laptop.
       #
@@ -108,18 +134,88 @@
           # GitHub's own token, so a fork needs no secret of its own for
           # this one, only `packages: write` on the job.
           tokenSecret = "GITHUB_TOKEN";
+          # Nothing to push, and nothing that could be pushed. GHCR has no
+          # description of its own: a package whose image carries
+          # `org.opencontainers.image.source` is linked to that repository
+          # automatically, and the package page then renders the repository's
+          # README.md from the default branch, with
+          # `org.opencontainers.image.description` as the About line. Both
+          # labels are on the image (see `Labels` below), so this page is a
+          # function of the image and the branch — no API call, no credential,
+          # and no way to give it a container-specific overview either.
+          docs = null;
         };
         quay = {
           host = "quay.io";
           namespace = "metzenseifner";
           usernameVar = "QUAY_USERNAME";
           tokenSecret = "QUAY_TOKEN";
+          # Off, and `null` here means something different than it does for
+          # ghcr: ghcr has no description to write, whereas Quay has one and
+          # it is the credential that is unsettled. So the page is simply not
+          # published for now — the pipeline step skips this registry, no
+          # `QUAY_API_TOKEN` is needed, and `quay.io`'s repository page stays
+          # the empty description it already has.
+          #
+          # Turning it back on is this line, plus that secret:
+          #
+          #   docs = { kind = "quay"; tokenSecret = "QUAY_API_TOKEN"; maxChars = null; };
+          #
+          # `publishDocsTo` keeps its `quay` call for that, unreferenced while
+          # this is null. What is known about it, so re-enabling is an edit and
+          # not another investigation:
+          #
+          #   - Endpoint, body and scope are read off Quay's own spec
+          #     (`GET https://quay.io/api/v1/discovery`): operation
+          #     `updateRepo`, `PUT /api/v1/repository/<namespace>/<name>`, body
+          #     `{"description": <markdown>}` with description required, and
+          #     `security: [{oauth2_implicit: [repo:write]}]`. The request that
+          #     call builds was measured against a local server and matches.
+          #   - That spec declares exactly one security scheme,
+          #     `oauth2_implicit`, across all 114 of its authenticated
+          #     operations: no basic-auth and no robot scheme anywhere. So
+          #     `QUAY_TOKEN` above — a robot account, for the registry
+          #     endpoints — is probably not enough, though the API refusing one
+          #     is inference from the spec rather than something measured.
+          #   - A credential the API does not recognise as OAuth answers
+          #     `403 {"error": "CSRF token was invalid or missing."}`. That one
+          #     *is* measured: it is what a write with no credential at all
+          #     returns, and it reads like a bug rather than a rejected token.
+          #   - An OAuth token comes from an application, and applications are
+          #     organization-scoped: the API has
+          #     `/api/v1/organization/{orgname}/applications` and no user-level
+          #     equivalent, so a user namespace — which `metzenseifner` is
+          #     (`"is_organization": false`) — has no such screen at all. The
+          #     way through is an organization that exists to hold the
+          #     application; the token it generates carries the *granting
+          #     user's* access, which is what reaches a repository under that
+          #     user's own namespace.
+          #   - Quay documents no size limit, hence `maxChars = null` above.
+          docs = null;
         };
         dockerhub = {
           host = "docker.io";
           namespace = "metzenseifner";
           usernameVar = "DOCKERHUB_USERNAME";
           tokenSecret = "DOCKERHUB_TOKEN";
+          # Docker Hub keeps two fields — `description`, the line beside the
+          # repository name, and `full_description`, the overview body — and
+          # one `PATCH /v2/repositories/<namespace>/<name>/` writes both.
+          #
+          # A second secret here is a weaker claim than Quay's: the push token
+          # may well be able to do this too. What the hub API refuses is a
+          # *read-only* token, which authenticates at /v2/users/login/ and is
+          # then refused by the PATCH — so the two uses want different scopes,
+          # and naming them separately lets the push credential stay as narrow
+          # as pushing needs. The same PAT can be the value of both secrets.
+          docs = {
+            kind = "dockerhub";
+            tokenSecret = "DOCKERHUB_DOCS_TOKEN";
+            # Docker Hub truncates a longer `full_description` rather than
+            # refusing it, which is the failure this number exists to turn
+            # into a build error.
+            maxChars = 25000;
+          };
         };
       };
 
@@ -127,6 +223,13 @@
       # rather than "the first one", because an attribute set has no order
       # of its own.
       containerPrimaryRegistry = "ghcr";
+
+      # The registries whose page this flake writes. Everything about
+      # publishing a page is generated from this rather than from
+      # `containerRegistries`, so a registry that has no API to call — or one
+      # added later that has none — contributes no app, no credential and no
+      # CI step, instead of contributing one that would have to no-op.
+      registriesWithDocs = lib.filterAttrs (_: r: r.docs != null) containerRegistries;
 
       perSystemOutputs =
         { system, pkgs }:
@@ -428,6 +531,14 @@
             registries = lib.mapAttrsToList (name: r: {
               inherit name;
               inherit (r) usernameVar tokenSecret;
+              # Where the overview's credential lives, or the empty string for
+              # a registry that has no page to write. The empty string rather
+              # than null because the workflow branches on it: GitHub's
+              # expression language has no `null` literal to compare against,
+              # and a JSON null reaches `${{ }}` as the same falsy value `''`
+              # is, so one `!= ''` covers both without depending on which side
+              # gets coerced.
+              docsTokenSecret = if r.docs == null then "" else r.docs.tokenSecret;
             }) containerRegistries;
           };
 
@@ -547,8 +658,7 @@
               WorkingDir = "/var/lib/sismatic";
               Labels = {
                 "org.opencontainers.image.title" = containerName;
-                "org.opencontainers.image.description" =
-                  "Sismatic server: polls Extron SIS devices over SSH and serves what it read";
+                "org.opencontainers.image.description" = containerDescription;
                 "org.opencontainers.image.version" = version;
                 "org.opencontainers.image.licenses" = "ECL-2.0";
                 "org.opencontainers.image.source" = "https://github.com/metzenseifner/sismatic";
@@ -985,6 +1095,302 @@
               if [ ''${#failed[@]} -gt 0 ]; then
                 echo "error: publishing failed for: ''${failed[*]}" >&2
                 echo "       re-run each with: nix run .#publish-<name> -- $archives" >&2
+                exit 1
+              fi
+            '';
+          };
+
+          #------------------------------------------------------------------#
+          #              Publishing the registry's own page                   #
+          #------------------------------------------------------------------#
+          # The overview a human lands on, which is a different artifact from
+          # the image and goes out over a different API. Three registries,
+          # three stories: Docker Hub and Quay each take one authenticated
+          # write, GHCR takes none at all because it has nothing to write to
+          # (see `docs = null` there). So everything below is generated from
+          # `registriesWithDocs`, and adding a registry — or giving one a page
+          # — stays an edit to that attrset and nowhere else.
+
+          # One registry's page, rendered from the committed template.
+          #
+          # Built rather than committed, for the reason the manifests are: a
+          # committed copy is a second source of truth that only a human
+          # notices has gone stale. This one goes stale *in public*, on the
+          # page that is the first thing a stranger reads about the image, so
+          # every version-shaped thing in it — the pull command, the tag
+          # table, the `#k8s` command — is substituted from `version` here.
+          #
+          # Self-validating, as `k8sManifests` is, and here that is the whole
+          # point. A registry page cannot be reviewed before it is live and
+          # nothing downstream reads it, so the three ways it can be quietly
+          # wrong are failures of this derivation instead: a placeholder that
+          # was never substituted, a link that resolves to nothing off GitHub,
+          # and a document the destination silently truncates.
+          containerOverview =
+            name: registry:
+            pkgs.runCommand "sismatic-container-docs-${name}.md" { } ''
+              # Named substitutions rather than an unquoted heredoc, for the
+              # reason the manifests use them: exactly these happen, and a
+              # placeholder that no longer appears in the template is an error
+              # rather than a silent no-op.
+              substitute ${./docs/container-docs.md} spliced.md \
+                --replace-fail '@@REPO@@' '${containerRepo registry}' \
+                --replace-fail '@@VERSION@@' '${version}' \
+                --replace-fail '@@DESCRIPTION@@' '${containerDescription}'
+
+              # The generated environment table, spliced in where the template
+              # names it. Inlined rather than linked — and it is ~2.5 kB of a
+              # ~9 kB page, so it fits — because "how do I configure this" is
+              # the question a registry page exists to answer, and an answer
+              # one click away is one click too far.
+              awk -v table=${envReference} '
+                $0 == "@@ENV_REFERENCE@@" {
+                  while ((getline line < table) > 0) print line
+                  next
+                }
+                { print }
+              ' spliced.md > commented.md
+
+              # Comments out, and no gap left where one was. Both sources
+              # carry an HTML comment addressed to whoever edits them; Markdown
+              # would hide it from the rendered page, but Docker Hub's own
+              # editor shows this body as text to the next person who opens it,
+              # and Quay's does the same.
+              #
+              # Whole-line comments only, which is the one constraint the
+              # template's own comment states: a `<!--` opens the range and the
+              # next line ending `-->` closes it, so a comment sharing a line
+              # with prose would take the prose with it.
+              awk '
+                /^[[:space:]]*<!--/ { stripping = 1 }
+                stripping { if ($0 ~ /-->[[:space:]]*$/) stripping = 0; next }
+                # Runs of blank lines collapse to one, and the leading and
+                # trailing runs to none. Removing a comment block otherwise
+                # leaves the blank line that followed it next to the blank line
+                # that preceded it.
+                NF == 0 { if (started) blank = 1; next }
+                { if (blank) print ""; blank = 0; started = 1; print }
+              ' commented.md > "$out"
+
+              if grep -n '@@' "$out"; then
+                echo "error: unsubstituted placeholder in the ${name} overview (above)" >&2
+                exit 1
+              fi
+
+              # Every link absolute. This page is not served out of the
+              # repository, so `docs/deployment.md` resolves to nothing there
+              # and `docs/fleet_overview.png` is a broken image. Fragments are
+              # fine: they address this page.
+              relative=$(grep -oE '\]\([^)]*\)' "$out" | grep -vE '^\]\((https?://|#)' || true)
+              if [ -n "$relative" ]; then
+                echo "error: relative links in the ${name} overview: $relative" >&2
+                exit 1
+              fi
+              ${lib.optionalString (registry.docs.maxChars != null) ''
+                # Bytes against a limit stated in characters: this prose is
+                # full of em dashes at three bytes each, so the test errs
+                # strict — the only direction that cannot publish a page the
+                # destination cut in half.
+                bytes=$(wc -c < "$out")
+                if [ "$bytes" -gt ${toString registry.docs.maxChars} ]; then
+                  echo "error: the ${name} overview is $bytes bytes; ${registry.host} takes ${toString registry.docs.maxChars}" >&2
+                  exit 1
+                fi
+              ''}
+            '';
+
+          # `nix build .#container-docs` -> one file per registry that has
+          # a page, so what a release is about to publish can be read before it
+          # is published. The check of the same name is this derivation: the
+          # assertions above are what it runs.
+          containerOverviews = pkgs.runCommand "sismatic-container-docss" { } ''
+            mkdir -p "$out"
+            ${lib.concatStrings (
+              lib.mapAttrsToList (name: r: ''
+                install -m444 ${containerOverview name r} "$out/${name}.md"
+              '') registriesWithDocs
+            )}
+          '';
+
+          # The environment one registry's page needs: the variable its app
+          # reads, and the CI name the value comes from. Stated once, and read
+          # by all three of the places that would otherwise each have their own
+          # idea of it — the app's own guard, `publish-docs-all`'s check that
+          # every credential is present before it writes anything, and the
+          # assignments it then invokes each app with.
+          docsCredentials =
+            registry:
+            [
+              {
+                var = "REGISTRY_DOCS_TOKEN";
+                from = registry.docs.tokenSecret;
+                kind = "secret";
+              }
+            ]
+            # Docker Hub's API wants the account name as well as a token, to
+            # exchange the two for a JWT. Quay's bearer token stands alone.
+            ++ lib.optional (registry.docs.kind == "dockerhub") {
+              var = "REGISTRY_USERNAME";
+              from = registry.usernameVar;
+              kind = "variable";
+            };
+
+          # `nix run .#publish-docs-<name>`
+          #
+          # No arguments, unlike the publish apps: those take a directory of
+          # archives that native runners built, whereas the document here is
+          # baked in at build time. The app *is* this version's page, plus the
+          # one call that writes it.
+          #
+          # Reads REGISTRY_DOCS_TOKEN (and REGISTRY_USERNAME where the API
+          # wants an account name) rather than the per-registry names, so the
+          # pipeline sets the same variables in every job, exactly as the
+          # publish apps do.
+          #
+          # Ordering: both APIs address a repository, and on a first-ever
+          # release the repository does not exist until an image has been
+          # pushed to it. So this runs after `publish-<name>`, and the pipeline
+          # keeps the two in one job to make that order a property of the cell
+          # rather than of the dependency graph.
+          #
+          # Idempotent: each call sets the fields to what the flake says they
+          # are, so re-running one is a no-op and a release whose page has not
+          # changed performs one write that changes nothing.
+          #
+          # Credentials never reach a command line, which is the discipline
+          # `publish-<name>` keeps when it pipes its token into `skopeo login
+          # --password-stdin`: argv is readable from the process table for as
+          # long as the process lives. So a body that carries a token goes in
+          # on stdin (`--data @-`), and an `Authorization` header — which `-H`
+          # would put in argv — is read out of a curl config file in a private
+          # temporary directory, the same shape `publishTo` uses for the auth
+          # file skopeo writes. `printf` is a shell builtin, so the one place
+          # a token is a shell word never forks a process to hold it.
+          publishDocsTo =
+            name: registry:
+            let
+              overview = containerOverview name registry;
+
+              call =
+                {
+                  dockerhub = ''
+                    auth=$(mktemp -d)
+                    trap 'rm -rf "$auth"' EXIT
+
+                    # The hub API takes a JWT rather than the token itself, so
+                    # this is two calls and not one. A token without write
+                    # access is expected to authenticate here and be refused
+                    # by the PATCH below — documented rather than measured, so
+                    # a first run against a real repository is the test of
+                    # that.
+                    jwt=$(jq -n --arg u "$REGISTRY_USERNAME" --arg p "$REGISTRY_DOCS_TOKEN" \
+                            '{username: $u, password: $p}' \
+                          | curl -fsS --retry 3 -X POST --data @- \
+                              -H 'Content-Type: application/json' \
+                              https://hub.docker.com/v2/users/login/ \
+                          | jq -er .token)
+                    printf 'header = "Authorization: JWT %s"\n' "$jwt" > "$auth/curlrc"
+
+                    # PATCH rather than PUT: the two description fields are the
+                    # only ones this touches, and the repository's visibility,
+                    # categories and everything else stay as they are.
+                    jq -n --arg d ${lib.escapeShellArg containerDescription} --rawfile f ${overview} \
+                        '{description: $d, full_description: $f}' \
+                      | curl -fsS --retry 3 -K "$auth/curlrc" -X PATCH --data @- \
+                          -H 'Content-Type: application/json' \
+                          -o /dev/null -w 'HTTP %{http_code}\n' \
+                          'https://hub.docker.com/v2/repositories/${registry.namespace}/${containerName}/'
+                  '';
+                  quay = ''
+                    # Unreferenced while `containerRegistries.quay.docs` is
+                    # null — kept because turning that back on is one line,
+                    # and the request this builds was measured before it was
+                    # switched off. The attribute selection below is on `kind`,
+                    # so a registry that names this call again either gets it
+                    # or fails at evaluation.
+                    auth=$(mktemp -d)
+                    trap 'rm -rf "$auth"' EXIT
+                    printf 'header = "Authorization: Bearer %s"\n' "$REGISTRY_DOCS_TOKEN" \
+                      > "$auth/curlrc"
+
+                    # One field, and Quay has no short description to pair with
+                    # it: the overview's own first line carries the sentence
+                    # Docker Hub keeps separate.
+                    jq -n --rawfile f ${overview} '{description: $f}' \
+                      | curl -fsS --retry 3 -K "$auth/curlrc" -X PUT --data @- \
+                          -H 'Content-Type: application/json' \
+                          -o /dev/null -w 'HTTP %{http_code}\n' \
+                          'https://quay.io/api/v1/repository/${registry.namespace}/${containerName}'
+                  '';
+                }
+                .${registry.docs.kind};
+            in
+            pkgs.writeShellApplication {
+              name = "sismatic-publish-docs-${name}";
+              runtimeInputs = [
+                pkgs.curl
+                pkgs.jq
+              ];
+              text = ''
+                if [ "$#" -gt 0 ]; then
+                  echo "usage: sismatic-publish-docs-${name}   (no arguments: the page is built in)" >&2
+                  echo "       read the page it would publish with: nix build .#container-docs" >&2
+                  exit 1
+                fi
+
+                ${lib.concatMapStrings (c: ''
+                  : "''${${c.var}:?${name} needs ${c.var} (the ${c.from} ${c.kind} in CI)}"
+                '') (docsCredentials registry)}
+
+                echo "==> ${containerRepo registry}: overview for ${version}"
+                ${call}
+              '';
+            };
+
+          # `nix run .#publish-docs-all`
+          #
+          # Every page from one machine, the counterpart to `publish-all`: the
+          # recovery path when the pipeline is unavailable, and the way to fix
+          # a page without cutting a release to carry the fix. Reads each
+          # registry's credentials from environment variables named after its
+          # own `usernameVar` and `docs.tokenSecret` and hands them to that
+          # registry's app, so it adds no API logic of its own.
+          #
+          # Strict before it starts and forgiving once it has: every credential
+          # is named up front, and a registry that then fails does not stop the
+          # next one — the same shape `publish-all` has, and for the same
+          # reason, which is that these destinations are independent and a
+          # half-done run is worse than a reported one.
+          publishDocsAll = pkgs.writeShellApplication {
+            name = "sismatic-publish-docs-all";
+            text = ''
+              missing=()
+              ${lib.concatStrings (
+                lib.mapAttrsToList (
+                  _: r:
+                  lib.concatMapStrings (c: ''
+                    [ -n "''${${c.from}:-}" ] || missing+=(${c.from})
+                  '') (docsCredentials r)
+                ) registriesWithDocs
+              )}
+              if [ ''${#missing[@]} -gt 0 ]; then
+                echo "error: set these before publishing any overview: ''${missing[*]}" >&2
+                exit 1
+              fi
+
+              failed=()
+              ${lib.concatStrings (
+                lib.mapAttrsToList (name: r: ''
+                  echo "==> ${name}"
+                  ${lib.concatMapStringsSep " " (c: ''${c.var}="''$${c.from}"'') (docsCredentials r)} \
+                    ${lib.getExe (publishDocsTo name r)} \
+                    || failed+=(${name})
+                '') registriesWithDocs
+              )}
+
+              if [ ''${#failed[@]} -gt 0 ]; then
+                echo "error: publishing the overview failed for: ''${failed[*]}" >&2
+                echo "       re-run each with: nix run .#publish-docs-<name>" >&2
                 exit 1
               fi
             '';
@@ -1443,6 +1849,20 @@
             toml-fmt = craneLib.taploFmt {
               src = pkgs.lib.sources.sourceFilesBySuffices src [ ".toml" ];
             };
+
+            # The pages the release will set on Docker Hub and Quay, with the
+            # assertions `containerOverview` carries: no unsubstituted
+            # placeholder, no relative link, nothing over the destination's
+            # limit.
+            #
+            # A check, where `container-config-check` is deliberately only a
+            # package, and the difference is what it costs. That one stands on
+            # the musl image and would drag the static toolchain into every
+            # `nix flake check`; this one needs the native `server` to read the
+            # config schema off, which `checks.server` above has already built
+            # — so the marginal cost of the gate is an awk run, and the thing
+            # it guards is published to strangers.
+            container-docs = containerOverviews;
 
             # Guardrail for the release-plz footgun that wedged main when
             # sismatic-intent-relay was added (Actions run 32251398251).
@@ -1995,6 +2415,13 @@
             env-schema = envSchema;
             env-reference = envReference;
 
+            # `nix build .#container-docs` -> result/<registry>.md, the
+            # page each registry's own description is about to be set to.
+            # Outside the gate below for the same reason `k8s` is: it describes
+            # the image without building it, so the question "what will the
+            # release publish" has an answer on a laptop too.
+            container-docs = containerOverviews;
+
             # `nix build .#k8s` -> example manifests naming this exact version.
             # Outside the gate below because it needs only the native `server`
             # to read the schema off: the manifests describe the image without
@@ -2071,6 +2498,24 @@
             publish-all = {
               type = "app";
               program = lib.getExe publishAll;
+            };
+          }
+          # And the registry's own page, for the registries that have one.
+          # Generated from `registriesWithDocs`, so ghcr — which has no
+          # description to write — contributes no app rather than a no-op one,
+          # and `nix run .#publish-docs-ghcr` is a name that does not exist
+          # rather than a command that does nothing.
+          // lib.mapAttrs' (
+            name: r:
+            lib.nameValuePair "publish-docs-${name}" {
+              type = "app";
+              program = lib.getExe (publishDocsTo name r);
+            }
+          ) registriesWithDocs
+          // {
+            publish-docs-all = {
+              type = "app";
+              program = lib.getExe publishDocsAll;
             };
           }
           # Exporting, by contrast, needs the image, so it exists only where
