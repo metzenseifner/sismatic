@@ -1,19 +1,22 @@
 name: Build & Release
 
 # Every step below is an output of flake.nix and runs identically on a laptop:
-#   nix build .#deps                    # the shared dependency layer
-#   nix build .#checks.<system>.<name>  # one check (`nix flake check` = all)
-#   nix build .#server-release          # publishable sismatic-server tarball
-#   nix run   .#build-wheel             # portable wheel (manylinux_2_28 via zig)
-#   nix run   .#build-sdist             # source distribution
+#   nix build .#deps                        # the shared dependency layer
+#   nix build .#checks.<system>.<name>      # one check (`nix flake check` = all)
+#   nix build .#server-release              # publishable sismatic-server tarball
+#   nix run   .#build-wheel                 # portable wheel (manylinux_2_28 via zig)
+#   nix run   .#build-sdist                 # source distribution
+#   nix run   .#export-container -- <dir>   # this machine's image archive
+#   nix run   .#publish-<registry> -- <dir> # one registry (publish-all: every one)
 # This workflow is only a dispatcher: it installs Nix (./.github/actions/nix)
-# and invokes those outputs. No build logic lives here.
+# and calls those outputs. No build logic lives here.
 #
 # Shape: `nix flake check` builds every check sequentially on one machine, which
 # is why it grew to ~16 minutes. Here the dependency layer is built once by the
 # `deps` job and the checks then fan out one-per-runner, turning that sum into a
 # max. The matrix is read out of the flake itself, so adding a check to
-# flake.nix adds a CI job with no edit to this file.
+# flake.nix adds a CI job with no edit to this file. The container registries
+# are read out of the flake the same way.
 
 on:
   pull_request:
@@ -36,7 +39,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Seeds the x86_64-linux Nix store cache and enumerates the check set.
+  # Seeds the x86_64-linux Nix store cache and enumerates the two sets this
+  # workflow fans out over: the checks and the container registries.
   # Everything in the `check` matrix restores that cache read-only, so the
   # expensive Cargo.lock-keyed dependency layer is compiled at most once per
   # lockfile change rather than once per job.
@@ -46,6 +50,7 @@ jobs:
     timeout-minutes: 45
     outputs:
       checks: ${{ steps.enumerate.outputs.checks }}
+      registries: ${{ steps.registries.outputs.registries }}
       system: ${{ steps.nix.outputs.system }}
     steps:
       - uses: actions/checkout@v4
@@ -66,13 +71,32 @@ jobs:
       - name: Build dependency layer
         run: nix build .#deps --no-link --print-build-logs
 
+      # The length test guards the one way a dynamic matrix fails silently: an
+      # empty list fans out into zero jobs, and zero jobs report success.
       - name: Enumerate checks
         id: enumerate
         run: |
           checks=$(nix eval --json ".#checks.${{ steps.nix.outputs.system }}" \
             --apply builtins.attrNames)
+          test "$(jq length <<<"$checks")" -ge 1
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
           echo "$checks"
+
+      # Where the image is published, read out of the flake (`ci.registries`,
+      # exported through legacyPackages) so adding a registry to flake.nix adds
+      # a `Publish <name>` job with no edit here. Each entry carries only a
+      # name and the names of the variable and secret holding its credentials;
+      # hosts, namespaces and how to push stay in the flake.
+      #
+      # Enumerated on every run, not only on tags, so a broken `ci` output
+      # fails the pull request that broke it rather than the next release.
+      - name: Enumerate registries
+        id: registries
+        run: |
+          registries=$(nix eval --json .#ci.registries)
+          test "$(jq length <<<"$registries")" -ge 1
+          echo "registries=$registries" >> "$GITHUB_OUTPUT"
+          echo "$registries"
 
   # One runner per check, restoring the store the `deps` job just seeded.
   check:
@@ -165,10 +189,7 @@ jobs:
   # This job holds no credentials and can reach no registry. It builds the
   # image, asserts what the image promises a cluster, and hands the archive on
   # as an artifact; `container-push` below is the only job that authenticates
-  # anywhere. The split is the security boundary — see
-  # docs/registry-secrets.md — and it is also what lets this job run on every
-  # pull request, including from forks, where no secret is available and none
-  # is wanted.
+  # anywhere. The split is the security boundary.
   container:
     name: Container ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -180,6 +201,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The one place this workflow knows the architecture list, because
+        # the runner label is a GitHub fact the flake should not carry. It
+        # must match `containerArches` in flake.nix. A mismatch is loud, not
+        # silent: every publish app checks that each architecture's archive is
+        # present before it reads a credential, so a missing leg fails the
+        # publish jobs and nothing is uploaded.
         include:
           - { runner: ubuntu-latest, target: x86_64-linux, arch: amd64 }
           - { runner: ubuntu-24.04-arm, target: aarch64-linux, arch: arm64 }
@@ -192,8 +219,11 @@ jobs:
         with:
           family: dist
 
-      - name: Build image
-        run: nix build .#container --out-link result-container --print-build-logs
+      # Builds the image and copies it into images/ under the name the publish
+      # apps look for. The flake owns that name (`containerArchiveName`), so
+      # this job moves a directory and never spells a file name.
+      - name: Build and export image
+        run: nix run --print-build-logs .#export-container -- images
 
       # Entrypoint, uid, port, the config variable and the version label,
       # asserted against the built image. Not in `nix flake check` because it
@@ -201,19 +231,16 @@ jobs:
       - name: Check image configuration
         run: nix build .#container-config-check --no-link --print-build-logs
 
-      # The name `push-container` looks for. Copied out of the store rather
-      # than uploaded through the symlink so the artifact carries a stable
-      # name instead of a hash-prefixed one.
-      - name: Stage archive
-        run: install -m644 result-container "sismatic-${{ matrix.arch }}.tar"
-
+      # The artifact name carries the architecture only so the two cells do
+      # not collide; nothing downstream reads it. `container-push` merges every
+      # `container-*` artifact into one directory.
       - uses: actions/upload-artifact@v4
         with:
           name: container-${{ matrix.arch }}
-          path: sismatic-${{ matrix.arch }}.tar
+          path: images/
           if-no-files-found: error
           # These are large and only `container-push` (same run) reads them.
-          retention-days: 1
+          retention-days: 7
 
       # The example manifests, as a release asset. Built here rather than in
       # its own job because it is three small files and this job already has
@@ -229,30 +256,45 @@ jobs:
           path: result-k8s/*
           if-no-files-found: error
 
-  # The only job in this pipeline that holds a registry credential.
+  # One job per registry, and the only jobs in this pipeline that hold a
+  # registry credential.
   #
-  # One runner publishes every architecture, because pushing is
-  # architecture-agnostic: skopeo copies a manifest and some blobs and never
-  # executes them, so an x86_64 runner uploads the arm64 image perfectly well.
-  # Only *building* needed a native machine, and that already happened above.
+  # Pushing is architecture-agnostic: skopeo copies a manifest and some blobs
+  # and never executes them, so an x86_64 runner uploads the arm64 image
+  # perfectly well. Only *building* needed a native machine, and that already
+  # happened in `container`. Each job pushes every architecture's leg to its
+  # one registry and then writes the multi-arch index over them, so the order
+  # is guaranteed per registry.
   #
-  # Three consequences, each of them the reason this job exists separately:
+  # Why one job per registry rather than one job for all of them:
+  #
+  #   - Each registry is its own status. A release shows which destination
+  #     failed, and "Re-run failed jobs" retries only that one. A retry is
+  #     safe: the image is reproducible and the OCI conversion deterministic,
+  #     so every attempt uploads the same digest.
+  #   - Each job carries one registry's token instead of all of them. The
+  #     exception is the job's own GITHUB_TOKEN with `packages: write`, which
+  #     every cell receives because permissions cannot vary within a matrix.
+  #   - The registry list comes from the flake, so adding a registry adds a
+  #     job with no edit here.
+  #
+  # Why these jobs are still separate from `container`:
   #
   #   - `environment:` can be attached here and nowhere else. Environment
   #     protection rules are evaluated for every run of the job that declares
   #     them, so putting this on `container` would apply the `v*` tag rule to
   #     pull requests too — whose ref is refs/pull/N/merge — and block them.
-  #   - One deployment instead of three. `container` is a two-cell matrix, so
-  #     attaching the environment there would mean two approvals, plus one for
-  #     the index, every time a reviewer is required.
   #   - The credential coexists with as little else as possible. No compiler
   #     runs here, no dependency is fetched from crates.io, nothing from the
-  #     workspace is executed — the job downloads two tarballs and uploads
-  #     them.
+  #     workspace is built — each job downloads the archives and uploads them.
+  #
+  # Cost: the environment is now deployed once per registry. If it ever
+  # requires a reviewer, the cells start together and wait together; confirm
+  # on the first release that one review releases all of them.
   container-push:
-    name: Publish container
+    name: Publish ${{ matrix.registry.name }}
     if: startsWith(github.ref, 'refs/tags/')
-    needs: container
+    needs: [deps, check, container]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Where the registry credentials live. Scoped by a deployment tag rule to
@@ -264,6 +306,10 @@ jobs:
       contents: read
       # ghcr.io authenticates with the job's own token rather than a secret.
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        registry: ${{ fromJSON(needs.deps.outputs.registries) }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/nix
@@ -281,7 +327,8 @@ jobs:
       # publish an image whose tag disagrees with the binary inside it, which
       # is the one failure that survives the release and confuses everyone
       # later. release-plz bumps Cargo.toml and then tags `v{version}`, so
-      # these agree unless something went wrong upstream of here.
+      # these agree unless something went wrong upstream of here. Repeated in
+      # every cell so no registry can be published to without it.
       #
       # `nix eval` rather than `nix build`: imageTag is a passthru string, so
       # this reads the flake without building anything.
@@ -298,29 +345,21 @@ jobs:
             exit 1
           }
 
-      # Registries, credentials and tags all live in flake.nix; these steps
-      # only supply the secrets it names and run the apps. The archives are
-      # checked before either app authenticates, so a missing leg cannot leave
-      # the registries half-populated.
-      - name: Push per-architecture images
+      # Hosts, namespaces and tags live in flake.nix. This step only looks up
+      # the two credentials the flake names for this registry — a variable for
+      # the username, a secret for the token — and runs that registry's app.
+      # The archives are checked before the app authenticates, so a missing
+      # leg cannot leave the registry half-populated.
+      #
+      # The registry name reaches the shell through `env` rather than being
+      # pasted into the script, so the command line is never built from
+      # expression output.
+      - name: Publish to ${{ matrix.registry.name }}
         env:
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
-          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: nix run .#push-container -- images
-
-      - name: Publish multi-arch index
-        env:
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
-          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: nix run .#push-container-index
+          REGISTRY: ${{ matrix.registry.name }}
+          REGISTRY_USERNAME: ${{ vars[matrix.registry.usernameVar] || secrets[matrix.registry.usernameVar] }}
+          REGISTRY_TOKEN: ${{ secrets[matrix.registry.tokenSecret] }}
+        run: nix run ".#publish-$REGISTRY" -- images
 
   # Portable wheels: one native runner per platform, each running the same
   # `nix run .#build-wheel`. The cargo cache below keeps repeat runs from
@@ -334,7 +373,7 @@ jobs:
       matrix:
         # ubuntu = x86_64 linux, macos-15-intel = x86_64 macOS,
         # macos-14 = aarch64 macOS.
-        runner: 
+        runner:
           - ubuntu-latest
           - ubuntu-24.04-arm
           # - macos-15-intel
@@ -462,7 +501,9 @@ jobs:
   # `release`, `publish-pypi` and `container-push` are deliberately absent:
   # all three are refs/tags/ only and would be permanently `skipped` on a pull
   # request. `container` itself *is* here, because it builds and inspects the
-  # image on every run and holds no credential that would need gating.
+  # image on every run and holds no credential that would need gating. So is
+  # `deps`, which now also proves on every pull request that the registry list
+  # still evaluates.
   #
   # Consequence to keep in mind: `pipeline.yml` must never grow a `paths:`
   # filter. A required check that does not run is not "passed", it is *pending*,
@@ -473,7 +514,17 @@ jobs:
     # any red job, the required check never reports, and the PR blocks on a
     # check that will never arrive.
     if: always()
-    needs: [deps, check, crate, binaries, container, wheels, sdist, prune-cargo-cache]
+    needs:
+      [
+        deps,
+        check,
+        crate,
+        binaries,
+        container,
+        wheels,
+        sdist,
+        prune-cargo-cache,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

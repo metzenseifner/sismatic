@@ -69,6 +69,65 @@
           }
         );
 
+      #------------------------------------------------------------------#
+      #                Where the container image is published             #
+      #------------------------------------------------------------------#
+      # System-independent, so these live outside perSystemOutputs and are
+      # exported under legacyPackages.ci. Adding, removing
+      # or renaming a registry is an edit here and nowhere else: the
+      # workflow names no registry, and every app below is generated.
+
+      # The repository name under every registry.
+      containerName = "sismatic";
+
+      # The architectures the multi-arch index is assembled from. One native
+      # runner each, for the same reason `serverStatic` is built natively:
+      # the vendored C in aws-lc-sys stays on its well-trodden path and only
+      # ever sees a different libc, not a different machine.
+      containerArches = [
+        "amd64"
+        "arm64"
+      ];
+
+      # Keyed by name: the name becomes the `publish-<name>` app and the
+      # "publish → <name>" job. Each entry says where its credentials are
+      # found, never what they are:
+      #   usernameVar  a repository *variable*; usernames are not secret,
+      #                and a secret would mask them in every log line
+      #   tokenSecret  a repository secret
+      # Run locally, `publish-all` reads environment variables with these
+      # same names, so one spelling serves the workflow and a laptop.
+      #
+      # Do not name a registry `all`: its app would collide with
+      # `publish-all`.
+      containerRegistries = {
+        ghcr = {
+          host = "ghcr.io";
+          namespace = "metzenseifner";
+          usernameVar = "GHCR_USERNAME";
+          # GitHub's own token, so a fork needs no secret of its own for
+          # this one, only `packages: write` on the job.
+          tokenSecret = "GITHUB_TOKEN";
+        };
+        quay = {
+          host = "quay.io";
+          namespace = "metzenseifner";
+          usernameVar = "QUAY_USERNAME";
+          tokenSecret = "QUAY_TOKEN";
+        };
+        dockerhub = {
+          host = "docker.io";
+          namespace = "metzenseifner";
+          usernameVar = "DOCKERHUB_USERNAME";
+          tokenSecret = "DOCKERHUB_TOKEN";
+        };
+      };
+
+      # The registry the generated Kubernetes manifests pull from. Named
+      # rather than "the first one", because an attribute set has no order
+      # of its own.
+      containerPrimaryRegistry = "ghcr";
+
       perSystemOutputs =
         { system, pkgs }:
         let
@@ -132,9 +191,9 @@
           # Version is shared by every workspace member (workspace.package),
           # so read it once from the root manifest.
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-
           # Arguments shared by every crane invocation below.
           commonArgs = {
+
             inherit src version;
             # Virtual workspace: there is no root package to name the
             # derivations, so give crane a workspace-wide pname. Individual
@@ -270,8 +329,6 @@
 
               muslArgs = commonArgs // {
                 pname = "sismatic-server-static";
-                # Scoped on the deps layer too, for the same reason `server`
-                # above needs its own — see the comment there.
                 cargoExtraArgs = "-p sismatic-server";
 
                 CARGO_BUILD_TARGET = releaseTarget;
@@ -362,75 +419,17 @@
             ( cd "$out" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
           '';
 
-          #------------------------------------------------------------------#
-          #                          Container image                          #
-          #------------------------------------------------------------------#
-          # A third publishable artifact alongside the tarball above, built the
-          # same way and for the same reason: `nix build .#container` produces
-          # on a laptop exactly what the pipeline publishes, so the workflow
-          # stays a dispatcher and nothing about the image is decided in YAML.
-          #
-          # There is no Dockerfile and no base image. The content is
-          # `serverStatic` — the musl binary with no ELF interpreter and no
-          # runtime libc — so the image is that binary, three small files and
-          # nothing else. That is not minimalism for its own sake: a base image
-          # is a second dependency tree with its own CVE feed, its own update
-          # cadence and no lockfile, and every distro package in it would be one
-          # this flake does not pin. `dockerTools` assembles the layers out of
-          # the store instead, which makes the image a function of flake.lock
-          # like every other output here.
-          #
-          # What the image does *not* carry matters as much as what it does: no
-          # shell, no package manager, no CA bundle — nothing here opens an
-          # outbound TLS connection, since devices are reached over SSH and
-          # their host keys come from the devices file. A `kubectl exec` into
-          # this pod finds nothing to run, which is the intent.
-
-          # The repository name under every registry.
-          containerName = "sismatic";
-
-          # Where the image is published, and what each registry authenticates
-          # with. A fork changes this list and nothing else: the workflow names
-          # no registry, and neither app below knows how many there are.
-          #
-          # The credentials are named rather than passed because the alternative
-          # is worse. A workflow that logged in itself would need the pinned
-          # `skopeo` on its PATH — either an unpinned `nix run nixpkgs#skopeo`,
-          # which defeats the point of a lockfile, or an extra output whose only
-          # job is to hand the workflow a binary. Naming the variables here
-          # keeps every registry fact in one list and leaves the workflow with
-          # one line: set the secrets, run the app.
-          containerRegistries = [
-            {
-              host = "ghcr.io";
-              namespace = "metzenseifner";
-              # GitHub's own token works here, so a fork needs no secret of its
-              # own for this one — only `packages: write` on the job.
-              userEnv = "GHCR_USERNAME";
-              tokenEnv = "GHCR_TOKEN";
-            }
-            {
-              host = "quay.io";
-              namespace = "metzenseifner";
-              userEnv = "QUAY_USERNAME";
-              tokenEnv = "QUAY_TOKEN";
-            }
-            {
-              host = "docker.io";
-              namespace = "metzenseifner";
-              userEnv = "DOCKERHUB_USERNAME";
-              tokenEnv = "DOCKERHUB_TOKEN";
-            }
-          ];
-
-          # The architectures the multi-arch index is assembled from. One native
-          # runner each, for the same reason `serverStatic` is built natively:
-          # the vendored C in aws-lc-sys stays on its well-trodden path and only
-          # ever sees a different libc, not a different machine.
-          containerArches = [
-            "amd64"
-            "arm64"
-          ];
+          # What the pipeline enumerates. Data rather than derivations, so it
+          # lives in `legacyPackages`, the one standard output whose contents
+          # may be arbitrary attribute sets. Identical on every system; the
+          # pipeline reads it on whichever system its runner has.
+          legacyPackages.ci = {
+            inherit containerArches;
+            registries = lib.mapAttrsToList (name: r: {
+              inherit name;
+              inherit (r) usernameVar tokenSecret;
+            }) containerRegistries;
+          };
 
           # OCI's name for this machine's architecture, or null where there is
           # no image to build. `null` rather than a `throw`, so the attribute can
@@ -458,11 +457,11 @@
           # about who wrote it and two unrelated processes collide on one name.
           containerUid = 65532;
 
-          # The image reference the generated manifests name. The first registry
-          # in the list, at this version — a concrete ref rather than a
+          # The image reference the generated manifests name. The registry
+          # is named by containerPrimaryRegistry — a concrete ref rather than a
           # placeholder, so the manifests can be applied as they are.
           containerRepo = registry: "${registry.host}/${registry.namespace}/${containerName}";
-          containerRef = "${containerRepo (builtins.head containerRegistries)}:${version}";
+          containerRef = "${containerRepo containerRegistries.${containerPrimaryRegistry}}:${version}";
 
           containerConfigFile = ./crates/sismatic-server/container_configuration.yaml;
           containerDevicesFile = ./crates/sismatic-server/container_devices.yaml;
@@ -485,7 +484,7 @@
           containerImage = pkgs.dockerTools.buildLayeredImage {
             name = containerName;
             # Arch-suffixed, because this is one leg of a multi-arch image
-            # rather than the image itself. `nix run .#push-container-index`
+            # rather than the image itself. `nix run .#publish-<name>`
             # publishes the unsuffixed tags over both legs.
             tag = "${version}-${toString containerArch}";
             architecture = containerArch;
@@ -831,161 +830,163 @@
           #------------------------------------------------------------------#
           #                       Publishing the image                        #
           #------------------------------------------------------------------#
-          # Two apps rather than one, because a multi-arch image is published in
-          # two phases that happen on different machines: each architecture
-          # pushes its own leg from its own native runner, and one machine then
-          # writes an index over both. Neither step knows the registry list —
-          # both read `containerRegistries` above.
+          # One app per registry, generated from `containerRegistries`. Each
+          # one does the whole job for its destination: check the archives,
+          # log in, push every architecture's leg, then write the multi-arch
+          # index over them. Writing the index in the same run that pushed the
+          # legs guarantees the order per registry, and lets the pipeline give
+          # every registry its own job, holding only that registry's token.
           #
-          # Credentials: both tools read a Docker-format auth file. `skopeo`
-          # takes `REGISTRY_AUTH_FILE` (the file), `regctl` takes `DOCKER_CONFIG`
-          # (the directory holding config.json). Point both at one file and a
-          # single `skopeo login` per registry covers both phases.
-
-          containerRepos = map containerRepo containerRegistries;
-
-          # skopeo's trust policy, passed explicitly because it will not copy
-          # without one.
+          # None of these apps refers to `containerImage`. They take archives
+          # off disk, so the job that holds credentials never compiles the
+          # musl toolchain, and one x86_64 runner can publish both legs:
+          # skopeo copies manifests and blobs and never executes them.
           #
-          # nixpkgs installs upstream's default to
-          # `$out/etc/containers/default-policy.json` but does not patch the
-          # binary's compiled-in lookup path, which stays
-          # `/etc/containers/policy.json`. That file exists in no Nix build
-          # sandbox and is not guaranteed on a CI runner, so leaving it to the
-          # host means a push that works on one machine and dies on another.
-          # The policy is upstream's permissive default, which is the honest
-          # setting here: there is no signature to verify on an image this
-          # flake built locally thirty seconds ago.
-          skopeoPolicy = "${pkgs.skopeo}/etc/containers/default-policy.json";
+          # Credentials: skopeo writes a Docker-format auth file at
+          # `REGISTRY_AUTH_FILE`, and regctl reads the same file through
+          # `DOCKER_CONFIG` (the directory that holds it), so one login covers
+          # both tools.
 
-          # `skopeo login` / `regctl registry login` for every registry above,
-          # as shell. Both apps start with this, so a credential that is missing
-          # is named before anything is built or uploaded rather than halfway
-          # through a three-registry push.
-          #
-          # Strict on purpose: every registry in the list must have credentials.
-          # Skipping the ones without would turn "the release did not reach
-          # Docker Hub" into a line of log output nobody reads, and the list is
-          # already the one place to change if a deployment wants fewer.
-          # The two tools spell the same three arguments differently, so the
-          # spelling is data and the loop below is written once.
-          skopeoLogin = {
-            login = "skopeo login";
-            user = "--username";
-            stdin = "--password-stdin";
-          };
-          regctlLogin = {
-            login = "regctl registry login";
-            user = "--user";
-            stdin = "--pass-stdin";
-          };
-
-          containerLogin =
-            tool:
-            lib.concatMapStringsSep "\n" (registry: ''
-              if [ -z "''${${registry.userEnv}:-}" ] || [ -z "''${${registry.tokenEnv}:-}" ]; then
-                echo "error: ${registry.host} needs ${registry.userEnv} and ${registry.tokenEnv}" >&2
-                exit 1
-              fi
-              printf '%s' "''$${registry.tokenEnv}" \
-                | ${tool.login} "${registry.host}" ${tool.user} "''$${registry.userEnv}" ${tool.stdin}
-            '') containerRegistries;
-
-          # What an architecture's archive is called where the push app looks
-          # for it. The `container` job writes this name and this app reads it,
-          # so the convention is stated once and a disagreement is a missing
-          # file rather than a silent half-publish.
+          # What an architecture's archive is called. `export-container`
+          # writes this name and every publish app reads it, so the
+          # convention is stated once.
           containerArchiveName = arch: "sismatic-${arch}.tar";
 
-          pushContainer = pkgs.writeShellApplication {
-            name = "sismatic-push-container";
-            runtimeInputs = [ pkgs.skopeo ];
+          # skopeo's trust policy, passed explicitly because it will not copy
+          # without one. nixpkgs installs upstream's default here but does not
+          # patch the compiled-in lookup path (/etc/containers/policy.json),
+          # which exists in no build sandbox and on no guaranteed runner. The
+          # policy is upstream's permissive default: there is no signature to
+          # verify on an image this flake built moments ago.
+          skopeoPolicy = "${pkgs.skopeo}/etc/containers/default-policy.json";
+
+          # Shell that refuses to go on unless `$archives` holds every leg.
+          # Runs before any credential is read, so a missing leg can never
+          # leave a registry half-populated with an index over an incomplete
+          # set.
+          checkArchives = lib.concatMapStringsSep "\n" (arch: ''
+            if [ ! -f "$archives/${containerArchiveName arch}" ]; then
+              echo "error: no ${arch} archive at $archives/${containerArchiveName arch}" >&2
+              exit 1
+            fi
+          '') containerArches;
+
+          # `nix run .#export-container -- <dir>` puts this machine's leg into
+          # <dir> under the name the publish apps expect, so the workflow
+          # moves a directory and never spells a file name.
+          exportContainer = pkgs.writeShellApplication {
+            name = "sismatic-export-container";
             text = ''
-              # Publish every architecture's leg, from archives on disk.
-              #
-              # Takes a directory rather than building the image, and that is
-              # the whole point of the signature. Referring to the image here
-              # would make this app *depend* on it, so the job that holds the
-              # registry credentials would also compile the musl toolchain —
-              # and the longer a credential is present on a machine, the more
-              # of that machine's work is inside its blast radius. The build
-              # happens in a job with no secrets; this one only uploads bytes.
-              #
-              # One runner pushes both legs because pushing is
-              # architecture-agnostic: skopeo copies a manifest and some blobs
-              # and never executes them, so an x86_64 runner publishes the
-              # arm64 image perfectly well. Only *building* needed a native
-              # machine.
-              if [ "$#" -ne 1 ]; then
-                {
-                  echo "usage: sismatic-push-container <dir>"
-                  echo
-                  echo "<dir> holds one archive per architecture:"
-              ${lib.concatMapStringsSep "\n" (arch: ''echo "  ${containerArchiveName arch}"'') containerArches}
-                } >&2
-                exit 2
-              fi
-              archives=$1
-
-              # Every archive is checked before a single credential is read.
-              # Authenticating and then discovering a missing leg would leave
-              # the registries half-populated and the index that follows built
-              # over an incomplete set — so the refusal comes first, while
-              # nothing has been logged into and nothing has been uploaded.
-              for arch in ${lib.concatStringsSep " " containerArches}; do
-                if [ ! -f "$archives/sismatic-$arch.tar" ]; then
-                  echo "error: no $arch archive at $archives/sismatic-$arch.tar" >&2
-                  exit 1
-                fi
-              done
-
-              ${containerLogin skopeoLogin}
-
-              for arch in ${lib.concatStringsSep " " containerArches}; do
-                for repo in ${lib.concatStringsSep " " containerRepos}; do
-                  echo "==> $repo:${version}-$arch"
-                  # `--format oci` so that the leg and the index that will wrap
-                  # it are the same kind of thing. `dockerTools` writes a Docker
-                  # v2s2 manifest and `regctl index create` writes an OCI index,
-                  # and an OCI index over v2s2 manifests — while legal, and
-                  # handled by every modern runtime — is a mixed artifact that
-                  # nothing here has a reason to produce. Converting is
-                  # manifest-level and deterministic: the layers are untouched
-                  # and all three registries still receive the same digest.
-                  skopeo --policy ${skopeoPolicy} copy --retry-times 3 --format oci \
-                    "docker-archive:$archives/sismatic-$arch.tar" \
-                    "docker://$repo:${version}-$arch"
-                done
-              done
+              dir=''${1:?usage: sismatic-export-container <dir>}
+              mkdir -p "$dir"
+              install -m644 ${containerImage} "$dir/${containerArchiveName containerArch}"
+              echo "$dir/${containerArchiveName containerArch}"
             '';
           };
 
-          pushContainerIndex = pkgs.writeShellApplication {
-            name = "sismatic-push-container-index";
-            runtimeInputs = [ pkgs.regclient ];
-            text = ''
-              ${containerLogin regctlLogin}
+          # `nix run .#publish-<name> -- <dir> [tag...]`
+          #
+          # Reads REGISTRY_USERNAME and REGISTRY_TOKEN rather than the
+          # per-registry names, so the pipeline sets the same two variables
+          # in every job. With no tags it publishes the version and `latest`.
+          publishTo =
+            name: registry:
+            pkgs.writeShellApplication {
+              name = "sismatic-publish-${name}";
+              runtimeInputs = [
+                pkgs.skopeo
+                pkgs.regclient
+              ];
+              text = ''
+                archives=''${1:?usage: sismatic-publish-${name} <dir> [tag...]}
+                shift
 
-              # Write a multi-arch index over the per-architecture legs each
-              # runner has already pushed. With no arguments it publishes the
-              # version and `latest`.
-              tags=("$@")
-              if [ ''${#tags[@]} -eq 0 ]; then
-                tags=("${version}" "latest")
-              fi
+                ${checkArchives}
 
-              for repo in ${lib.concatStringsSep " " containerRepos}; do
-                refs=()
-                for arch in ${lib.concatStringsSep " " containerArches}; do
-                  refs+=(--ref "$repo:${version}-$arch")
-                done
+                : "''${REGISTRY_USERNAME:?${name} needs REGISTRY_USERNAME (the ${registry.usernameVar} variable in CI)}"
+                : "''${REGISTRY_TOKEN:?${name} needs REGISTRY_TOKEN (the ${registry.tokenSecret} secret in CI)}"
+
+                # The auth file holds a live token, so it lives in a private
+                # temporary directory that is removed however this exits.
+                auth=$(mktemp -d)
+                trap 'rm -rf "$auth"' EXIT
+                export REGISTRY_AUTH_FILE="$auth/config.json" DOCKER_CONFIG="$auth"
+                printf '%s' "$REGISTRY_TOKEN" \
+                  | skopeo login "${registry.host}" --username "$REGISTRY_USERNAME" --password-stdin
+
+                repo=${containerRepo registry}
+
+                ${lib.concatMapStringsSep "\n" (arch: ''
+                  echo "==> $repo:${version}-${arch}"
+                  # `--format oci` so the leg and the index that wraps it are
+                  # the same kind of thing. `dockerTools` writes a Docker v2s2
+                  # manifest and `regctl index create` writes an OCI index; the
+                  # conversion is manifest-level and deterministic, so every
+                  # registry receives the same digest and a re-run is a no-op.
+                  skopeo --policy ${skopeoPolicy} copy --retry-times 3 --format oci \
+                    "docker-archive:$archives/${containerArchiveName arch}" \
+                    "docker://$repo:${version}-${arch}"
+                '') containerArches}
+
+                tags=("$@")
+                [ ''${#tags[@]} -gt 0 ] || tags=("${version}" "latest")
                 for tag in "''${tags[@]}"; do
                   echo "==> $repo:$tag over ${lib.concatStringsSep ", " containerArches}"
-                  # Default media type, which is the OCI index — the half of
-                  # the agreement `--format oci` above makes good on.
-                  regctl index create "$repo:$tag" "''${refs[@]}"
+                  regctl index create "$repo:$tag" \
+                    ${lib.concatMapStringsSep " " (arch: ''--ref "$repo:${version}-${arch}"'') containerArches}
                 done
-              done
+              '';
+            };
+
+          # `nix run .#publish-all -- <dir> [tag...]`
+          #
+          # Every registry from one machine: the recovery path when the
+          # pipeline is unavailable, and the way to publish from a laptop.
+          # Reads each registry's credentials from environment variables
+          # named after its `usernameVar` and `tokenSecret`, and hands them to
+          # that registry's own app, so this adds no publishing logic of its
+          # own.
+          #
+          # Strict before it starts: every archive and every credential must
+          # be present, so a missing token is named before anything is
+          # uploaded rather than halfway through. Once publishing has begun it
+          # continues past a failing registry, the way the pipeline's
+          # `fail-fast: false` does, and names every failure at the end.
+          publishAll = pkgs.writeShellApplication {
+            name = "sismatic-publish-all";
+            text = ''
+              archives=''${1:?usage: sismatic-publish-all <dir> [tag...]}
+              shift
+
+              ${checkArchives}
+
+              missing=()
+              ${lib.concatStrings (
+                lib.mapAttrsToList (_: r: ''
+                  [ -n "''${${r.usernameVar}:-}" ] || missing+=(${r.usernameVar})
+                  [ -n "''${${r.tokenSecret}:-}" ] || missing+=(${r.tokenSecret})
+                '') containerRegistries
+              )}
+              if [ ''${#missing[@]} -gt 0 ]; then
+                echo "error: set these before publishing anywhere: ''${missing[*]}" >&2
+                exit 1
+              fi
+
+              failed=()
+              ${lib.concatStrings (
+                lib.mapAttrsToList (name: r: ''
+                  echo "==> ${name}"
+                  REGISTRY_USERNAME="''$${r.usernameVar}" REGISTRY_TOKEN="''$${r.tokenSecret}" \
+                    ${lib.getExe (publishTo name r)} "$archives" "$@" \
+                    || failed+=(${name})
+                '') containerRegistries
+              )}
+
+              if [ ''${#failed[@]} -gt 0 ]; then
+                echo "error: publishing failed for: ''${failed[*]}" >&2
+                echo "       re-run each with: nix run .#publish-<name> -- $archives" >&2
+                exit 1
+              fi
             '';
           };
 
@@ -1958,7 +1959,7 @@
           };
         in
         {
-          inherit checks;
+          inherit checks legacyPackages;
 
           packages = {
             default = cli;
@@ -2008,7 +2009,8 @@
           # `nix flake check` on a laptop checks what that laptop can build.
           // lib.optionalAttrs containerSupported {
             # `nix build .#container` -> a docker-archive tarball, loadable with
-            # `docker load < result` and pushable with `nix run .#push-container`.
+            # `docker load < result` and pushable with `nix run
+            # .#export-container` published with `nix run .#publish-all`.
             container = containerImage;
 
             # The image's own invariants, asserted against the built artifact.
@@ -2053,27 +2055,30 @@
               program = pkgs.lib.getExe docs;
             };
           }
-          # Publishing the image, in the two phases a multi-arch image needs.
-          #
-          # Deliberately *not* gated on `containerSupported`, unlike the image
-          # itself. Neither app refers to `containerImage` any more — one takes
-          # archives off disk, the other only rewrites manifests that are
-          # already in the registries — so neither needs a machine that can
-          # build a Linux image. That is what lets one x86_64 runner publish
-          # both legs, and it incidentally makes a release recoverable from a
+          # Publishing the image. Not gated on `containerSupported`: none of
+          # these apps builds the image, so any machine can publish archives
+          # that native runners built. That is what lets one x86_64 runner
+          # push both legs, and what makes a release recoverable from a
           # laptop.
+          // lib.mapAttrs' (
+            name: r:
+            lib.nameValuePair "publish-${name}" {
+              type = "app";
+              program = lib.getExe (publishTo name r);
+            }
+          ) containerRegistries
           // {
-            # `nix run .#push-container -- <dir>` — every architecture's leg,
-            # to every registry, from archives in <dir>.
-            push-container = {
+            publish-all = {
               type = "app";
-              program = pkgs.lib.getExe pushContainer;
+              program = lib.getExe publishAll;
             };
-            # `nix run .#push-container-index` — the multi-arch index over
-            # the legs, once every architecture has pushed one.
-            push-container-index = {
+          }
+          # Exporting, by contrast, needs the image, so it exists only where
+          # the image can be built.
+          // lib.optionalAttrs containerSupported {
+            export-container = {
               type = "app";
-              program = pkgs.lib.getExe pushContainerIndex;
+              program = lib.getExe exportContainer;
             };
           };
 
@@ -2193,6 +2198,7 @@
       # This is the System↔Output transpose: perSystem is keyed by system,
       # the flake schema wants each field keyed by system.
       perSystem = fmapSystems perSystemOutputs;
+      # "Project" here as a verb, not a noun
       project = field: builtins.mapAttrs (_: out: out.${field}) perSystem;
     in
     {
@@ -2201,5 +2207,6 @@
       apps = project "apps";
       devShells = project "devShells";
       checks = project "checks";
+      legacyPackages = project "legacyPackages";
     };
 }
