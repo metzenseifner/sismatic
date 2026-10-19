@@ -76,7 +76,7 @@
 }
 .clear:disabled {
   opacity: 0.4;
-  cursor: default;
+  cursor: not-allowed;
 }
 @media (hover: hover) {
   .clear:not(:disabled):hover {
@@ -97,9 +97,18 @@
   align-items: center;
 }
 
-.frozen {
+/* A recording is holding these shut. The fleet's own refusal, so it reads as
+   one. */
+.sealed {
   margin: 0;
   color: var(--color-paused);
+}
+
+/* The page is read-only. Not a fault and not the fleet's doing — a note, in
+   the colour of a note. */
+.locked {
+  margin: 0;
+  color: var(--color-muted);
 }
 
 .error {

@@ -70,6 +70,22 @@ export type FleetSettings = {
    * stylesheet takes it from there. See `styles/theme.ts`.
    */
   theme: ThemeMode;
+  /**
+   * Whether this browser is allowed to write to the fleet.
+   *
+   * The odd one out among these fields: the rest decide what the page *shows*,
+   * and this decides what it is able to *do*. It is here anyway because it is
+   * a per-browser preference that has to survive a reload like the others, and
+   * because the bar is where it is switched.
+   *
+   * It is not a permission. Nothing here can stop a write — the API is open to
+   * anything that can reach it, and this flag lives in `localStorage` where its
+   * owner can edit it. What it stops is a *misclick*: the page an operator
+   * keeps open all afternoon to watch a recording is one stray tap away from
+   * stopping it, and the Details and Registers folds on every card are reasons
+   * to be clicking around in there while it runs.
+   */
+  readOnly: boolean;
 };
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -78,6 +94,9 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   pollMs: DEFAULT_POLL_MS,
   columns: "auto",
   theme: DEFAULT_THEME,
+  // Locked. Watching the fleet is what this page is opened for; sending a verb
+  // to it is the rarer, deliberate thing, so that is the one that asks first.
+  readOnly: true,
 };
 
 /**
@@ -142,6 +161,12 @@ export function loadSettings(): FleetSettings {
       ? (stored.columns as Columns)
       : DEFAULT_SETTINGS.columns,
     theme: oneOf(THEME_CHOICES, stored.theme, DEFAULT_THEME),
+    // Only an explicit `false` unlocks, so every other reading of storage ends
+    // up read-only: a blob written before this field existed, a truncated one,
+    // a hand-edited `"no"`. The field it guards is the one where the two ways
+    // of being wrong are not comparable — a locked page costs a click, and an
+    // unlocked one costs a take.
+    readOnly: stored.readOnly !== false,
   };
 }
 
@@ -160,6 +185,7 @@ export function saveSettings(settings: FleetSettings): void {
       pollMs: settings.pollMs,
       columns: settings.columns,
       theme: settings.theme,
+      readOnly: settings.readOnly,
     }),
   );
 }

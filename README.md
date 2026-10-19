@@ -718,6 +718,12 @@ following features:
 - Filters using fuzzy search across all groups and devices to find information
   faster.
 - Ad-hoc control over the recording state for both device groups and devices.
+- A read-only mode, which is how the dashboard starts. Every control that can
+  reach a device — Start, Stop, Pause, and the metadata registers — is turned
+  off until **Controls** is set to *Unlocked*, so a page left open to watch a
+  recording cannot stop it with a stray click while someone is opening folds to
+  see what is going on. The bar is outlined in amber for as long as it is
+  unlocked, and the choice is remembered in that browser.
 - Details about each device can be hidden, shown, or pinned to the top of each
   visual card for tighter control over what gets shown.
 

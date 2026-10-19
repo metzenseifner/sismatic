@@ -41,9 +41,20 @@ const BELIEF_MS = 15_000;
 export function LiveDeviceCard({
   view,
   display,
+  readOnly,
 }: {
   view: DeviceView;
   display: CardDisplay;
+  /**
+   * The page-wide lock — see `readOnly` in `fleetSettings`.
+   *
+   * Passed through to both halves rather than acted on here, because there is
+   * nothing for this component to do with it: every write it can issue starts
+   * at a control below, and a control that is off cannot be clicked. Adding a
+   * second refusal in `run` would make "is this card writable?" a question
+   * with two answers, and the day they disagree the visible one is wrong.
+   */
+  readOnly: boolean;
 }) {
   const target = useMemo<WriteTarget>(
     () => ({kind: view.kind, id: view.id}),
@@ -130,11 +141,16 @@ export function LiveDeviceCard({
           pending={inFlight}
           awaiting={awaiting}
           error={command.error}
+          readOnly={readOnly}
           onCommand={run}
         />
       }
       registers={
-        <RegistersPanel drafts={drafts} frozen={sealsMetadata(status)} />
+        <RegistersPanel
+          drafts={drafts}
+          frozen={sealsMetadata(status)}
+          readOnly={readOnly}
+        />
       }
     />
   );

@@ -18,8 +18,19 @@
   color: var(--color-text);
 }
 
+/* Both variants set their own background and foreground, so the browser's own
+   disabled rendering never shows through and a turned-off button looked
+   exactly like a live one. It matters more now than it did: under the page's
+   read-only lock, every recording button on the page is in this state, and
+   "greyed out" is the whole of what tells an operator they are safe to click
+   around. */
+.button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Only apply hover on devices with a mouse or trackpad,
    so iPhone and iPad taps do not leave a "stuck" hover color */
 @media (hover: hover) {
-  .button:hover { filter: brightness(1.1); }
+  .button:not(:disabled):hover { filter: brightness(1.1); }
 }

@@ -68,12 +68,14 @@ type ControlBarProps = {
 };
 
 /**
- * The page's own controls: what to show, and how to show it.
+ * The page's own controls: what to show, how to show it, and whether this
+ * browser may write to the fleet at all.
  *
- * Everything here is state the page holds rather than anything it sends. The
- * filters never reach the server — see `fleetFilters` — and the two settings on
- * the right change only how this browser behaves, so nothing in this bar can
- * touch a recorder.
+ * Everything here is state the page holds rather than anything it sends: the
+ * filters never reach the server — see `fleetFilters` — and no control in this
+ * bar submits a thing. One of them does decide what the *cards* are allowed to
+ * submit, which is why the bar says so about itself in the colour of its own
+ * border rather than leaving the answer to forty greyed-out buttons.
  */
 export function ControlBar({
   settings,
@@ -82,7 +84,7 @@ export function ControlBar({
   total,
 }: ControlBarProps) {
   const ids = useId();
-  const {filters, display, pollMs, columns, theme} = settings;
+  const {filters, display, pollMs, columns, theme, readOnly} = settings;
 
   /** One setting replaced, the rest carried over. */
   const set = <K extends keyof FleetSettings>(
@@ -99,7 +101,10 @@ export function ControlBar({
   );
 
   return (
-    <div className={styles.bar}>
+    // The armed state is an attribute rather than a second class name, so the
+    // stylesheet can key the whole bar off it — and so a test can ask the page
+    // what it thinks it is, instead of matching on a hashed CSS module name.
+    <div className={styles.bar} data-armed={readOnly ? undefined : "true"}>
       <div className={styles.row}>
         <input
           className={`${styles.field} ${styles.search}`}
@@ -169,6 +174,29 @@ export function ControlBar({
         )}
 
         <div className={styles.settings}>
+          {/* First in the cluster, because it is the one setting here that has
+              to be read *before* anything on a card is clicked rather than
+              after. A select and not a switch: two interactions to change it
+              is the right price for the only control on this page that can
+              arm a stop button. */}
+          <div className={styles.group}>
+            <label className={styles.label} htmlFor={`${ids}-controls`}>
+              Controls
+            </label>
+            <select
+              id={`${ids}-controls`}
+              className={styles.field}
+              data-armed={readOnly ? undefined : "true"}
+              value={readOnly ? "locked" : "unlocked"}
+              onChange={event =>
+                set("readOnly", event.target.value === "locked")
+              }
+            >
+              <option value="locked">Read-only</option>
+              <option value="unlocked">Unlocked</option>
+            </select>
+          </div>
+
           <div className={styles.group}>
             <label className={styles.label} htmlFor={`${ids}-details`}>
               Details
@@ -244,6 +272,18 @@ export function ControlBar({
           </div>
         </div>
       </div>
+
+      {/* Said out loud, and only in the state worth saying out loud. `status`
+          rather than `alert`: it is announced when it appears, without
+          interrupting whatever a screen reader was in the middle of. Nothing
+          is drawn in the read-only state, which is the one the page spends its
+          life in and the one that needs no explaining. */}
+      {!readOnly && (
+        <p className={styles.armed} role="status">
+          Controls are unlocked — Start, Stop, Pause and the registers on every
+          card will reach the fleet.
+        </p>
+      )}
 
       <FieldPicker
         display={display}
