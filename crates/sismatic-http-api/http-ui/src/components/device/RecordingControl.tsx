@@ -12,7 +12,10 @@ type RecordingControlProps = {
   /** True while a verb has been accepted and no device has reported it back. */
   awaiting: boolean;
   error: ApiCallError | null;
-  /** The page-wide lock — see `readOnly` in `fleetSettings`. */
+  /**
+   * True in the locked state of the page-wide `controls` setting — see
+   * `fleetSettings`. The hidden state never gets this far.
+   */
   readOnly: boolean;
   onCommand: (verb: RecordingVerb) => void;
 };
@@ -33,6 +36,10 @@ type RecordingControlProps = {
  * worst possible time to move a Stop button. The second is that the buttons
  * are themselves a reading of the state — "Stop" offered means this card
  * believes it is recording — which is worth keeping legible while locked.
+ *
+ * Both reasons are about a page somebody is going to unlock. The third state,
+ * `hidden`, is for one nobody will, and it never reaches this component at
+ * all: `LiveDeviceCard` leaves the slot empty and the card closes over it.
  */
 export function RecordingControl({
   status,

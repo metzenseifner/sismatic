@@ -15,9 +15,11 @@ import {
 } from "./fleetDisplay";
 import {
   COLUMN_CHOICES,
+  CONTROLS_CHOICES,
   KIND_CHOICES,
   PLACEMENT_CHOICES,
   STATUS_CHOICES,
+  type ControlsMode,
   type FleetSettings,
 } from "./fleetSettings";
 import {
@@ -43,6 +45,12 @@ const PLACEMENT_LABELS: Record<Placement, string> = {
   pinned: "Pinned",
   details: "In details",
   hidden: "Hidden",
+};
+
+const CONTROLS_LABELS: Record<ControlsMode, string> = {
+  hidden: "Hidden",
+  locked: "Read-only",
+  unlocked: "Unlocked",
 };
 
 const THEME_LABELS: Record<ThemeMode, string> = {
@@ -74,8 +82,9 @@ type ControlBarProps = {
  * Everything here is state the page holds rather than anything it sends: the
  * filters never reach the server — see `fleetFilters` — and no control in this
  * bar submits a thing. One of them does decide what the *cards* are allowed to
- * submit, which is why the bar says so about itself in the colour of its own
- * border rather than leaving the answer to forty greyed-out buttons.
+ * submit — and whether they offer anything to submit with at all — which is
+ * why the bar says so about itself in the colour of its own border rather than
+ * leaving the answer to forty greyed-out buttons.
  */
 export function ControlBar({
   settings,
@@ -84,7 +93,9 @@ export function ControlBar({
   total,
 }: ControlBarProps) {
   const ids = useId();
-  const {filters, display, pollMs, columns, theme, readOnly} = settings;
+  const {filters, display, pollMs, columns, theme, controls} = settings;
+  /** The one state that can reach a device, and the only one worth shouting. */
+  const armed = controls === "unlocked";
 
   /** One setting replaced, the rest carried over. */
   const set = <K extends keyof FleetSettings>(
@@ -104,7 +115,7 @@ export function ControlBar({
     // The armed state is an attribute rather than a second class name, so the
     // stylesheet can key the whole bar off it — and so a test can ask the page
     // what it thinks it is, instead of matching on a hashed CSS module name.
-    <div className={styles.bar} data-armed={readOnly ? undefined : "true"}>
+    <div className={styles.bar} data-armed={armed ? "true" : undefined}>
       <div className={styles.row}>
         <input
           className={`${styles.field} ${styles.search}`}
@@ -176,9 +187,15 @@ export function ControlBar({
         <div className={styles.settings}>
           {/* First in the cluster, because it is the one setting here that has
               to be read *before* anything on a card is clicked rather than
-              after. A select and not a switch: two interactions to change it
-              is the right price for the only control on this page that can
-              arm a stop button. */}
+              after. A select and not a switch: there are three states, and two
+              interactions to change it is the right price for the only control
+              on this page that can arm a stop button.
+
+              It is also the only place the hidden state is visible at all.
+              That is the state's whole point — nothing on a card says a word
+              about controls that are not there — and it is why this stays a
+              named setting in the bar rather than, say, a URL parameter a
+              kiosk is launched with and nobody can find again. */}
           <div className={styles.group}>
             <label className={styles.label} htmlFor={`${ids}-controls`}>
               Controls
@@ -186,14 +203,17 @@ export function ControlBar({
             <select
               id={`${ids}-controls`}
               className={styles.field}
-              data-armed={readOnly ? undefined : "true"}
-              value={readOnly ? "locked" : "unlocked"}
+              data-armed={armed ? "true" : undefined}
+              value={controls}
               onChange={event =>
-                set("readOnly", event.target.value === "locked")
+                set("controls", event.target.value as ControlsMode)
               }
             >
-              <option value="locked">Read-only</option>
-              <option value="unlocked">Unlocked</option>
+              {CONTROLS_CHOICES.map(mode => (
+                <option key={mode} value={mode}>
+                  {CONTROLS_LABELS[mode]}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -276,9 +296,10 @@ export function ControlBar({
       {/* Said out loud, and only in the state worth saying out loud. `status`
           rather than `alert`: it is announced when it appears, without
           interrupting whatever a screen reader was in the middle of. Nothing
-          is drawn in the read-only state, which is the one the page spends its
-          life in and the one that needs no explaining. */}
-      {!readOnly && (
+          is drawn for the other two: read-only is the state the page spends
+          its life in, and hidden is one somebody chose in order to be told
+          less. */}
+      {armed && (
         <p className={styles.armed} role="status">
           Controls are unlocked — Start, Stop, Pause and the registers on every
           card will reach the fleet.

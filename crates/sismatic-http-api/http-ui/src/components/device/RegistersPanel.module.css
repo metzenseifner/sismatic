@@ -11,7 +11,11 @@
   gap: 0.15rem;
 }
 
-.label {
+/* The line above the box: the field's name at one end, whatever the row has to
+   say about itself at the other. A plain element and not the `<label>` itself,
+   so that what the row says about itself cannot end up inside the name of the
+   box — see `Row`. */
+.labelLine {
   display: flex;
   align-items: baseline;
   gap: var(--space-sm, 0.5rem);
@@ -55,7 +59,13 @@
   border: 1px solid var(--color-border);
   border-radius: calc(var(--radius, 0.75rem) / 2);
 }
-.input:disabled {
+/* Turned off, and the same treatment for a box that is only ever a value:
+   with the page's controls hidden there is nothing for one to submit to, so it
+   should not look like the way in to typing. `[readonly]` and not
+   `:read-only`, which a disabled box matches too — the selector list is meant
+   to say which two states these are. */
+.input:disabled,
+.input[readonly] {
   color: var(--color-muted);
   background: var(--color-surface-strong);
 }

@@ -232,6 +232,113 @@ test("a dashboard set up before the lock existed comes back locked", async ({
   await expect(page.getByLabel("Controls")).toHaveValue("locked");
 });
 
+test("an edited register is described as unsaved, not renamed", async ({
+  page,
+}) => {
+  await stubApi(page);
+  await page.goto(".");
+  await page.getByLabel("Controls").selectOption("unlocked");
+
+  const hallB = card(page, "Hall B");
+  await hallB.getByText("Registers").click();
+
+  const title = hallB.getByLabel("Title", {exact: true});
+  await title.fill("Afternoon lab, take 2");
+  await expect(hallB.getByText("unsaved", {exact: true})).toBeVisible();
+
+  // Both of those lines are *about* the box; neither is its name. The version
+  // this replaced put the mark inside the `<label>`, which renamed the field
+  // to "Title unsaved" halfway through someone typing into it — wrong as a
+  // name, and a name that moves under a screen reader at the worst moment.
+  await expect(title).toHaveAccessibleName("Title");
+  await expect(title).toHaveAccessibleDescription(
+    "unsaved On the devices: Afternoon lab",
+  );
+});
+
+test("hiding the controls leaves a card with nothing to press", async ({
+  page,
+}) => {
+  await stubApi(page);
+  await page.goto(".");
+
+  const hallB = card(page, "Hall B");
+
+  await page.getByLabel("Controls").selectOption("hidden");
+
+  // Not turned off — gone. The read-only state's reasons for keeping a
+  // greyed-out Stop on the card all assume somebody is going to unlock the
+  // page; this is the state for a page nobody will, so the line that explains
+  // the greyed-out version goes too. Nothing on a card mentions controls it
+  // does not have.
+  await expect(hallB.getByRole("button", {name: /recording/})).toHaveCount(0);
+  await expect(
+    hallB.getByText("Read-only — set Controls above to Unlocked."),
+  ).toHaveCount(0);
+
+  // The registers stay, and stay readable: the fold, the labels, and what the
+  // devices report in each one.
+  await hallB.getByText("Registers").click();
+  const title = hallB.getByLabel("Title", {exact: true});
+  await expect(title).toHaveValue("Afternoon lab");
+  // `readonly` and not `disabled`, which is the difference between a value and
+  // a control that happens to be off — and with the controls hidden this box
+  // is the card's only copy of the value.
+  await expect(title).toBeEnabled();
+  await expect(title).not.toBeEditable();
+  await expect(hallB.getByRole("button", {name: /^Save/})).toHaveCount(0);
+  await expect(hallB.getByRole("button", {name: "Clear all"})).toHaveCount(0);
+
+  // The whole card, with both folds open: not one button on it. The folds
+  // themselves are `<details>`, so opening them is not a button either.
+  await hallB.getByText("Details").click();
+  await expect(hallB.getByRole("button")).toHaveCount(0);
+
+  // Remembered like the rest of the bar — the point of the state is a page
+  // that is left somewhere, and a reload must not hand the buttons back.
+  await page.reload();
+  await expect(page.getByLabel("Controls")).toHaveValue("hidden");
+  await expect(hallB.getByRole("button", {name: /recording/})).toHaveCount(0);
+
+  // And read-only puts them back, in the state read-only draws them in.
+  await page.getByLabel("Controls").selectOption("locked");
+  const start = hallB.getByRole("button", {name: "Start recording"});
+  await expect(start).toBeVisible();
+  await expect(start).toBeDisabled();
+});
+
+test("a draft stops being shown as a value once the controls are hidden", async ({
+  page,
+}) => {
+  await stubApi(page);
+  await page.goto(".");
+
+  const hallB = card(page, "Hall B");
+  await page.getByLabel("Controls").selectOption("unlocked");
+  await hallB.getByText("Registers").click();
+
+  const title = hallB.getByLabel("Title", {exact: true});
+  await title.fill("Afternoon lab, take 2");
+  // `exact`, because the fold's own summary line says "1 unsaved" too.
+  await expect(hallB.getByText("unsaved", {exact: true})).toBeVisible();
+
+  // A page with no controls on it reads as a read of the fleet, so it shows
+  // the fleet: the box goes back to what Hall B reports and the mark that
+  // tracks an edit goes with the editor that made it. A wall display sitting
+  // there showing somebody's half-typed title as though it were the recording
+  // metadata is the exact failure this page is otherwise careful about.
+  await page.getByLabel("Controls").selectOption("hidden");
+  await expect(title).toHaveValue("Afternoon lab");
+  await expect(hallB.getByText("unsaved", {exact: true})).toHaveCount(0);
+
+  // Nothing was thrown away, though. The draft was never the fleet's to lose,
+  // and a setting in the bar is not an answer to "did you mean to discard
+  // that?".
+  await page.getByLabel("Controls").selectOption("unlocked");
+  await expect(title).toHaveValue("Afternoon lab, take 2");
+  await expect(hallB.getByText("unsaved", {exact: true})).toBeVisible();
+});
+
 test("a group names its devices even when none of them has answered", async ({
   page,
 }) => {

@@ -15,6 +15,7 @@ import {RecordingControl} from "./RecordingControl";
 import {RegistersPanel} from "./RegistersPanel";
 import {useRegisterDrafts} from "./registerDrafts";
 import type {CardDisplay} from "../fleet/fleetDisplay";
+import type {ControlsMode} from "../fleet/fleetSettings";
 import type {DeviceView, RecordingStatus} from "./deviceView";
 
 /** The reported status that confirms a verb this page submitted. */
@@ -41,20 +42,27 @@ const BELIEF_MS = 15_000;
 export function LiveDeviceCard({
   view,
   display,
-  readOnly,
+  controls,
 }: {
   view: DeviceView;
   display: CardDisplay;
   /**
-   * The page-wide lock — see `readOnly` in `fleetSettings`.
+   * The page-wide setting — see `controls` in `fleetSettings`.
    *
-   * Passed through to both halves rather than acted on here, because there is
-   * nothing for this component to do with it: every write it can issue starts
-   * at a control below, and a control that is off cannot be clicked. Adding a
-   * second refusal in `run` would make "is this card writable?" a question
-   * with two answers, and the day they disagree the visible one is wrong.
+   * Two of its three states are passed through rather than acted on here,
+   * because there is nothing for this component to do with them: every write
+   * it can issue starts at a control below, and a control that is off cannot
+   * be clicked. Adding a second refusal in `run` would make "is this card
+   * writable?" a question with two answers, and the day they disagree the
+   * visible one is wrong.
+   *
+   * The third, `hidden`, *is* decided here, because what it asks for is a
+   * card with no recording controls on it and that is a question about the
+   * slot rather than about its contents: `DeviceCard` stacks its children
+   * with a gap, so a `RecordingControl` that rendered nothing would still
+   * leave the space where it used to be.
    */
-  readOnly: boolean;
+  controls: ControlsMode;
 }) {
   const target = useMemo<WriteTarget>(
     () => ({kind: view.kind, id: view.id}),
@@ -135,21 +143,32 @@ export function LiveDeviceCard({
     <DeviceCard
       view={view}
       display={display}
+      // Nothing, and not a disabled something. The notes this would have
+      // carried go with it: a verb still in flight when the controls are
+      // hidden mid-write is finished and its answer dropped, which is the
+      // price of a setting that can be changed in the middle of anything.
       actions={
-        <RecordingControl
-          status={status}
-          pending={inFlight}
-          awaiting={awaiting}
-          error={command.error}
-          readOnly={readOnly}
-          onCommand={run}
-        />
+        controls === "hidden" ? undefined : (
+          <RecordingControl
+            status={status}
+            pending={inFlight}
+            awaiting={awaiting}
+            error={command.error}
+            readOnly={controls === "locked"}
+            onCommand={run}
+          />
+        )
       }
+      // Kept in every state: hiding the controls empties the panel of
+      // buttons, not of values. The Details fold carries the same registers
+      // among forty other fields, and only the ones some device has answered
+      // for; this is where the next take's metadata reads as one list. See
+      // `RegistersPanel`.
       registers={
         <RegistersPanel
           drafts={drafts}
           frozen={sealsMetadata(status)}
-          readOnly={readOnly}
+          controls={controls}
         />
       }
     />
