@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/metzenseifner/sismatic/compare/v0.7.5...v0.8.0) - 2026-10-23
+
+### Added
+
+- *(core)* publisher and language now queriable
+
 ## [0.7.0](https://github.com/metzenseifner/sismatic/compare/v0.6.1...v0.7.0) - 2026-09-17
 
 ### Added
