@@ -105,3 +105,48 @@ fn settable_echo(reg: &str) -> ParseFn {
         Value::Text,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::instructions::query::Query;
+    use std::str::FromStr;
+
+    /// Every settable register reads back under the same name.
+    ///
+    /// `LANGUAGE` and `PUBLISHER` were both missing from [`Query`] while every
+    /// other register was present, so the panel that writes them had no report
+    /// to compare a draft against: the two rows sat on "Sent" forever and Clear
+    /// could not queue the write that would empty them. Nothing about the wire
+    /// justified it — `M7` and `M8` answer a read exactly as their neighbours
+    /// `M6` and `M9` do. The reverse direction is deliberately *not* asserted:
+    /// `DATE` and `IDENTIFIER` are read-only and have no register at all.
+    #[test]
+    fn every_register_names_a_query_of_the_same_name() {
+        for &register in Register::ALL {
+            assert!(
+                Query::from_str(register.name()).is_ok(),
+                "{register} has no matching query"
+            );
+        }
+    }
+
+    /// The read and the write of one register must address the same `M<n>`.
+    ///
+    /// The failure this rules out is a *swap*, not a syntax error: `M8` where
+    /// `M7` was meant is a valid address for a real register, so it encodes
+    /// cleanly, parses cleanly, and reports the publisher as the language.
+    #[test]
+    fn a_register_and_its_query_address_the_same_index() {
+        for &register in Register::ALL {
+            let query = Query::from_str(register.name()).expect("register has a query");
+            let addr = format!("{ESC}M{}{RCDR}{CR}", register.index());
+            assert_eq!(
+                query.instruction().payload,
+                addr,
+                "{register} is written at M{} but read elsewhere",
+                register.index()
+            );
+        }
+    }
+}
