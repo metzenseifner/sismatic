@@ -19,7 +19,7 @@ export default function App() {
   // parameterises the queries, the columns go to the grid, and the filters sit
   // between the two. Restored from the last visit — see `useFleetSettings`.
   const [settings, setSettings] = useFleetSettings();
-  const {filters, display, pollMs, columns} = settings;
+  const {filters, display, pollMs, columns, controls} = settings;
 
   // The one line of theming outside `styles/`. Nothing below this point —
   // no card, no badge, no fold — is aware that modes exist.
@@ -120,6 +120,7 @@ export default function App() {
                 key={`${view.kind}:${view.id}`}
                 view={view}
                 display={display}
+                controls={controls}
               />
             ))}
           </Grid>

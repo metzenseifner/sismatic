@@ -11,6 +11,28 @@
   border-radius: var(--radius, 0.75rem);
 }
 
+/* Unlocked. The border rather than a fill, and the border alone, because this
+   state has to be unmistakable from across a room without the bar becoming the
+   loudest thing on a page whose job is to show recording badges.
+
+   The extra pixel comes back out of the padding. `box-sizing: border-box` and
+   a block-level bar mean its own edges do not move either way — the grid below
+   is measured against them in `layout.spec.ts` — but its *contents* would jog
+   sideways on every arm and disarm, which is a flinch on a bar somebody is
+   reading at the time. */
+.bar[data-armed] {
+  padding: calc(var(--space-sm, 0.5rem) - 1px) calc(var(--space-md, 1rem) - 1px);
+  border: 2px solid var(--color-warn);
+}
+
+/* The written half of the same signal, under the row that caused it. */
+.armed {
+  margin: var(--space-sm, 0.5rem) 0 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-warn);
+}
+
 .row {
   display: flex;
   flex-wrap: wrap;
@@ -49,6 +71,14 @@
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: calc(var(--radius, 0.75rem) / 2);
+}
+
+/* The armed control, picked out of a row of identical selects. It repeats what
+   the border already says, at the one place a pointer is about to be. */
+.field[data-armed] {
+  font-weight: 600;
+  color: var(--color-warn);
+  border-color: var(--color-warn);
 }
 
 .seconds {

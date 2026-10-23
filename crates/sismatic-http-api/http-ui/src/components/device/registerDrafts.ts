@@ -48,6 +48,17 @@ export type RegisterRow = {
   description: string;
   /** What is in the box. */
   draft: string;
+  /**
+   * What every device behind the card is taken to hold, as a box can hold it:
+   * `assumedText`, with the unknowable rendered as an empty box.
+   *
+   * The same thing as `draft` until somebody types, which is why it is worth
+   * stating that it is a separate field: it is what a *read-only* rendering
+   * shows in place of the draft, so a page that has had its controls taken
+   * away cannot sit there displaying a local edit where a value belongs. See
+   * `RegistersPanel`.
+   */
+  fleet: string;
   /** What the devices report, rendered: a value, "Differs across devices", "Not read yet". */
   current: string;
   /** Edited, and the fleet has not been told yet. */
@@ -126,6 +137,7 @@ export function useRegisterDrafts(
           label: labelOf(field),
           description: register.description,
           draft,
+          fleet: assumed ?? "",
           current: state?.display ?? "Not read yet",
           unsaved: changed && !matchesFleet && draft !== submitted[field],
           sent: changed && !matchesFleet && draft === submitted[field],

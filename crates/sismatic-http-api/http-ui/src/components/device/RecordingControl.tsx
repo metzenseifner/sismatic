@@ -12,6 +12,11 @@ type RecordingControlProps = {
   /** True while a verb has been accepted and no device has reported it back. */
   awaiting: boolean;
   error: ApiCallError | null;
+  /**
+   * True in the locked state of the page-wide `controls` setting — see
+   * `fleetSettings`. The hidden state never gets this far.
+   */
+  readOnly: boolean;
   onCommand: (verb: RecordingVerb) => void;
 };
 
@@ -23,12 +28,25 @@ type RecordingControlProps = {
  * either behind the other is not a thing an operator can live with mid-lecture.
  * So the state picks the primary action and, where there is a second one worth
  * having, offers it beside it.
+ *
+ * Under the page-wide lock the same buttons are drawn and turned off, rather
+ * than taken away. Two reasons, and the first is the one that decided it: a
+ * monitoring page is read by someone whose eyes are going down a column of
+ * cards, and forty cards changing height the moment the lock is lifted is the
+ * worst possible time to move a Stop button. The second is that the buttons
+ * are themselves a reading of the state — "Stop" offered means this card
+ * believes it is recording — which is worth keeping legible while locked.
+ *
+ * Both reasons are about a page somebody is going to unlock. The third state,
+ * `hidden`, is for one nobody will, and it never reaches this component at
+ * all: `LiveDeviceCard` leaves the slot empty and the card closes over it.
  */
 export function RecordingControl({
   status,
   pending,
   awaiting,
   error,
+  readOnly,
   onCommand,
 }: RecordingControlProps) {
   const actions = actionsFor(status);
@@ -41,13 +59,26 @@ export function RecordingControl({
             key={action.verb}
             type="button"
             variant={index === 0 ? "primary" : "secondary"}
-            disabled={pending !== null}
+            disabled={readOnly || pending !== null}
             onClick={() => onCommand(action.verb)}
           >
             {pending === action.verb ? action.busyLabel : action.label}
           </Button>
         ))}
       </div>
+
+      {/* Said on the card and not only in the bar, because the bar is off the
+          top of the screen by the time anyone has scrolled to the card they
+          care about — and a greyed-out Stop with no stated reason is exactly
+          the button that looks broken.
+
+          Kept to one line at a card's width, which is what settled the
+          wording: this repeats under every card on the page, and the version
+          that wrapped turned a forty-card fleet into forty two-line
+          apologies. */}
+      {readOnly && (
+        <p className={styles.note}>Read-only — set Controls above to Unlocked.</p>
+      )}
 
       {awaiting && pending === null && (
         <p className={styles.note}>

@@ -57,6 +57,36 @@ export const PLACEMENT_CHOICES: readonly Placement[] = [
 /** Column caps offered. Each is a maximum, never a promise — see `Grid`. */
 export const COLUMN_CHOICES: readonly Columns[] = ["auto", 1, 2, 3, 4, 5, 6];
 
+/**
+ * What the cards do with the controls that can reach a device.
+ *
+ * Three states rather than a flag, because "do not write" and "do not show"
+ * are different requests. An operator watching a recording wants the buttons
+ * inert and still legible — a greyed-out Stop is how a card says it believes
+ * it is recording, and forty cards changing height when the lock lifts is a
+ * page that moves under someone who is reading it. A page left on a foyer
+ * screen, or opened by a room that has no business starting anything, wants
+ * them gone: a disabled button is still a button-shaped invitation to try it,
+ * and on that page nothing is ever going to be clicked on purpose.
+ *
+ * `hidden` is no more a permission than `locked` is — see `controls` in
+ * `FleetSettings`.
+ */
+export type ControlsMode = "hidden" | "locked" | "unlocked";
+
+/**
+ * Offered least-capable first, so the menu reads as a ramp and the one state
+ * that can stop a recording sits at the far end of it.
+ *
+ * The same list the loader accepts, for the reason given at the top of this
+ * file.
+ */
+export const CONTROLS_CHOICES: readonly ControlsMode[] = [
+  "hidden",
+  "locked",
+  "unlocked",
+];
+
 /** Everything the bar controls, in one restorable piece. */
 export type FleetSettings = {
   filters: Filters;
@@ -70,6 +100,23 @@ export type FleetSettings = {
    * stylesheet takes it from there. See `styles/theme.ts`.
    */
   theme: ThemeMode;
+  /**
+   * What this browser may do to the fleet, and how much of the doing it draws.
+   *
+   * The odd one out among these fields: the rest decide what the page *shows*,
+   * and this decides what it is able to *do*. It is here anyway because it is
+   * a per-browser preference that has to survive a reload like the others, and
+   * because the bar is where it is switched.
+   *
+   * It is not a permission. Nothing here can stop a write — the API is open to
+   * anything that can reach it, and this value lives in `localStorage` where
+   * its owner can edit it; `hidden` takes the buttons off this page and off no
+   * other. What it stops is a *misclick*: the page an operator keeps open all
+   * afternoon to watch a recording is one stray tap away from stopping it, and
+   * the Details and Registers folds on every card are reasons to be clicking
+   * around in there while it runs.
+   */
+  controls: ControlsMode;
 };
 
 export const DEFAULT_SETTINGS: FleetSettings = {
@@ -78,6 +125,11 @@ export const DEFAULT_SETTINGS: FleetSettings = {
   pollMs: DEFAULT_POLL_MS,
   columns: "auto",
   theme: DEFAULT_THEME,
+  // Locked, and deliberately not hidden. Watching the fleet is what this page
+  // is opened for and sending a verb to it is the rarer, deliberate thing, so
+  // that is the one that asks first — but a first visit with no controls on it
+  // at all would hide them from the one person certain to be looking for them.
+  controls: "locked",
 };
 
 /**
@@ -142,6 +194,18 @@ export function loadSettings(): FleetSettings {
       ? (stored.columns as Columns)
       : DEFAULT_SETTINGS.columns,
     theme: oneOf(THEME_CHOICES, stored.theme, DEFAULT_THEME),
+    // Anything that is not one of the three reads as locked: a blob written
+    // before this field existed, a truncated one, a hand-edited `"no"`, or the
+    // boolean this field replaced before either of them shipped. The ways of
+    // being wrong here are not comparable — a locked page costs a click, a
+    // hidden one costs a look at the bar, and an unlocked one costs a take —
+    // so a value this build cannot read falls back to the careful state and
+    // not to the nearest thing it might have meant.
+    controls: oneOf(
+      CONTROLS_CHOICES,
+      stored.controls,
+      DEFAULT_SETTINGS.controls,
+    ),
   };
 }
 
@@ -160,6 +224,7 @@ export function saveSettings(settings: FleetSettings): void {
       pollMs: settings.pollMs,
       columns: settings.columns,
       theme: settings.theme,
+      controls: settings.controls,
     }),
   );
 }

@@ -29,6 +29,13 @@
  * background is too light to put white text on — so they are separate roles
  * and happen to coincide in light mode. `--color-recording` and
  * `--color-alert` are the same story in red.
+ *
+ * `--color-warn` and `--color-paused` hold the same amber in both modes today
+ * and are still two roles, because they answer to different things: one is a
+ * recording that is paused, the other is this browser having been armed to
+ * write to the fleet. Folding them together would mean a palette that wanted
+ * a different amber for a paused badge could not have one without also
+ * recoloring the unlocked control bar.
  */
 
 :root {
@@ -71,6 +78,7 @@
   --light-alert: #dc2626;
   --light-paused: #92400e;
   --light-paused-bg: #fef3c7;
+  --light-warn: #92400e;
 
   /* Not pure black: a near-black lets the card surfaces lift off the page
      instead of being outlined against a hole, and it is easier to read a wall
@@ -91,6 +99,7 @@
   --dark-alert: #fca5a5;
   --dark-paused: #fcd34d;
   --dark-paused-bg: #422006;
+  --dark-warn: #fcd34d;
 }
 
 /* ── Light, and what the page is until something says otherwise ─────── */
@@ -116,6 +125,7 @@
   --color-alert: var(--light-alert);
   --color-paused: var(--light-paused);
   --color-paused-bg: var(--light-paused-bg);
+  --color-warn: var(--light-warn);
 }
 
 /* ── Dark ───────────────────────────────────────────────────────────── */
@@ -156,6 +166,7 @@
     --color-alert: var(--dark-alert);
     --color-paused: var(--dark-paused);
     --color-paused-bg: var(--dark-paused-bg);
+    --color-warn: var(--dark-warn);
   }
 }
 
@@ -175,4 +186,5 @@
   --color-alert: var(--dark-alert);
   --color-paused: var(--dark-paused);
   --color-paused-bg: var(--dark-paused-bg);
+  --color-warn: var(--dark-warn);
 }
