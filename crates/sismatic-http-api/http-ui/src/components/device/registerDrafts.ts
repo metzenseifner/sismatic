@@ -66,11 +66,10 @@ export type RegisterRow = {
   /**
    * Submitted and accepted; no device has reported it back yet.
    *
-   * Permanent for the handful of registers the device accepts but will not
-   * answer for — `LANGUAGE` and `PUBLISHER` are writable and not queryable —
-   * because for those there is no report that could ever arrive. "Sent" is
-   * therefore the strongest claim this panel can make about them, which is
-   * also the most it should.
+   * Transient for every register, now that each one the catalog offers a write
+   * for is also readable: the next sync either reports the value back and the
+   * row settles, or it does not and the row keeps saying "Sent", which is then
+   * a fact about the device rather than about the protocol.
    */
   sent: boolean;
   /** Whether emptying this box would change anything. */
@@ -226,11 +225,13 @@ export function useRegisterDrafts(
  * has to count as changing nothing, or Clear would mark a row unsaved for a
  * value the operator never saw and never touched.
  *
- * What it costs is narrow and worth stating. For a register the device accepts
- * but will not answer for — `LANGUAGE` and `PUBLISHER` are writable and not
- * queryable — an empty box is indistinguishable from a value we cannot see, so
- * Clear cannot queue the write that would empty it. Typing something and
- * saving still works; only the clear is unavailable, and only for those.
+ * What it costs is narrow and worth stating. Until a read lands — a device that
+ * has not been polled yet, or one that did not answer — an empty box is
+ * indistinguishable from a value we cannot see, so Clear cannot queue the write
+ * that would empty it. Typing something and saving still works; only the clear
+ * waits on a read. This used to be permanent for `LANGUAGE` and `PUBLISHER`,
+ * which were writable with no query behind them; both now read back like every
+ * other register, so no row is stuck in that state by construction.
  *
  * `null` is kept for the one case where emptiness is positively ruled out: a
  * group whose members hold different values, which is a thing we *know* rather
