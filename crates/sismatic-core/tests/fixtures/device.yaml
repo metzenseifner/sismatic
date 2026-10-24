@@ -1,0 +1,141 @@
+# Initial state of the simulated Extron SMP.
+#
+# Every key is a field name from the instruction catalogs
+# (`Query` ∪ `Register`), matched case- and `-`/`_`-insensitively through the
+# same `FromStr` the client uses. `simulator_config.rs` asserts this file covers
+# the catalog exactly, so adding an instruction fails the build until a value
+# lands here.
+#
+# Values are the device's *wire text* — what it would put on the channel, minus
+# the CR LF terminator. There is no per-field type table; a value is well-formed
+# iff the production parser accepts it, which is what the round-trip test
+# checks. YAML integers and booleans are accepted and normalised
+# (`true` -> "1"), so flags and ports read naturally.
+#
+# This is the starting state only. Register writes and recording commands
+# mutate it at runtime.
+#
+# Check it without starting a server:
+#   cargo run -p sismatic-core --features simulator --bin simulated-device -- --check-config
+
+username: admin
+password: extron
+
+# --- license ------------------------------------------------------------
+# What this unit admits to having. Not state: no request changes it, and a
+# field it vetoes is *refused* (a bare `E<code>` line) rather than answered or
+# left silent. The client tells those apart — a refusal feeds
+# `auto_disable_after`, silence feeds `exchange_timeout` — so simulating the
+# difference is the point.
+#
+# `licensed_streams` is the Extron-shaped way to say it: 1 is Archive Channel
+# A, 2 is Archive Channel B (Dual Mode), 3 is Confidence. Naming a subset
+# vetoes every field addressing a stream outside it — `STREAM_2_NAME`,
+# `RTMP_2_URL`, `RTMP_BACKUP_STREAM_2_LIVE_STATE` and the rest — because the
+# index is read out of the field name rather than listed here.
+#
+# This fixture is a fully-loaded unit, so the drift guards check the whole
+# catalog. To rehearse a base unit instead, either edit this or say so on the
+# command line, which overrides the file:
+#
+#   simulated-device --licensed-streams 1
+#
+licensed_streams: [1, 2, 3]
+# Anything else this particular unit refuses, named one field at a time. The
+# device-side mirror of the client's `disabled_fields`.
+unlicensed_fields: []
+# The SIS code a refusal answers with. 13 is "invalid parameter (number is out
+# of range)", which is what an unlicensed stream is on the wire.
+refusal_code: 13
+
+fields:
+  # --- identity, read-only ------------------------------------------------
+  FIRMWARE: "3.06"
+  MODEL_NAME: SMP 351
+  MODEL_DESCRIPTION: Streaming Media Processor
+  PART_NUMBER: 60-1324-01
+  MAC_ADDRESS: 00-05-a6-01-02-03
+  UNIT_NAME: Main Hall SMP
+
+  # --- recording ----------------------------------------------------------
+  # 0 stopped, 1 started, 2 paused. Rewritten by START/STOP/PAUSE at runtime.
+  RUNNING_STATE: 0
+  # Empty list. Populate as `<name:video_loss,level:critical>*<name:...>`.
+  ACTIVE_ALARMS: ""
+
+  # --- network ------------------------------------------------------------
+  TELNET_PORT: 23
+  SSH_PORT: 22023
+  HTTP_PORT: 80
+  HTTPS_PORT: 443
+  SNMP_PORT: 161
+  DHCP_MODE: false
+  TIMEZONE: Europe/Vienna
+  # Tens of seconds: 30 => 300 seconds.
+  PORT_TIMEOUT: 30
+  GLOBAL_PORT_TIMEOUT: 30
+
+  # --- SNMP ---------------------------------------------------------------
+  SNMP_STATE: true
+  SNMP_UNIT_LOCATION: Main Hall, Building A
+  SNMP_UNIT_CONTACT: av-team@example.edu
+  SNMP_PUBLIC_COMMUNITY_STRING: public
+  SNMP_PRIVATE_COMMUNITY_STRING: private
+
+  # --- metadata registers -------------------------------------------------
+  # Read/write: in both catalogs, so one cell serves the write and the read.
+  CONTRIBUTOR: A. Contributor
+  COURSE: PHYS 101
+  COVERAGE: Semester 1
+  DESCRIPTION: Simulated recording for integration tests
+  FORMAT: video/mp4
+  LANGUAGE: en
+  PRESENTER: A. Presenter
+  PUBLISHER: Example University
+  RELATION: ""
+  RIGHTS: CC BY 4.0
+  SOURCE: Main Hall camera
+  SUBJECT: Physics
+  SYSTEMNAME: sim-smp-351
+  TITLE: Lecture 1
+  TYPE: MovingImage
+
+  # Read-only: in `Query` but not `Register`.
+  DATE: 2026-08-11
+  IDENTIFIER: urn:sismatic:sim-001
+
+  # --- streams ------------------------------------------------------------
+  # Read/write: in `Query` and `Setting`, so one cell serves both. Whether this
+  # unit *has* a stream is the license block above, not a value here; these are
+  # what it answers when it does.
+  STREAM_1_NAME: Archive Channel A
+  STREAM_2_NAME: Archive Channel B
+  STREAM_3_NAME: Confidence
+  STREAM_1_STATE: true
+  STREAM_2_STATE: false
+  STREAM_3_STATE: false
+
+  # --- RTMP push targets --------------------------------------------------
+  # Write-only: `Setting` carries these, `Query` does not, because SIS offers no
+  # read of a push URL or of an enable flag. The drift net can only check that
+  # they are *present* — there is no parser to decode them with — which is why
+  # `every_setting_has_a_read_path` names them as a deliberate hole.
+  RTMP_1_URL: rtmp://cdn.example.edu/live/hall-a
+  RTMP_1_BACKUP_URL: rtmp://backup.example.edu/live/hall-a
+  RTMP_2_URL: rtmp://cdn.example.edu/live/hall-b
+  RTMP_2_BACKUP_URL: rtmp://backup.example.edu/live/hall-b
+  RTMP_3_URL: rtmp://cdn.example.edu/live/confidence
+  RTMP_3_BACKUP_URL: rtmp://backup.example.edu/live/confidence
+  RTMP_1_STATE: true
+  RTMP_2_STATE: false
+  RTMP_3_STATE: false
+
+  # Read-only: whether a push is actually on air. Arming a stream is the write
+  # above; what puts it on air is a scheduled session, which this protocol does
+  # not reach — so live state is a read with no write to pair with.
+  RTMP_STREAM_1_LIVE_STATE: true
+  RTMP_STREAM_2_LIVE_STATE: false
+  RTMP_STREAM_3_LIVE_STATE: false
+  RTMP_BACKUP_STREAM_1_LIVE_STATE: false
+  RTMP_BACKUP_STREAM_2_LIVE_STATE: false
+  RTMP_BACKUP_STREAM_3_LIVE_STATE: false
