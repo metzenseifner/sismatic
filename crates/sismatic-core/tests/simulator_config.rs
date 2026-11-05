@@ -10,22 +10,19 @@ use sismatic_core::protocol::instructions::register::Register;
 use sismatic_core::protocol::instructions::setting::Setting;
 use sismatic_core::simulator::{DeviceState, Overrides, catalog_fields};
 
-/// The config is pulled in at compile time, so a rename or deletion is a build
-/// failure rather than a runtime "file not found". It lives under
-/// `tests/fixtures/` because `flake.nix` filters the build source down to cargo
-/// files plus `python/` and `tests/fixtures/` — a `.yaml` anywhere else would
-/// be dropped and these tests would not find it inside the nix sandbox.
+/// Pulled in at compile time, so a rename or deletion is a build failure rather
+/// than a runtime "file not found". It must live under `tests/fixtures/`:
+/// `flake.nix` filters the build source to cargo files plus `python/` and
+/// `tests/fixtures/`, so a `.yaml` elsewhere is dropped inside the nix sandbox.
 const CONFIG: &str = include_str!("fixtures/device.yaml");
 
 fn load() -> DeviceState {
     DeviceState::from_yaml_str(CONFIG).expect("the checked-in config parses")
 }
 
-/// The headline guard: the config and the catalog agree exactly, in both
-/// directions, and every value decodes through the production parser.
-///
-/// Adding a `Query`, `Register`, or alias without a config entry fails here and
-/// names the field. So does a typo'd key, and so does a value whose wire text
+/// The headline guard: config and catalog agree in both directions, and every
+/// value decodes through the production parser. A new catalog variant with no
+/// config entry fails here and names the field, as does a typo'd key or a value
 /// the real parser rejects.
 #[test]
 fn the_checked_in_config_has_no_drift() {
@@ -58,16 +55,16 @@ fn config_keys_equal_the_catalog_field_set() {
 }
 
 /// The round-trip that makes the simulator trustworthy: for every query, the
-/// bytes the simulator would put on the wire are fed to *that query's own
-/// production parser*. If a parser changes shape — a verb tag appears, a
-/// terminator changes — this fails immediately instead of surfacing later as a
-/// command timeout against a simulator that quietly speaks a dialect.
+/// bytes it would put on the wire are fed to *that query's own production
+/// parser*. A parser that changes shape — a verb tag appears, a terminator
+/// changes — fails here rather than later as a command timeout against a
+/// simulator that quietly speaks a dialect.
 ///
-/// It does not assert the decoded value equals the config text for non-text
-/// fields: `Display` is a human-facing projection, not the wire encoding
-/// (`Value::State(Started)` prints "started", not "1"). Decodability is the
-/// property that matters here; `check()` additionally pins text fields, and
-/// `simulated_ssh.rs` pins semantics end to end.
+/// Decodability only. The decoded value is deliberately not compared to the
+/// config text for non-text fields, because `Display` is a human-facing
+/// projection rather than the wire encoding (`Value::State(Started)` prints
+/// "started", not "1"); `check()` pins text fields and `simulated_ssh.rs` pins
+/// semantics end to end.
 #[test]
 fn every_query_round_trips_through_its_production_parser() {
     use sismatic_core::protocol::Step;
@@ -88,11 +85,11 @@ fn every_query_round_trips_through_its_production_parser() {
 /// Every settable register must have a read path: `names(Register)` ⊆
 /// `names(Query)`.
 ///
-/// This is what makes the coverage guarantee total. A write-only register would
-/// be a field `check()` can only confirm the *presence* of — it could never
-/// decode it, and `set_then_get_round_trips_every_register` could never observe
-/// it — so it would be a silent hole in the drift net. If this fails, either
-/// add the matching `Query` variant or accept the hole deliberately.
+/// A write-only register would be a field `check()` can only confirm the
+/// *presence* of — never decode, and never observe through
+/// `set_then_get_round_trips_every_register` — so it would be a silent hole in
+/// the drift net. If this fails, either add the matching `Query` variant or
+/// accept the hole deliberately.
 #[test]
 fn every_settable_register_has_a_read_path() {
     let gettable: BTreeSet<&str> = Query::ALL.iter().map(|q| q.name()).collect();
@@ -113,25 +110,21 @@ fn every_settable_register_has_a_read_path() {
 }
 
 /// The same question for the other write catalog, which answers differently:
-/// `names(Setting) \ names(Query)` is *not* empty, and the exact set it leaves
-/// is pinned here.
+/// `names(Setting) \ names(Query)` is *not* empty, so the set it leaves is
+/// pinned instead.
 ///
-/// `every_settable_register_has_a_read_path` can demand the difference be empty
-/// because metadata is symmetric — every register pairs with a query. Settings
-/// are not: SIS offers no read of an RTMP push URL and no read of a push enable
-/// flag, only of whether the push is *live*, which is a different field with no
-/// write (see the closing note in `setting.rs`). So nine settings can be
-/// written and never read back, and that is the protocol's shape rather than an
-/// oversight to fix.
+/// Metadata is symmetric — every register pairs with a query — but settings
+/// are not: SIS offers no read of an RTMP push URL or of a push enable flag,
+/// only of whether the push is *live*, which is a different field with no write
+/// (see the closing note in `setting.rs`). So nine settings can be written and
+/// never read back, and that is the protocol's shape rather than an oversight.
 ///
-/// Pinning the set rather than asserting it empty is what keeps the guard
-/// useful. The hole costs real coverage — the simulator cannot validate a write
-/// to these against a read parser, `check()` can only confirm they are present,
-/// and `set_then_get_round_trips_every_setting` can see the echo but not the
-/// stored value — so a *new* write-only setting must be a deliberate decision
-/// and not something that lands quietly. If this fails because a setting was
-/// added: add the matching `Query` variant, or add it here and accept that it
-/// is checked for presence alone.
+/// The hole costs real coverage: a write to these cannot be validated against a
+/// read parser, `check()` can only confirm presence, and
+/// `set_then_get_round_trips_every_setting` sees the echo but not the stored
+/// value. Pinning the set is what keeps a *new* write-only setting from landing
+/// quietly. If this fails, add the matching `Query` variant — or add the name
+/// here and accept that it is checked for presence alone.
 #[test]
 fn write_only_settings_are_exactly_the_attested_rtmp_hole() {
     let gettable: BTreeSet<&str> = Query::ALL.iter().map(|q| q.name()).collect();
@@ -159,10 +152,10 @@ fn write_only_settings_are_exactly_the_attested_rtmp_hole() {
 }
 
 /// The two write catalogs name disjoint fields, which is what lets the write
-/// path route by name: `PUT /settings/TITLE` is refused as "that is metadata"
-/// by looking `TITLE` up in `Register`, and nothing else. An overlap would make
-/// that lookup ambiguous and would put one storage cell under two write rules —
-/// one of which applies a recording freeze and one of which does not.
+/// path route by name: `PUT /settings/TITLE` is refused as metadata by looking
+/// `TITLE` up in `Register` and nothing else. An overlap would make that lookup
+/// ambiguous and put one cell under two write rules — one applying a recording
+/// freeze, one not.
 #[test]
 fn no_field_is_both_a_metadata_register_and_a_device_setting() {
     let registers: BTreeSet<&str> = Register::ALL.iter().map(|r| r.name()).collect();
@@ -178,8 +171,8 @@ fn no_field_is_both_a_metadata_register_and_a_device_setting() {
 // ---- layered configuration ---------------------------------------------
 //
 // The binary resolves three layers — built-in config, `--config` file, then
-// flags — and the merge lives in `from_yaml_str_with` so these tests exercise
-// the same precedence an operator gets from the command line.
+// flags — and the merge lives in `from_yaml_str_with`, so these tests exercise
+// the precedence an operator gets from the command line.
 
 /// An override beats the file, which is the whole precedence rule.
 #[test]
@@ -217,9 +210,9 @@ fn an_absent_override_leaves_the_file_alone() {
     );
 }
 
-/// A field override seeds one cell and leaves the other sixty alone — the
-/// `--field NAME=VALUE` flag, which is the quickest way to put the device in a
-/// particular state without editing a file.
+/// A field override seeds one cell and leaves the rest alone — the
+/// `--field NAME=VALUE` flag, the quickest way to put the device in a given
+/// state without editing a file.
 #[test]
 fn a_field_override_replaces_only_that_field() {
     let state = DeviceState::from_yaml_str_with(
@@ -240,10 +233,10 @@ fn a_field_override_replaces_only_that_field() {
     assert!(state.check().is_empty(), "{:?}", state.check());
 }
 
-/// The license override replaces the file's stream set rather than merging with
-/// it. Merging would make a narrower command line impossible to express: a
-/// fully-licensed file plus `--licensed-streams 1` has to mean "this unit has
-/// one stream", not "the file's three, and also one".
+/// The license override replaces the file's stream set rather than merging.
+/// Merging would make a narrower command line inexpressible: a fully-licensed
+/// file plus `--licensed-streams 1` has to mean "this unit has one stream", not
+/// "the file's three, and also one".
 #[test]
 fn a_license_override_replaces_rather_than_merges() {
     let state = DeviceState::from_yaml_str_with(
@@ -260,9 +253,9 @@ fn a_license_override_replaces_rather_than_merges() {
     assert!(!state.license().refuses("STREAM_1_NAME"));
 }
 
-/// A narrowed license is still a config with no drift: the fields it refuses
-/// stop being required, and nothing else about the file changes. This is what
-/// makes `--licensed-streams 1 --check-config` meaningful.
+/// A narrowed license is still a config with no drift — the fields it refuses
+/// stop being required and nothing else changes — which is what makes
+/// `--licensed-streams 1 --check-config` meaningful.
 #[test]
 fn a_base_unit_config_has_no_drift_either() {
     let state = DeviceState::from_yaml_str_with(

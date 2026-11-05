@@ -20,20 +20,13 @@
 //! ```
 //!
 //! The server logic is [`sismatic_core::simulator`], shared verbatim with the
-//! integration tests, so anything this binary answers is what the tests
-//! exercise.
-//!
-//! # Where the configuration comes from
-//!
-//! Three layers, each beating the one before it: the built-in config, then a
-//! `--config` file, then the individual flags. The merge itself lives in
-//! [`DeviceState::from_yaml_str_with`] rather than here, so the integration
-//! tests exercise the same precedence an operator gets.
+//! integration tests, so what this binary answers is what the tests exercise —
+//! including the three config layers, whose merge lives in
+//! [`DeviceState::from_yaml_str_with`] rather than here.
 //!
 //! The built-in layer is the checked-in fixture, compiled in rather than read
-//! from a path relative to the workspace root. That is what lets the binary run
-//! from any directory, and it means `--check-config` with no arguments checks
-//! something real.
+//! from a path relative to the workspace root: that is what lets the binary run
+//! from any directory and makes a bare `--check-config` check something real.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -46,10 +39,9 @@ use sismatic_core::simulator::{
 };
 use tracing_subscriber::EnvFilter;
 
-/// The config served when `--config` is not given.
-///
-/// The same bytes `simulator_config.rs` runs its drift guards over, so the
-/// device this binary serves by default is the device the test suite pins.
+/// The config served when `--config` is not given — the same bytes
+/// `simulator_config.rs` runs its drift guards over, so the default device is
+/// the one the test suite pins.
 const BUILT_IN_CONFIG: &str = include_str!("../../tests/fixtures/device.yaml");
 
 #[derive(Parser, Debug)]
@@ -101,8 +93,8 @@ struct Args {
     /// one, `none` for a unit with no streams at all.
     ///
     /// Every field addressing a stream outside the list is refused with a SIS
-    /// error rather than answered, which is what an Extron SMP does with an
-    /// unlicensed stream. Replaces the config's list rather than adding to it.
+    /// error rather than answered, as an Extron SMP does. Replaces the config's
+    /// list rather than adding to it.
     #[arg(long, value_name = "LIST", value_parser = parse_streams)]
     licensed_streams: Option<BTreeSet<u8>>,
 
@@ -141,8 +133,8 @@ fn parse_streams(raw: &str) -> Result<BTreeSet<u8>, String> {
         .collect()
 }
 
-/// Resolve a field name through the catalog, so a typo is a parse error with
-/// the misspelling in it rather than a flag that silently vetoes nothing.
+/// Resolve a field name through the catalog, so a typo is a parse error naming
+/// the misspelling rather than a flag that silently vetoes nothing.
 fn parse_field_name(raw: &str) -> Result<String, String> {
     canonical_name(raw).ok_or_else(|| format!("`{raw}` is not a field in the instruction catalog"))
 }
@@ -157,7 +149,7 @@ fn parse_field_assignment(raw: &str) -> Result<(String, String), String> {
 
 impl Args {
     /// Where the config text came from, for error messages and `--check-config`
-    /// output. The built-in config has no path, so it is named.
+    /// output. The built-in config has no path, so it gets a name.
     fn config_label(&self) -> String {
         match &self.config {
             Some(path) => path.display().to_string(),
@@ -170,10 +162,10 @@ impl Args {
             username: self.username.clone(),
             password: self.password.clone(),
             licensed_streams: self.licensed_streams.clone(),
-            // An empty `--unlicensed-field` list means the flag was not given,
-            // so the config's list stands. Clearing a config's list is
-            // `--unlicensed-field` with nothing to say, which no operator means
-            // — and a unit that refuses nothing is `--licensed-streams all`.
+            // An empty list means the flag was not given, so the config's list
+            // stands. There is deliberately no way to clear the config's list
+            // from the command line; a unit that refuses nothing is
+            // `--licensed-streams all`.
             unlicensed_fields: (!self.unlicensed_field.is_empty())
                 .then(|| self.unlicensed_field.iter().cloned().collect()),
             refusal_code: self.refusal_code,
@@ -192,9 +184,9 @@ impl Args {
 
 /// What the three layers resolved to, printed by `--print-config`.
 ///
-/// The password is printed rather than masked: this is a device that exists to
-/// be connected to, and the credential it will accept is the thing an operator
-/// came here to find out.
+/// The password is printed rather than masked: this device exists to be
+/// connected to, and the credential it accepts is what an operator came here to
+/// find out.
 fn print_resolved(args: &Args, state: &DeviceState) {
     let license = state.license();
     let credentials = state.credentials();
@@ -229,9 +221,8 @@ fn print_resolved(args: &Args, state: &DeviceState) {
 async fn main() -> ExitCode {
     let args = Args::parse();
 
-    // Built from the CLI string, which `RUST_LOG` also feeds. Falls back to
-    // "info" rather than failing: a mistyped filter should not stop the device
-    // from starting.
+    // `RUST_LOG` feeds the same CLI string. A mistyped filter falls back to
+    // "info" rather than stopping the device from starting.
     let filter = EnvFilter::try_new(&args.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
@@ -275,7 +266,7 @@ async fn main() -> ExitCode {
         };
     }
 
-    // Serve anyway when there are issues: a missing field just goes unanswered
+    // Issues are reported but not fatal: a missing field just goes unanswered
     // (the client sees a command timeout), which is more useful to debug
     // against than a device that refuses to start.
     let device = match bind(

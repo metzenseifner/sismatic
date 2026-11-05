@@ -1,15 +1,12 @@
 //! Decoding inbound SIS requests back into catalog instructions.
 //!
-//! The simulator never spells a wire payload of its own. Every byte pattern it
-//! recognises is produced by the same `instruction()` constructors the client
-//! encodes with, so a change to a payload in
+//! Every byte pattern recognised here is produced by the same `instruction()`
+//! constructors the client encodes with, so a payload change in
 //! [`query`](crate::protocol::instructions::query),
 //! [`commands`](crate::protocol::instructions::commands),
 //! [`register`](crate::protocol::instructions::register) or
-//! [`setting`](crate::protocol::instructions::setting) moves the client and
-//! the simulator together by construction. There is no table here to forget to
-//! update — only [`Query::ALL`], [`Command::ALL`], [`Register::ALL`] and
-//! [`Setting::ALL`].
+//! [`setting`](crate::protocol::instructions::setting) moves both sides at
+//! once. There is no table to forget to update — only `ALL` and the encoders.
 
 use std::sync::LazyLock;
 
@@ -30,25 +27,23 @@ pub enum Request {
     Do(Command),
     /// Write `value` into a built-in device setting.
     ///
-    /// Distinct from [`Set`](Request::Set) because the protocol keeps them
-    /// distinct: a register write is addressed to the recorder subsystem
-    /// (`RCDR`, an `M<i>` address, a `*` before the value), while a setting
-    /// write is addressed to the device itself and carries none of those. They
-    /// also differ in policy — the write path applies a recording freeze to
-    /// metadata and not to settings — so collapsing them here would make the
-    /// simulator unable to tell a caller which one it actually received.
+    /// Distinct from [`Set`](Request::Set) because the protocol is too: a
+    /// register write is addressed to the recorder subsystem (`RCDR`, an `M<i>`
+    /// address, a `*` before the value) and a setting write to the device
+    /// itself, with none of those. They also differ in policy — metadata writes
+    /// take a recording freeze, settings do not.
     Configure(Setting, String),
 }
 
 impl Request {
-    /// The canonical field name this request addresses, or `None` for a
-    /// request that addresses no field.
+    /// The canonical field name this request addresses, or `None` for one that
+    /// addresses no field.
     ///
     /// Recording commands are the `None` arm: `START` is not a field, so it has
-    /// no license to check and no cell to look up. The three field-bearing
-    /// variants all answer with the canonical name, which is what makes one
-    /// license check cover reads and writes alike — a register, a setting and a
-    /// query of the same field give the same string.
+    /// no license to check and no cell to look up. The other three answer with
+    /// the canonical name, which is what makes one license check cover reads
+    /// and writes alike — a query, a register and a setting of the same field
+    /// all give the same string.
     pub fn field(&self) -> Option<&'static str> {
         match self {
             Request::Get(q) => Some(q.name()),
@@ -80,7 +75,7 @@ static DOES: LazyLock<Vec<(String, Command)>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Every register's write *prefix*. A write embeds its value
+/// Every register's write *prefix*: a write embeds its value
 /// (`ESC M<i> * <value> RCDR CR`), so these match by prefix, not equality.
 static SETS: LazyLock<Vec<(String, Register)>> = LazyLock::new(|| {
     Register::ALL
@@ -89,10 +84,9 @@ static SETS: LazyLock<Vec<(String, Register)>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Every setting's write *frame*: the fixed bytes before the value and the
-/// fixed bytes after it. A setting embeds its value in the middle
-/// (`ESC <value> <verb> CR`), so — unlike a register — a prefix alone cannot
-/// identify one.
+/// Every setting's write *frame*: the fixed bytes either side of the value.
+/// A setting puts its value in the middle (`ESC <value> <verb> CR`), so —
+/// unlike a register — a prefix alone cannot identify one.
 static CONFIGURES: LazyLock<Vec<(String, String, Setting)>> = LazyLock::new(|| {
     Setting::ALL
         .iter()
@@ -103,11 +97,11 @@ static CONFIGURES: LazyLock<Vec<(String, String, Setting)>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The fixed head of a register write, taken from the catalog's own encoder
-/// rather than re-spelled here: `Register::instruction("")` yields
-/// `ESC M<i> * RCDR CR`, and everything before the trailing `RCDR CR` is the
-/// prefix. Re-formatting `M{index}` locally would be a second place that has to
-/// stay in step with [`Register::index`].
+/// The fixed head of a register write, recovered from the catalog's own
+/// encoder: `Register::instruction("")` yields `ESC M<i> * RCDR CR`, and
+/// everything before the trailing `RCDR CR` is the prefix. Re-formatting
+/// `M{index}` here would be a second place to keep in step with
+/// [`Register::index`].
 fn write_prefix(r: Register) -> String {
     let payload = r.instruction("").payload;
     payload
@@ -117,36 +111,34 @@ fn write_prefix(r: Register) -> String {
 }
 
 /// The head and tail of a setting write, taken from the catalog's own
-/// [`Setting::write_frame`] rather than inferred here, for the same reason
-/// [`write_prefix`] reads its prefix out of a real payload: the framing stays
-/// in `setting.rs` and this file cannot drift from it.
+/// [`Setting::write_frame`].
 ///
-/// A register's prefix can be recovered by encoding and stripping, because its
-/// address (`M<i>`) is followed by a `*` that the value can never contain. A
-/// setting's cannot — see the note on `Setting::write_frame` — so the catalog
-/// publishes the frame instead of this module guessing at it.
+/// [`write_prefix`] can recover a register's framing by encoding and stripping,
+/// because the address (`M<i>`) is followed by a `*` the value can never
+/// contain. A setting's cannot be recovered that way — see the note on
+/// `Setting::write_frame` — so the catalog publishes the frame rather than this
+/// module guessing at it.
 fn write_frame(s: Setting) -> (String, String) {
     s.write_frame()
 }
 
-/// Decode one request. Returns `None` for anything outside the catalog, which
-/// the caller answers with silence — the same way a real device ignores a
-/// malformed request and the client sees a command timeout.
+/// Decode one request. `None` for anything outside the catalog, which the
+/// caller answers with silence — as a real device ignores a malformed request
+/// and the client sees a command timeout.
 ///
 /// Assumes the request arrives as a single write, which holds over loopback.
 ///
-/// The `*` delimiter keeps register prefixes unambiguous: `M1` cannot swallow a
-/// write to `M16`, because the byte after `M1` is `6`, not `*`. Settings are
-/// matched by their trailing verb instead, which is unambiguous for the
-/// converse reason — no setting's frame ends the way another's does
-/// (`no_setting_write_frame_ends_like_another`).
+/// Register prefixes stay unambiguous because of the `*`: `M1` cannot swallow a
+/// write to `M16`, since the byte after `M1` is `6`. Settings are matched on
+/// head *and* tail together, a pair no other setting's write fits
+/// (`no_setting_frame_accepts_another_settings_write`).
 ///
 /// # Why queries are tried first
 ///
 /// A setting write with an *empty* value is byte-for-byte the read of the same
 /// field: both are `ESC <verb> CR`. That is the protocol's ambiguity, not this
-/// function's — a real device cannot tell them apart either, and answers with
-/// the field's value. Trying the queries first reproduces that.
+/// function's — real hardware cannot tell them apart either and answers with
+/// the field's value, which is what trying queries first reproduces.
 pub fn classify(request: &str) -> Option<Request> {
     if let Some(&(_, q)) = GETS.iter().find(|(payload, _)| payload == request) {
         return Some(Request::Get(q));
@@ -197,7 +189,7 @@ mod tests {
         }
     }
 
-    /// Also pins the prefix disambiguation: `M1` vs `M10`..`M16` share a stem,
+    /// Also pins the prefix disambiguation: `M1` and `M10`..`M16` share a stem,
     /// and only the `*` keeps a write to one from being read as the other.
     #[test]
     fn every_register_write_classifies_back_with_its_value() {
@@ -212,9 +204,8 @@ mod tests {
     }
 
     /// A value `s` accepts, found by asking the catalog's own encoder rather
-    /// than keeping a shape → value table here, which would be the drift this
-    /// module exists to avoid. No single value works for every shape: a flag
-    /// takes `1` and refuses a URL, a URL takes `rtmp://…` and refuses `1`.
+    /// than keeping a shape → value table here. No single value covers every
+    /// shape: a flag takes `1` and refuses a URL, a URL the reverse.
     fn probe(s: Setting) -> String {
         ["1", "rtmp://cdn.example.edu/live/probe"]
             .into_iter()
@@ -225,9 +216,9 @@ mod tests {
 
     /// Every setting's own write, recovered as itself with its value intact.
     ///
-    /// This is the property that matters, and it subsumes the frame checks
-    /// below: `classify` returns the *first* frame that matches, so every
-    /// setting matching itself means no setting's frame shadows another's.
+    /// The property that matters, and it subsumes the frame check below:
+    /// `classify` returns the *first* frame that matches, so every setting
+    /// matching itself means no setting's frame shadows another's.
     #[test]
     fn every_setting_write_classifies_back_with_its_value() {
         for &s in Setting::ALL {
@@ -241,9 +232,9 @@ mod tests {
         }
     }
 
-    /// A text value long enough to contain the other catalogs' delimiters,
-    /// pinning that the value is recovered whole rather than cut at the first
-    /// thing that looks like framing.
+    /// A value containing the other catalogs' delimiters, so the value is
+    /// recovered whole rather than cut at the first thing that looks like
+    /// framing.
     #[test]
     fn a_text_setting_write_recovers_its_whole_value() {
         let value = "Europe/Vienna*M13 RCDR";
@@ -271,16 +262,12 @@ mod tests {
     /// What makes matching a setting by its frame sound: no setting's frame
     /// accepts another setting's write.
     ///
-    /// The discriminator is the *pair*, not the tail alone. Six stream settings
-    /// share the verb `STRC` and so share a tail, and are told apart entirely by
-    /// their heads (`ESC N1*` names stream 1, `ESC 1*` enables it); the three
-    /// `Prefixed` families are the mirror image, sharing the bare `ESC` head and
-    /// differing only in verb. So the property is checked the way `classify`
-    /// actually tests it — head as a prefix *and* tail as a suffix — rather than
-    /// on either half on its own.
-    ///
-    /// The `M1`/`M16` note on [`classify`] is this property for registers, kept
-    /// true by the `*`.
+    /// The discriminator is the *pair*. Six stream settings share the verb
+    /// `STRC`, so they share a tail and are told apart by their heads alone
+    /// (`ESC N1*` names stream 1, `ESC 1*` enables it); the `Prefixed` families
+    /// are the mirror image, sharing the bare `ESC` head and differing only in
+    /// verb. So this checks head-as-prefix *and* tail-as-suffix, the way
+    /// `classify` does, rather than either half alone.
     #[test]
     fn no_setting_frame_accepts_another_settings_write() {
         for &a in Setting::ALL {

@@ -1,21 +1,16 @@
 //! A declaratively configured, simulated Extron SMP.
 //!
-//! # The drift problem
+//! # Derived, not tabulated
 //!
-//! A simulator is only useful if it speaks the protocol the client parses. The
-//! naive version — a hand-written table of "request bytes → reply bytes" —
-//! is a second, silent copy of the protocol that rots the moment a payload or a
-//! parser changes, and the failure mode is a mysterious command timeout rather
-//! than a compile error.
-//!
-//! This module has no such table. Everything is derived from the instruction
-//! catalogs:
+//! A hand-written table of request bytes → reply bytes would be a second copy
+//! of the protocol, and it would rot silently: the failure mode is a command
+//! timeout, not a compile error. So there is no table here.
 //!
 //! | Concern | Derived from |
 //! |---|---|
 //! | Which requests exist | [`Query::ALL`], [`Command::ALL`], [`Register::ALL`], [`Setting::ALL`] |
 //! | Their exact bytes | each enum's own `instruction()` constructor |
-//! | Which config keys are legal | the catalogs' `FromStr` (aliases and case-insensitivity for free) |
+//! | Which config keys are legal | the catalogs' `FromStr`, so aliases and case-insensitivity come free |
 //! | Whether a value is well-formed | the *production* parser, run over the simulator's own output |
 //!
 //! [`Query::ALL`]: crate::protocol::instructions::query::Query::ALL
@@ -23,70 +18,65 @@
 //! [`Register::ALL`]: crate::protocol::instructions::register::Register::ALL
 //! [`Setting::ALL`]: crate::protocol::instructions::setting::Setting::ALL
 //!
-//! The remaining gap — a config that omits a field, names one that does not
-//! exist, or gives one a value the parser rejects — is closed by
-//! [`DeviceState::check`], which the integration tests assert is empty for the
-//! checked-in config and which `simulated-device --check-config` reports.
+//! What no catalog can catch — a config that omits a field, misspells one, or
+//! gives one a value the parser rejects — is [`DeviceState::check`]'s job. The
+//! integration tests assert it is empty for the checked-in config, and
+//! `--check-config` reports it.
 //!
 //! # Fields, algebraically
 //!
 //! The device is a partial map `Field → wire text`, where
 //! `Field = names(Query) ∪ names(Register) ∪ names(Setting)` joined on the
 //! canonical name. The catalogs are read and write *views* over that one name
-//! space, so, writing `W = names(Register) ∪ names(Setting)`:
+//! space, so a write lands in the cell a later query reads, with no pairing
+//! table to maintain. Writing `W = names(Register) ∪ names(Setting)`:
 //!
-//! - `names(Query) ∩ W` — read/write fields (`TITLE`, `TIMEZONE`, …). One
-//!   storage cell, so a write is visible to a later query with no pairing table
-//!   to maintain.
-//! - `names(Query) \ W` — read-only (`FIRMWARE`, `MAC_ADDRESS`, `DATE`,
-//!   `IDENTIFIER`, …).
-//! - `W \ names(Query)` — write-only. Currently empty, and
-//!   `every_settable_register_has_a_read_path` and `every_setting_has_a_read_path`
-//!   keep it that way: a field with no read path is one the drift net can only
-//!   check for *presence*, never decode or observe.
+//! - `names(Query) ∩ W` — read/write (`TITLE`, `TIMEZONE`, …).
+//! - `names(Query) \ W` — read-only (`FIRMWARE`, `MAC_ADDRESS`, `DATE`, …).
+//! - `W \ names(Query)` — write-only: the nine RTMP push fields, which SIS
+//!   offers no read of. With no read path they can be checked for *presence*
+//!   only, never decoded or observed, so
+//!   `write_only_settings_are_exactly_the_attested_rtmp_hole` pins the set
+//!   rather than letting it grow quietly.
 //!
-//! The two write views are disjoint and stay that way deliberately: `Register`
-//! is metadata addressed to the recorder subsystem and carries a recording
-//! freeze, `Setting` is device configuration that does not. The simulator keeps
-//! them apart as [`Request::Set`] and [`Request::Configure`] rather than
-//! merging them into one write, because the wire framing differs too.
+//! The two write views are disjoint deliberately — `Register` is recorder
+//! metadata and carries a recording freeze, `Setting` is device configuration
+//! and does not, and their wire framing differs — hence [`Request::Set`] and
+//! [`Request::Configure`] rather than one merged write.
 //!
-//! The config supplies the map's *initial* value. It is mutable at runtime:
-//! register and setting writes overwrite a field and recording commands rewrite
-//! `RUNNING_STATE`.
+//! The config is the map's *initial* value: writes overwrite a field, and
+//! recording commands rewrite `RUNNING_STATE`.
 //!
 //! # License, and why it is not a field
 //!
-//! An Extron SMP sells its second and third stream as licensed options. A unit
-//! without the license does not answer those fields with a default — it
-//! *refuses* them, with a SIS error code, every time. That is a third outcome
-//! alongside "here is the value" and the silence an unset field gets, and the
-//! client distinguishes all three: a refusal is a completed exchange that
-//! happens to say no (so it feeds `auto_disable_after`), while silence is
-//! indistinguishable from a broken connection (so it feeds `exchange_timeout`).
+//! An SMP sells its second and third stream as licensed options, and an
+//! unlicensed field is *refused* with a SIS error code rather than answered
+//! with a default. That is a third outcome beside a value and the silence an
+//! unset field gets, and the client routes all three differently: a refusal is
+//! a completed exchange that says no, so it feeds `auto_disable_after`, while
+//! silence is indistinguishable from a broken connection and feeds
+//! `exchange_timeout`.
 //!
-//! So the license is modelled as a veto that runs *ahead* of the field lookup,
-//! not as an absent field:
+//! So the license is a veto ahead of the field lookup rather than an absent
+//! field. It covers writes as much as reads, and holds whether or not the
+//! config left a value in the cell.
 //!
 //! ```yaml
-//! licensed_streams: [1]          # a base unit: no Dual Mode, no Confidence
+//! licensed_streams: [1]           # a base unit: no Dual Mode, no Confidence
 //! unlicensed_fields: [SNMP_STATE] # anything else this unit refuses
-//! refusal_code: 13               # answered as `E13`
+//! refusal_code: 13                # answered as `E13`
 //! ```
 //!
-//! Which fields a stream owns is read out of their canonical names
-//! ([`stream_index`]) rather than tabulated, so the module's one rule holds
-//! here too: a stream field added to a catalog is classified the moment it is
-//! named. `licensed_streams: [1]` refuses fourteen fields across streams 2 and
-//! 3 — the names, the enable states, the push URLs, the push enables and the
-//! live states — without any of them being listed anywhere.
+//! Which stream a field belongs to is read out of its canonical name
+//! ([`stream_index`]), so `licensed_streams: [1]` refuses fourteen fields
+//! across streams 2 and 3 without any of them being listed, and a stream field
+//! added to a catalog is classified the moment it is named.
 //!
 //! # Configuration, in three layers
 //!
 //! The built-in config, then a `--config` file, then individual flags, each
-//! beating the one before it. The merge is [`DeviceState::from_yaml_str_with`]
-//! and [`Overrides`], so the precedence a test exercises is the precedence an
-//! operator gets:
+//! beating the one before it. The merge is [`DeviceState::from_yaml_str_with`],
+//! so the precedence a test exercises is the precedence an operator gets:
 //!
 //! ```text
 //! simulated-device --licensed-streams 1 --field unit-name='Hall 2' --print-config

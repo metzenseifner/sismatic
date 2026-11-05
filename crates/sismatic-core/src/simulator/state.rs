@@ -3,39 +3,23 @@
 //! # Why values are wire text
 //!
 //! A field's type is not introspectable from the catalog — it lives implicitly
-//! in which parser [`Query::instruction`] picks. Rather than maintain a second
+//! in which parser [`Query::instruction`] picks. Rather than keep a second
 //! table mapping each field to its type (a fresh source of drift), the config
-//! stores each field's **wire representation** as a string, and "well-typed" is
-//! defined as *the production parser accepts it*. That works because every
-//! query reply in this protocol has the same shape — an untagged value
-//! terminated by `CR LF` — so rendering is uniformly `format!("{value}\r\n")`
-//! for all 37 queries, with no per-field knowledge at all.
+//! stores each field's **wire representation** as a string, and "well-typed"
+//! means *the production parser accepts it*. That works because every query
+//! reply in this protocol has the same shape — an untagged value terminated by
+//! `CR LF` — so rendering is uniformly `format!("{value}\r\n")` for every
+//! query, with no per-field knowledge at all.
 //!
-//! The cost is that a bad value is caught at check time rather than parse time;
+//! The cost is that a bad value is caught at check time rather than parse time.
 //! [`DeviceState::check`] closes that gap by running every field through the
-//! real parser (see [`Issue`]).
+//! real parser, and `survives_the_read_path` does the same for a runtime
+//! write, so the store's invariant — every cell holds text the client can
+//! decode — holds for a running device and not only for its starting state.
 //!
-//! # Config is the *initial* state
-//!
-//! The map is mutable at runtime: register and setting writes overwrite a field
-//! and recording commands rewrite `RUNNING_STATE`. The file is a starting
-//! point, not a fixed answer table.
-//!
-//! # License, which is not state at all
-//!
-//! An Extron SMP sells its second and third stream as licensed options, and a
-//! unit without the license does not answer those fields with a default — it
-//! *refuses* them, with a SIS error code, every time. That is a different thing
-//! from an unset field (which this simulator answers with silence) and a
-//! different thing again from a field whose value happens to be empty, and the
-//! client distinguishes all three: a refusal feeds `auto_disable_after`, while
-//! silence feeds `exchange_timeout`.
-//!
-//! So the license sits beside the field store rather than in it, as a
-//! [`License`] that answers one question — is this field refused — ahead of
-//! every lookup. Which fields a stream owns is read out of their canonical
-//! names (see [`stream_index`]) rather than tabulated, so the usual rule holds:
-//! a stream field added to the catalog is classified the moment it is named.
+//! The map is mutable: writes overwrite a field and recording commands rewrite
+//! `RUNNING_STATE`. The license is the exception, and the module docs say why
+//! it sits beside the store rather than in it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -63,13 +47,12 @@ pub struct Credentials {
     pub password: String,
 }
 
-/// A YAML scalar accepted as a field value.
+/// A YAML scalar accepted as a field value, normalised to wire text.
 ///
-/// Everything is stored as wire text, but requiring the file to quote every
-/// number would make it read badly. This accepts the three scalar forms YAML
-/// resolves naturally and normalises them: `22023` → `"22023"`, and — the one
-/// real convenience — `true`/`false` → `"1"`/`"0"`, which is exactly what
-/// `boolean_flag` expects for `SNMP_STATE` and `DHCP_MODE`.
+/// Requiring the file to quote every number would read badly, so the three
+/// scalar forms YAML resolves naturally are all accepted: `22023` → `"22023"`,
+/// and `true`/`false` → `"1"`/`"0"`, which is what `boolean_flag` expects for
+/// `SNMP_STATE` and `DHCP_MODE`.
 #[derive(Debug, Clone)]
 struct WireScalar(String);
 
@@ -117,11 +100,10 @@ struct RawConfig {
 
 /// Which optional features a unit admits to having.
 ///
-/// Two ways to say it, because operators have two reasons to. `streams` is the
-/// one that matches how Extron sells the hardware — stream 2 is Dual Mode,
-/// stream 3 is Confidence — and vetoes every field addressing a stream the unit
-/// did not buy. `fields` is the escape hatch for everything else a particular
-/// unit refuses, named one field at a time; it is the device-side mirror of the
+/// Two ways to say it. `streams` matches how Extron sells the hardware — stream
+/// 2 is Dual Mode, stream 3 is Confidence — and vetoes every field addressing a
+/// stream the unit did not buy. `fields` names anything else this particular
+/// unit refuses, one field at a time; it is the device-side mirror of the
 /// client's own `disabled_fields`.
 #[derive(Debug, Clone)]
 pub struct License {
@@ -136,11 +118,10 @@ pub struct License {
 /// The code an unlicensed field is refused with.
 ///
 /// `E13` is "invalid parameter (number is out of range)", which is what an
-/// unlicensed stream *is* on the wire: the request addresses stream 2 on a unit
-/// whose streams stop at 1, so the index is out of range. It is also the code
-/// the field-veto design note names as the one such a unit answers with.
-/// Configurable because the scheduler treats every code alike — any refusal
-/// counts — so a unit that answers `E14` is worth being able to reproduce.
+/// unlicensed stream *is* on the wire — a request addressing stream 2 on a unit
+/// whose streams stop at 1 — and the code the field-veto design note names.
+/// Configurable because the scheduler treats every code alike, so a unit that
+/// answers `E14` is worth being able to reproduce.
 pub const DEFAULT_REFUSAL_CODE: u8 = 13;
 
 impl Default for License {
@@ -282,21 +263,19 @@ pub struct DeviceState {
 /// Values that override a loaded config, in the order a command line beats a
 /// file.
 ///
-/// Separate from [`RawConfig`] rather than the same type with everything
-/// optional, because the two answer different questions. A file states what the
-/// device *is*, and leaving `fields` out of it is an error the drift net
-/// reports; an override states what to *change*, and leaving everything out is
-/// the normal case. Collapsing them would make a missing `fields:` key
-/// indistinguishable from a command line that did not mention fields.
+/// Deliberately not `RawConfig` with everything optional: a file states what
+/// the device *is*, so a missing `fields:` key is an error the drift net
+/// reports, while an override states what to *change*, so saying nothing is the
+/// normal case. One type could not tell those apart.
 #[derive(Debug, Default, Clone)]
 pub struct Overrides {
     /// Replace the configured SSH username.
     pub username: Option<String>,
     /// Replace the configured SSH password.
     pub password: Option<String>,
-    /// Replace the licensed stream set wholesale. Like the client's
-    /// `disabled_fields`, this does not merge — an operator saying `1` means
-    /// "this unit has one stream", not "one stream in addition to the file's".
+    /// Replace the licensed stream set wholesale: `1` means "this unit has one
+    /// stream", not "one more than the file's". Merging would make a narrower
+    /// command line impossible to express.
     pub licensed_streams: Option<BTreeSet<u8>>,
     /// Replace the by-name refusal set wholesale, for the same reason.
     pub unlicensed_fields: Option<BTreeSet<String>>,
@@ -320,11 +299,9 @@ impl DeviceState {
 
     /// Parse a YAML config and apply `overrides` on top of it.
     ///
-    /// This is the one loader; [`from_yaml_str`](Self::from_yaml_str) is it with
-    /// nothing overridden. Precedence is the conventional one — a command line
-    /// beats a file, and a file beats the built-in default — and it is resolved
-    /// here rather than in the binary so the integration tests exercise the
-    /// same merge an operator gets.
+    /// The one loader; [`from_yaml_str`](Self::from_yaml_str) is it with
+    /// nothing overridden. The merge lives here rather than in the binary, so
+    /// the integration tests exercise the precedence an operator gets.
     pub fn from_yaml_str_with(text: &str, overrides: &Overrides) -> Result<Self, LoadError> {
         let raw: RawConfig = serde_saphyr::from_str(text).map_err(|e| LoadError(format!("{e}")))?;
 
@@ -355,9 +332,9 @@ impl DeviceState {
             credentials.password = password.clone();
         }
 
-        // `licensed_streams` absent from both means a fully-loaded unit, not a
-        // unit with no streams — so the fallback is the whole catalog, and only
-        // an explicit list narrows it.
+        // Absent from both means a fully-loaded unit, not a unit with no
+        // streams: the fallback is the whole catalog, and only an explicit list
+        // narrows it. An explicit empty list is still a unit with no streams.
         let streams = overrides
             .licensed_streams
             .clone()
@@ -368,10 +345,9 @@ impl DeviceState {
             .clone()
             .unwrap_or(raw.unlicensed_fields);
 
-        // Canonicalise the by-name veto through the catalog too, so
-        // `unlicensed_fields: [stream-2-name]` vetoes the same field
-        // `STREAM_2_NAME` names. A name in neither catalog is reported rather
-        // than silently vetoing nothing.
+        // Canonicalised like a field key, so `unlicensed_fields:
+        // [stream-2-name]` vetoes what `STREAM_2_NAME` names. A name in no
+        // catalog is reported rather than silently vetoing nothing.
         let mut fields_refused = BTreeSet::new();
         for key in refused {
             match canonical_name(&key) {
@@ -424,11 +400,10 @@ impl DeviceState {
     /// value the field's own read parser rejects — either surfaces to the
     /// client as a command timeout, exactly like an unmodelled request).
     pub fn handle(&self, request: Request) -> Option<String> {
-        // Ahead of every lookup, because a refusal is not an answer about the
-        // field — it is the device declining to have one. An unlicensed field
-        // is refused whether or not the config left a value in its cell, and
-        // refused on writes as well as reads: a unit without Dual Mode will not
-        // be talked into naming its second stream.
+        // Ahead of every lookup: a refusal is the device declining to have the
+        // field, not an answer about it. So it holds whether or not the config
+        // left a value in the cell, and on writes as well as reads — a unit
+        // without Dual Mode will not be talked into naming its second stream.
         if let Some(field) = request.field()
             && self.license.refuses(field)
         {
@@ -456,11 +431,10 @@ impl DeviceState {
                 Some(format!("{RCDR_LOWER}{}\r\n", c.verb()))
             }
 
-            // The echo comes from the catalog rather than being spelled here:
-            // a setting's reply shape depends on its `Form`, and the addressed
-            // ones (every stream and RTMP field) repeat the address back with
-            // the verb capitalised. `Setting::echo` is built from the same
-            // `form`/`verb` its parser is, so the two cannot disagree.
+            // The echo comes from the catalog, not from here: a setting's
+            // reply shape depends on its `Form`, and the addressed ones repeat
+            // the address back with the verb capitalised. `Setting::echo` is
+            // built from the same `form`/`verb` its parser is.
             Request::Configure(s, value) => survives_the_read_path(s.name(), &value).then(|| {
                 self.set(s.name(), value.clone());
                 s.echo(&value)
@@ -485,19 +459,20 @@ impl DeviceState {
     /// Three checks, in the order the failures matter:
     ///
     /// 1. **Coverage**, both directions — every config key is a catalog field,
-    ///    and every catalog field (`Query::ALL ∪ Register::ALL`) has a value.
-    ///    Adding a catalog variant makes this fail until the config follows.
+    ///    and every catalog field has a value. Adding a catalog variant fails
+    ///    this until the config follows.
     /// 2. **Decodability** — each query's rendered reply is fed to that query's
-    ///    *production* parser. This is the check that no hand-written table can
-    ///    fake: if the simulator's rendering and the client's parser ever
-    ///    disagree, it fails here rather than as a mysterious timeout.
-    /// 3. **Fidelity**, for text fields only — the decoded text must equal the
-    ///    configured text, which catches embedded control characters that
-    ///    silently truncate a reply.
+    ///    *production* parser, so a divergence between what the simulator
+    ///    writes and what the client reads fails here rather than later as a
+    ///    mysterious timeout.
+    /// 3. **Fidelity**, text fields only — the decoded text must equal the
+    ///    configured text, catching embedded control characters that silently
+    ///    truncate a reply.
     ///
-    /// Checks 2 and 3 need a read path, so a write-only field (in `Register`
-    /// but not `Query`) would get only check 1. There are none today, and
-    /// `every_settable_register_has_a_read_path` keeps it that way.
+    /// Checks 2 and 3 need a read path, so the write-only settings
+    /// (`names(Setting) \ names(Query)`, the nine RTMP push fields) get only
+    /// check 1; `write_only_settings_are_exactly_the_attested_rtmp_hole` keeps
+    /// that set from growing unnoticed. A refused field skips all three.
     pub fn check(&self) -> Vec<Issue> {
         let mut issues: Vec<Issue> = self
             .unknown
@@ -507,11 +482,9 @@ impl DeviceState {
 
         let fields = self.lock().clone();
         for field in catalog_fields() {
-            // A refused field is never served, so a value for it would be
-            // decoration. Requiring one would make a one-stream unit's config
-            // carry eight fields it will never answer, and the operator would
-            // be inventing values to satisfy a check about a field the device
-            // denies having.
+            // A refused field is never served, so requiring a value would
+            // make a base unit's config invent fourteen of them to satisfy a
+            // check about fields the device denies having.
             if self.license.refuses(&field) {
                 continue;
             }
@@ -559,13 +532,12 @@ const BANNER_DATE: &str = "Mon, 13 Jul 2026 08:16:21";
 
 /// Every field the protocol can read or write:
 /// `Query::ALL ∪ Register::ALL ∪ Setting::ALL`, joined on the canonical name.
-/// `TITLE` appears in two of them and is one field — which is what makes a
-/// write visible to a later query without any pairing table.
+/// A name in two catalogs (`TITLE`) is one field, which is what makes a write
+/// visible to a later query without a pairing table.
 ///
-/// `Setting::ALL` contributes nothing to the union today, because every setting
-/// names a field some query also reads (`every_setting_has_a_read_path`). It is
-/// chained in anyway so that a write-only setting would be *reported* as a
-/// missing config field rather than quietly escaping coverage.
+/// `Setting::ALL` is chained in for the nine RTMP push fields it alone names:
+/// without it they would escape coverage rather than being reported as missing
+/// from the config.
 pub fn catalog_fields() -> BTreeSet<String> {
     Query::ALL
         .iter()
@@ -577,27 +549,22 @@ pub fn catalog_fields() -> BTreeSet<String> {
 
 /// Which stream a field addresses, read out of its canonical name.
 ///
-/// Derived rather than tabulated, for the reason everything else here is: the
-/// index is already *in* the name — `STREAM_2_NAME`, `RTMP_2_URL`,
-/// `RTMP_BACKUP_STREAM_2_LIVE_STATE` — and the catalog puts it in the same
-/// place throughout (see the naming note in `setting.rs`), so reading it back
-/// needs no second list to keep in step. A stream field added later is
-/// classified the moment it is named.
+/// Derived, not tabulated: the index is already *in* the name —
+/// `STREAM_2_NAME`, `RTMP_2_URL`, `RTMP_BACKUP_STREAM_2_LIVE_STATE` — so a
+/// stream field added later is classified the moment it is named.
 ///
-/// The prefix guard is what keeps the digit from being over-read: only the two
-/// stream-addressed families are considered, so `HTTPS_PORT` or
-/// `SNMP_PUBLIC_COMMUNITY_STRING` can never be mistaken for a stream however
-/// they are spelled. `stream_fields_are_exactly_the_stream_addressed_catalog`
-/// pins the resulting partition against the catalog, so a rename that moves the
-/// index out of reach fails a test rather than quietly licensing a field that
-/// should have been refused.
+/// The prefix guard keeps the digit from being over-read: only the two
+/// stream-addressed families are considered, so `HTTPS_PORT` and
+/// `SNMP_PUBLIC_COMMUNITY_STRING` can never be read as streams.
+/// `stream_fields_are_exactly_the_stream_addressed_catalog` pins the partition
+/// against the catalog, because a rename that moves the index out of reach
+/// would silently *license* a field that should be refused.
 pub fn stream_index(field: &str) -> Option<u8> {
     if !(field.starts_with("STREAM_") || field.starts_with("RTMP_")) {
         return None;
     }
-    // The first `_`-delimited component that is a number. No upper bound: if
-    // the catalog ever grows a stream 4, it is licensed like the other three
-    // rather than silently exempt.
+    // The first `_`-delimited component that is a number. No upper bound, so a
+    // stream 4 would be licensed like the other three rather than exempt.
     field.split('_').find_map(|part| part.parse::<u8>().ok())
 }
 
@@ -622,26 +589,23 @@ pub fn canonical_name(key: &str) -> Option<String> {
 /// Whether `value` would survive being read back out of `field`: the
 /// simulator's own rendering of it, fed to that field's *production* parser.
 ///
-/// The two conditions are exactly what [`DeviceState::check`] reports as
-/// [`Issue::Unparsable`] and [`Issue::Mismatch`], applied to a runtime write
-/// instead of the config file — so the store's invariant ("every cell holds
-/// wire text the client can decode") holds for a running device and not only
-/// for its starting state. Without it, one hand-crafted write could poison a
-/// cell and turn every later read of that field into a mysterious timeout.
+/// [`DeviceState::check`]'s [`Unparsable`](Issue::Unparsable) and
+/// [`Mismatch`](Issue::Mismatch) conditions, applied to a runtime write instead
+/// of the config file. Without it one hand-crafted write could poison a cell
+/// and turn every later read of that field into a mysterious timeout.
 ///
-/// Refusing here is also what the device does. A value it will not take is
-/// answered with an error token this catalog does not model
-/// (see [`Setting::instruction`]), which reaches the caller as a command
-/// timeout — which is what the simulator's silence produces.
+/// Refusing is also what the device does: a value it will not take is answered
+/// with an error token this catalog does not model (see
+/// [`Setting::instruction`]), which reaches the caller as the same command
+/// timeout the simulator's silence produces.
 ///
-/// This never refuses a value that came from [`Setting::instruction`]: a flag
-/// is already `0`/`1`, a port is already in range, and free text is already
-/// within its ceiling. What it catches is a request no client of ours built.
+/// A value from [`Setting::instruction`] always passes — a flag is already
+/// `0`/`1`, a port already in range, free text already under its ceiling — so
+/// what this catches is a request no client of ours built.
 fn survives_the_read_path(field: &str, value: &str) -> bool {
     let Ok(query) = Query::from_str(field) else {
-        // A write-only field has no read path to disagree with. There are none
-        // (`every_setting_has_a_read_path`); this keeps the simulator serving
-        // if one is added deliberately.
+        // A write-only field (the nine RTMP push fields) has no read path to
+        // disagree with, so there is nothing to check and the write stands.
         return true;
     };
     match query.instruction().parse_step(&format!("{value}\r\n")) {
@@ -653,10 +617,10 @@ fn survives_the_read_path(field: &str, value: &str) -> bool {
     }
 }
 
-/// The `RUNNING_STATE` wire code a command leaves behind. Written as an
-/// explicit match so a new [`Command`] cannot compile without deciding what it
-/// does to the recording state; `command_sets_running_state` in the integration
-/// tests pins these codes against [`Query::RunningState`]'s parser.
+/// The `RUNNING_STATE` wire code a command leaves behind. An explicit match, so
+/// a new [`Command`] cannot compile without deciding what it does to the
+/// recording state; `commands_mutate_the_running_state` pins these codes
+/// against [`Query::RunningState`]'s parser over a real connection.
 fn running_state_code(c: Command) -> &'static str {
     match c {
         Command::Stop => "0",
@@ -683,8 +647,7 @@ fields:
     #[test]
     fn keys_are_canonicalised_through_the_catalog() {
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
-        // `ssh-port` normalises to the canonical `SSH_PORT`, and the YAML
-        // integer became wire text.
+        // `ssh-port` normalised to `SSH_PORT`, the YAML integer to wire text.
         assert_eq!(state.get("SSH_PORT").as_deref(), Some("22023"));
     }
 
@@ -716,7 +679,7 @@ fields:
             .collect();
         assert!(missing.contains("FIRMWARE"));
         assert!(missing.contains("PUBLISHER"));
-        // The four fields that *are* configured must not be reported.
+        // The configured fields must not be reported.
         assert!(!missing.contains("SSH_PORT"));
         assert!(!missing.contains("TITLE"));
     }
@@ -755,8 +718,8 @@ fields:
     fn a_register_write_is_visible_to_the_matching_query() {
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
         state.handle(Request::Set(Register::Title, "New Title".into()));
-        // Both catalogs canonicalise to "TITLE", so the write lands where the
-        // read looks — no pairing table involved.
+        // Both catalogs canonicalise to `TITLE`, so the write lands where the
+        // read looks, with no pairing table involved.
         assert_eq!(
             state.handle(Request::Get(Query::Title)),
             Some("New Title\r\n".into())
@@ -771,9 +734,9 @@ fields:
         assert_eq!(state.get("TITLE").map(|v| v.len()), Some(MAX_VALUE_LEN));
     }
 
-    /// The settings half of `a_register_write_is_visible_to_the_matching_query`.
-    /// `Setting` and `Query` spell `TIMEZONE` the same way, so the write lands
-    /// in the cell the read looks in with no pairing table involved.
+    /// The settings half of
+    /// `a_register_write_is_visible_to_the_matching_query`: `Setting` and
+    /// `Query` spell `TIMEZONE` the same way, so one cell serves both.
     #[test]
     fn a_setting_write_is_visible_to_the_matching_query() {
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
@@ -788,10 +751,9 @@ fields:
     }
 
     /// The drift net for the write echo, without a socket: the bytes the
-    /// simulator answers a setting write with are fed to *that setting's own
-    /// production parser*. The echo shape lives in two places by necessity —
-    /// `setting_echo` parses it and `handle` renders it — and this is what
-    /// keeps them the same shape.
+    /// simulator answers with are fed to that setting's own production parser.
+    /// The echo shape necessarily lives in two places — `setting_echo` parses
+    /// it, `handle` renders it — and this is what holds them together.
     #[test]
     fn a_setting_write_echo_satisfies_the_clients_own_parser() {
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
@@ -809,9 +771,9 @@ fields:
         );
     }
 
-    /// A value no `Setting::instruction` would ever produce, arriving anyway.
+    /// A value no `Setting::instruction` would produce, arriving anyway.
     /// Storing it would leave `DHCP_MODE` holding text the flag parser cannot
-    /// read, so every later read of the field would time out instead.
+    /// read, so every later read of the field would time out.
     #[test]
     fn a_setting_write_the_read_parser_would_reject_is_ignored() {
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
@@ -825,14 +787,13 @@ fields:
     // ---- license ------------------------------------------------------
 
     /// The guard the whole license rests on: reading the index out of a field
-    /// name must partition the catalog exactly the way the catalog is shaped.
+    /// name must partition the catalog the way the catalog is shaped.
     ///
-    /// Spelled as a set comparison rather than a handful of spot checks,
-    /// because both directions can fail and they fail differently. A stream
-    /// field that stops being recognised is silently *licensed* on a unit that
-    /// should refuse it — the dangerous direction, and invisible without this.
-    /// A non-stream field that starts being recognised gets refused by a
-    /// `licensed_streams` list that never meant to name it.
+    /// A set comparison rather than spot checks, because both directions fail
+    /// differently. A stream field that stops being recognised is silently
+    /// *licensed* on a unit that should refuse it — the dangerous direction,
+    /// invisible without this. One that starts being recognised gets refused by
+    /// a `licensed_streams` list that never meant to name it.
     #[test]
     fn stream_fields_are_exactly_the_stream_addressed_catalog() {
         let derived: BTreeSet<String> = catalog_fields()
@@ -874,8 +835,8 @@ fields:
         assert_eq!(catalog_streams(), BTreeSet::from([1, 2, 3]));
     }
 
-    /// Each index claims its own fields and no others, so a one-stream license
-    /// cannot refuse stream 1 by association.
+    /// Each index claims only its own fields, so a one-stream license cannot
+    /// refuse stream 1 by association.
     #[test]
     fn every_stream_field_is_claimed_by_its_own_index() {
         for field in catalog_fields() {
@@ -889,8 +850,8 @@ fields:
         }
     }
 
-    /// The fields a port or a community string are named with must never be
-    /// read as streams, whatever digits they contain.
+    /// Ports and community strings carry digits of their own, and must never be
+    /// read as streams.
     #[test]
     fn a_field_that_merely_contains_a_digit_is_not_a_stream() {
         for field in ["HTTPS_PORT", "SNMP_PORT", "SNMP_PUBLIC_COMMUNITY_STRING"] {
@@ -906,7 +867,7 @@ fields:
   STREAM_1_NAME: Archive Channel A
 ";
 
-    /// A one-stream unit refuses stream 2 and 3 and still answers stream 1 —
+    /// A one-stream unit refuses streams 2 and 3 and still answers stream 1 —
     /// the Extron license this exists to reproduce.
     #[test]
     fn an_unlicensed_stream_is_refused_and_a_licensed_one_is_answered() {
@@ -927,9 +888,9 @@ fields:
     }
 
     /// The refusal is what [`SisError`](crate::protocol::SisError) reads, not
-    /// merely a line that looks like one. This is the pairing that makes the
-    /// simulator able to drive `auto_disable_after`: the client counts refusals
-    /// by running exactly this function over what arrives.
+    /// merely a line that looks like one — which is what lets the simulator
+    /// drive `auto_disable_after`, since the client counts refusals by running
+    /// exactly this function over what arrives.
     #[test]
     fn a_refusal_is_read_back_as_a_sis_error_by_the_client() {
         use crate::protocol::SisError;
@@ -943,7 +904,7 @@ fields:
     }
 
     /// An unlicensed stream cannot be talked into existing: the write is
-    /// refused too, not merely unanswered, and the cell stays untouched.
+    /// refused rather than merely unanswered, and the cell stays empty.
     #[test]
     fn a_write_to_an_unlicensed_stream_is_refused_and_changes_nothing() {
         let state = DeviceState::from_yaml_str(BASE_UNIT).expect("loads");
@@ -955,9 +916,9 @@ fields:
         assert_eq!(state.get("STREAM_2_NAME"), None);
     }
 
-    /// A refusal and silence are different replies, and the difference is the
-    /// reason the license is not modelled as an absent field: one feeds
-    /// `auto_disable_after`, the other `exchange_timeout`.
+    /// Refusal and silence are different replies — one feeds
+    /// `auto_disable_after`, the other `exchange_timeout` — which is why the
+    /// license is not modelled as an absent field.
     #[test]
     fn a_refusal_is_not_the_same_as_an_unset_field() {
         let state = DeviceState::from_yaml_str(BASE_UNIT).expect("loads");
@@ -972,7 +933,7 @@ fields:
     }
 
     /// An unlicensed field needs no configured value: a base unit's file should
-    /// not have to invent values for the eight fields it denies having.
+    /// not have to invent values for fields it denies having.
     #[test]
     fn check_does_not_ask_for_values_it_will_never_serve() {
         let missing: BTreeSet<String> = DeviceState::from_yaml_str(BASE_UNIT)
@@ -991,9 +952,8 @@ fields:
         assert!(missing.contains("STREAM_1_STATE"), "{missing:?}");
     }
 
-    /// The by-name veto, which is the device-side mirror of the client's
-    /// `disabled_fields` — and it canonicalises like every other key, so an
-    /// alias or a lowercase spelling vetoes the field it names.
+    /// The by-name veto canonicalises like every other key, so an alias or a
+    /// lowercase spelling vetoes the field it names.
     #[test]
     fn unlicensed_fields_are_refused_by_name_through_the_catalog() {
         let state = DeviceState::from_yaml_str(
@@ -1020,8 +980,8 @@ fields:
         );
     }
 
-    /// A veto naming a field in no catalog is reported rather than silently
-    /// vetoing nothing — the same treatment an unknown `fields:` key gets.
+    /// A veto naming no catalog field is reported rather than silently vetoing
+    /// nothing — the treatment an unknown `fields:` key gets.
     #[test]
     fn an_unlicensed_field_outside_the_catalog_is_reported() {
         let state = DeviceState::from_yaml_str(
@@ -1054,7 +1014,7 @@ fields: {}
     }
 
     /// Saying nothing about licensing describes a fully-loaded unit, which is
-    /// what keeps every config written before licensing existed meaning what it
+    /// what keeps a config written before licensing existed meaning what it
     /// meant.
     #[test]
     fn a_config_silent_about_licensing_licenses_everything() {

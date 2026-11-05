@@ -5,8 +5,8 @@
 //! requests on either the normal data stream or — as real hardware does — the
 //! extended-data (stderr) stream.
 //!
-//! This is the shared harness: `bin/simulated-device.rs` runs it as a
-//! standalone device, and the integration tests bind it on a loopback port.
+//! The shared harness: `bin/simulated-device.rs` runs it standalone, and the
+//! integration tests bind it on a loopback port.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -21,9 +21,9 @@ use tokio::net::TcpListener;
 use crate::simulator::dispatch::classify;
 use crate::simulator::state::DeviceState;
 
-/// A throwaway ed25519 host key. It authenticates nothing real, so committing
-/// it is harmless — the client accepts any host key anyway (see `ClientHandler`
-/// in the ssh transport).
+/// A throwaway ed25519 host key. Committing it is harmless: it authenticates
+/// nothing real, and the client accepts any host key anyway (see
+/// `ClientHandler` in the ssh transport).
 pub const DEFAULT_HOST_KEY: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 QyNTUxOQAAACAYfora4TPkBvMx2eF/FwcBKEaoVuEYk1F3JnzDZyAeGAAAAJgKyK15Csit
@@ -39,8 +39,8 @@ pub enum ReplyStream {
     /// Normal channel data (`SSH_MSG_CHANNEL_DATA`, stdout).
     Stdout,
     /// Extended data (`SSH_MSG_CHANNEL_EXTENDED_DATA`, stderr) — how a real
-    /// Extron SMP answers, which regressed once when the transport read only
-    /// stdout.
+    /// Extron SMP answers, hence the default: a transport that reads stdout
+    /// alone times out every query, which it once did.
     #[default]
     Stderr,
 }
@@ -144,8 +144,8 @@ impl Server for DeviceServer {
     }
 }
 
-/// Reproduces the Device auth handshake: `password` is never accepted, and
-/// `keyboard-interactive` sends one "Password:" prompt whose answer must match
+/// Reproduces the device's auth handshake: `password` is never accepted, and
+/// `keyboard-interactive` sends one `Password:` prompt whose answer must match
 /// the configured credential.
 struct DeviceHandler {
     state: Arc<DeviceState>,
@@ -202,15 +202,15 @@ impl Handler for DeviceHandler {
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         // The SMP prints its banner (copyright + date) the instant the shell
-        // opens, on the extended-data stream like the real device. The client
-        // must drain this before its first query, or a banner line would be
-        // parsed as the (untagged) reply.
+        // opens, on the extended-data stream whatever `reply` says. The client
+        // must drain it before its first query, or a banner line is parsed as
+        // the (untagged) reply.
         session.extended_data(channel, 1, self.state.banner().into_bytes())?;
         Ok(())
     }
 
-    /// The SIS command interface. Requests outside the catalog, and reads of
-    /// fields the config left unset, are answered with silence — which surfaces
+    /// The SIS command interface. Requests outside the catalog, reads of unset
+    /// fields and non-UTF-8 bytes are all answered with silence, which surfaces
     /// as a command timeout on the client side, like real hardware.
     async fn data(
         &mut self,
