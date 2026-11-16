@@ -12,6 +12,12 @@ license.workspace = true
 name = "simulated-device"
 required-features = ["simulator"]
 
+# One simulated SMP per device in a `devices.yaml`, served from one process.
+# Same gate, and for the same reason.
+[[bin]]
+name = "simulated-fleet"
+required-features = ["simulator"]
+
 [dependencies]
 async-trait.workspace = true
 clap = { workspace = true, optional = true }
@@ -45,7 +51,18 @@ yaml = ["dep:serde-saphyr"]
 # The simulated device: an SSH *server* that answers SIS requests from a YAML
 # config. Off by default so it never links into the production front-ends —
 # `ssh` alone gives you the client transport, not this.
-simulator = ["ssh", "yaml", "dep:clap", "dep:tracing-subscriber"]
+# `tokio/signal` and `dep:serde_json` are `simulated-fleet`'s: it waits on
+# ctrl-c to shut a whole building down, and renders `--json`. Here rather than
+# on the `json` feature, which also turns on the devices-file JSON reader — a
+# separate decision from this binary's output format.
+simulator = [
+  "ssh",
+  "yaml",
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:serde_json",
+  "tokio/signal",
+]
 
 [dev-dependencies]
 tracing-bunyan-formatter.workspace = true

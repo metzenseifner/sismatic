@@ -1112,12 +1112,46 @@ Config is the *initial* state, not a fixed answer table: register and setting wr
 overwrite a field, and recording commands rewrite `RUNNING_STATE`. The license is the
 exception — it is what the unit *is*, and no request changes it.
 
+#### A fleet of them
+
+`simulated-fleet` takes the same `devices.yaml` the server does and serves a
+simulated SMP for every device in it, from one process:
+
+```console
+$ cargo run -p sismatic-core --features simulator --bin simulated-fleet -- \
+    devices.yaml --host 127.0.0.1 --port-base 2401
+```
+
+The file is read by `devices::config::load` — the same function the server's
+composition root calls — so `defaults` inheritance, the one id namespace and the
+canonicalisation of `disabled_fields` behave here exactly as they do in
+production, because they are. A device's `disabled_fields` becomes that unit's
+refusal set, so the document's claim about a recorder is the simulated recorder's
+behaviour rather than a note beside it. `--port-base 0` lets the kernel pick every
+port; `--dry-run --json` prints the placement without binding it, which is enough
+to generate the devices file that points a server at the simulated fleet. The
+input is a real devices file, so passwords are masked in the report unless
+`--show-credentials` is given.
+
+`--device-config-for ID=FILE` gives one device its own template, so a single fleet
+can carry several configurations at once — a base unit beside fully-loaded ones,
+older firmware in one wing, a room whose alarms are already firing:
+
+```console
+$ simulated-fleet devices.yaml --port-base 2701 --device-config-for annex-7=./base-unit.yaml
+```
+
+With the server pointed at such a fleet, everything above the transport is the
+production stack. [Simulated SMPs](./crates/sismatic-core/docs/simulator.md) covers
+both binaries, the template ladder and what the inventory does and does not decide.
+
 ## Documentation
 
 | Where                                                                 | What                                              |
 | --------------------------------------------------------------------- | ------------------------------------------------- |
 | `/api` on a running server                                            | Interactive API reference, generated from the code |
 | [Server README](./crates/sismatic-server/README.md)                   | The server's own notes on configuration and reload |
+| [Simulated SMPs](./crates/sismatic-core/docs/simulator.md)            | One simulated device, or a whole simulated building |
 | [Python API reference](https://metzenseifner.github.io/sismatic/)     | The full `Sis` surface, built from [`docs/`](./docs) with `nix run .#docs` |
 | [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/metzenseifner/sismatic) | Ask questions about this codebase |
 
