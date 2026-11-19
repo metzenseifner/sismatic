@@ -1,0 +1,57 @@
+---
+defaults:
+  username: "joe"
+  password: "schmoe"
+  eager: true
+  sis_keepalive_secs: 120
+  eager_retry_secs: 30
+
+devices:
+  - id: Hall 1 A
+    host: 127.0.0.1
+    port: 9111
+  - id: Hall 1 B
+    host: 127.0.0.1
+    port: 9112
+  - id: Hall 2
+    host: 127.0.0.1
+    port: 9113
+  - id: Hörsaal 3 A
+    host: 127.0.0.1
+    port: 9131
+  - id: Hörsaal 3 B
+    host: 127.0.0.1
+    port: 9132
+  - id: Hörsaal 4 A
+    host: 127.0.0.1
+    port: 9141
+  - id: Hörsaal 4 B
+    host: 127.0.0.1
+    port: 9142
+  - id: Hörsaal 5 A
+    host: 127.0.0.1
+    port: 9114
+  - id: Hörsaal 5 B
+    host: 127.0.0.1
+    port: 9115
+  - id: Aura-A
+    host: 127.0.0.1
+    port: 9116
+  - id: Aura-B
+    host: 127.0.0.1
+    port: 9117
+
+
+# Address every hall as one: a command sent to "Halls" reaches each member.
+groups:
+  - id: Hall 1
+    devices: ["Hall 1 A", "Hall 1 B"]
+  - id: Hörsaal 3
+    devices: ["Hörsaal 3 A", "Hörsaal 3 B"]
+  - id: Hörsaal 4
+    devices: ["Hörsaal 4 A", "Hörsaal 4 B"]
+  - id: Hörsaal 5
+    devices: ["Hörsaal 5 A", "Hörsaal 5 B"]
+  - id: Aura
+    devices: ["Aura-A", "Aura-B"]
+

@@ -57,6 +57,7 @@ $ curl localhost:8080/v1/reads/devices/atrium-101/fields/RUNNING_STATE
 - [Other ways to drive it](#other-ways-to-drive-it)
 - [Architecture](#architecture)
 - [Development](#development)
+  - [The simulated device](#the-simulated-device)
 - [Documentation](#documentation)
 - [License](#license)
 
@@ -1017,12 +1018,140 @@ $ cargo fmt
 > `nix flake check` evaluates from a git-tracked source tree, so a new file must be
 > `git add`-ed before the sandbox can see it.
 
+### The simulated device
+
+A real SSH server that behaves like an Extron SMP, for developing against when the
+hardware is in a lecture hall. It ships with the `simulator` feature of
+`sismatic-core` and is the same code the integration tests bind, so what it answers
+is what CI exercises.
+
+```console
+$ cargo run -p sismatic-core --features simulator --bin simulated-device
+```
+
+Everything it answers is derived from the instruction catalogs rather than from a
+table of request bytes to reply bytes. A second, hand-maintained copy of the protocol
+would rot the moment a payload or a parser changed, and it would do so silently — the
+failure would surface as a mysterious `exchange_timeout`, not a compile error. So the
+config names *fields*, and "well-typed" means the production parser accepts what the
+simulator would put on the wire. `--check-config` reports every disagreement in one
+pass, and the drift guards in CI assert there are none:
+
+```console
+$ cargo run -p sismatic-core --features simulator --bin simulated-device -- --check-config
+<built-in config>: ok
+```
+
+#### Simulating a license
+
+An SMP sells its second and third stream as licensed options, and a unit without the
+license does not answer those fields with a default — it refuses them, with a SIS
+error code, every time. That is what [field vetoes](#field-vetoes) exist for, and it
+is the one device behaviour that is hard to rehearse without a base unit on the bench.
+
+```console
+$ simulated-device --licensed-streams 1      # a base unit
+$ simulated-device --licensed-streams 1,2    # Dual Mode, no Confidence stream
+$ simulated-device --unlicensed-field SNMP_STATE
+```
+
+`--licensed-streams 1` refuses fourteen fields across streams 2 and 3 — the names, the
+enable states, the push URLs, the push enables and the live states — without any of
+them being named: which stream a field belongs to is read out of its canonical name,
+so a stream field added to the catalog is classified the moment it is named. The
+client sees what it would see from real hardware:
+
+```console
+$ sismatic query base-unit stream_2_name
+Error: device refused `STREAM_2_NAME` with E13: invalid parameter (number is out of range)
+```
+
+A refusal is deliberately not the same as an unset field, which the simulator answers
+with silence. The client routes the two differently — a refusal is a completed
+exchange that happens to say no, so it feeds `auto_disable_after`, while silence is
+indistinguishable from a broken connection and feeds `exchange_timeout` — so a
+simulator that conflated them could not drive the mechanism it exists to test.
+
+#### Configuration
+
+Three layers, each beating the one before it: the built-in config, then a `--config`
+file, then the individual flags. `--print-config` reports what a combination resolved
+to, including every field it will refuse.
+
+| Flag                  | Meaning                                                                     |
+| --------------------- | --------------------------------------------------------------------------- |
+| `--config`            | Device config (YAML). Defaults to the compiled-in fixture, so the binary runs from any directory. |
+| `--licensed-streams`  | Stream indices this unit has: `1`, `1,2`, `all`, `none`. Replaces the file's list. |
+| `--unlicensed-field`  | Refuse this field by name, whatever stream it belongs to. Repeatable.        |
+| `--refusal-code`      | The SIS code refusals answer with, without the `E`. Defaults to `13`.        |
+| `--field NAME=VALUE`  | Seed one field's initial value. Repeatable, and canonicalised through the catalog. |
+| `--username`, `--password` | The credentials it accepts.                                            |
+| `--host`, `--port`    | Where it listens. Defaults to `127.0.0.1:2222`.                             |
+| `--stdout`            | Answer on stdout rather than the extended-data stream real hardware uses.    |
+| `--log-level`         | Also read from `RUST_LOG`.                                                   |
+| `--check-config`      | Validate against the instruction catalog and exit.                           |
+| `--print-config`      | Print the resolved configuration and exit.                                   |
+
+The config file is the same shape, with the license beside the fields:
+
+```yaml
+username: admin
+password: extron
+
+licensed_streams: [1]            # a base unit
+unlicensed_fields: [SNMP_STATE]  # anything else this unit refuses
+refusal_code: 13
+
+fields:
+  FIRMWARE: "3.06"
+  STREAM_1_NAME: Archive Channel A
+  # ... every field in the catalog; --check-config names the ones you missed
+```
+
+Config is the *initial* state, not a fixed answer table: register and setting writes
+overwrite a field, and recording commands rewrite `RUNNING_STATE`. The license is the
+exception — it is what the unit *is*, and no request changes it.
+
+#### A fleet of them
+
+`simulated-fleet` takes the same `devices.yaml` the server does and serves a
+simulated SMP for every device in it, from one process:
+
+```console
+$ cargo run -p sismatic-core --features simulator --bin simulated-fleet -- \
+    devices.yaml --host 127.0.0.1 --port-base 2401
+```
+
+The file is read by `devices::config::load` — the same function the server's
+composition root calls — so `defaults` inheritance, the one id namespace and the
+canonicalisation of `disabled_fields` behave here exactly as they do in
+production, because they are. A device's `disabled_fields` becomes that unit's
+refusal set, so the document's claim about a recorder is the simulated recorder's
+behaviour rather than a note beside it. `--port-base 0` lets the kernel pick every
+port; `--dry-run --json` prints the placement without binding it, which is enough
+to generate the devices file that points a server at the simulated fleet. The
+input is a real devices file, so passwords are masked in the report unless
+`--show-credentials` is given.
+
+`--device-config-for ID=FILE` gives one device its own template, so a single fleet
+can carry several configurations at once — a base unit beside fully-loaded ones,
+older firmware in one wing, a room whose alarms are already firing:
+
+```console
+$ simulated-fleet devices.yaml --port-base 2701 --device-config-for annex-7=./base-unit.yaml
+```
+
+With the server pointed at such a fleet, everything above the transport is the
+production stack. [Simulated SMPs](./crates/sismatic-core/docs/simulator.md) covers
+both binaries, the template ladder and what the inventory does and does not decide.
+
 ## Documentation
 
 | Where                                                                 | What                                              |
 | --------------------------------------------------------------------- | ------------------------------------------------- |
 | `/api` on a running server                                            | Interactive API reference, generated from the code |
 | [Server README](./crates/sismatic-server/README.md)                   | The server's own notes on configuration and reload |
+| [Simulated SMPs](./crates/sismatic-core/docs/simulator.md)            | One simulated device, or a whole simulated building |
 | [Python API reference](https://metzenseifner.github.io/sismatic/)     | The full `Sis` surface, built from [`docs/`](./docs) with `nix run .#docs` |
 | [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/metzenseifner/sismatic) | Ask questions about this codebase |
 

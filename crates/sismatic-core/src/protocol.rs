@@ -17,9 +17,12 @@
 //! with an error token instead of answering it, and no instruction's parser
 //! recognises one. See [`SisError`].
 
-mod control_chars;
+// `pub(crate)`, not private: the simulator is a sibling module and builds its
+// replies from these same control characters and helpers rather than
+// re-spelling them. Still not part of the public API.
+pub(crate) mod control_chars;
 pub mod instructions;
-mod payload_helpers;
+pub(crate) mod payload_helpers;
 mod sis_error;
 mod states;
 

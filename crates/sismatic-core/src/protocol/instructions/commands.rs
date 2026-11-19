@@ -18,7 +18,9 @@ instruction_catalog! {
 }
 
 impl Command {
-    fn verb(self) -> &'static str {
+    /// The SIS verb this command sends. Crate-visible so the simulator can echo
+    /// it back rather than re-spelling the token in a second place.
+    pub(crate) fn verb(self) -> &'static str {
         match self {
             Command::Start => "Y1",
             Command::Stop => "Y0",
