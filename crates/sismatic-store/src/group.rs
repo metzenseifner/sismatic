@@ -162,6 +162,10 @@ fn matches_text(want: &str, observed: &ReadValue) -> bool {
         // one — `ACTIVE_ALARMS` is a query with no setting behind it. Nothing
         // can legitimately expect this, so nothing satisfies it.
         ReadValue::Alarms(_) => false,
+        // Same reasoning, and a stronger case: `RECORDING_EVENTS` is the
+        // recorder's own table, read-only and with no setting behind it. An
+        // expectation over it could not be *written*, so none can be met.
+        ReadValue::RecordingEvents(_) => false,
     }
 }
 

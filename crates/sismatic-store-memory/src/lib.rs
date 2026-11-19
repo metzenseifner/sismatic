@@ -106,7 +106,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
-use sismatic_api_types::{Alarm, DeviceId, FieldName, Read, ReadValue, TimeSpan, Timestamp};
+use sismatic_api_types::{
+    Alarm, DeviceId, FieldName, Read, ReadValue, RecordingEvent, TimeSpan, Timestamp,
+};
 use sismatic_store::lifecycle::{Lifecycle, Swept, Usage};
 use sismatic_store::{ReadError, ReadStore, WriteError, WriteStore};
 
@@ -520,6 +522,24 @@ fn value_bytes(value: &ReadValue) -> u64 {
         ReadValue::Alarms(alarms) => alarms
             .iter()
             .map(|a| size_of::<Alarm>() + a.name.len() + a.level.len())
+            .sum(),
+        // By far the largest value the store holds — a recorder's whole event
+        // table, which is why the `extra` map is counted key-by-key rather than
+        // waved through: on a firmware that reports fields this type does not
+        // name, that map is where most of the bytes end up.
+        ReadValue::RecordingEvents(events) => events
+            .iter()
+            .map(|e| {
+                size_of::<RecordingEvent>()
+                    + e.identifier.len()
+                    + e.creator.len()
+                    + e.title.len()
+                    + e.package.len()
+                    + e.extra
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len() + ENTRY_OVERHEAD as usize)
+                        .sum::<usize>()
+            })
             .sum(),
         // Stored inline in the enum, so they are already in `size_of::<Read>()`.
         ReadValue::Port(_) | ReadValue::Number(_) | ReadValue::Flag(_) | ReadValue::State(_) => 0,

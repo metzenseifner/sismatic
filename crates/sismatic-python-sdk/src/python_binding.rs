@@ -13,6 +13,7 @@
 // TODO Consider using Rust’s documentation blocks but with Sphinx’s RST syntax
 // see demo: https://github.com/insight-platform/pyo3-sphinx-documentation
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,6 +70,60 @@ struct Alarm {
 impl Alarm {
     fn __repr__(&self) -> String {
         format!("Alarm(name={:?}, level={:?})", self.name, self.level)
+    }
+}
+
+/// One recording event, exposed to Python with an attribute per field.
+///
+/// `start` is epoch seconds, `state` the device's raw code (undecoded — see the
+/// core type), and `media_present` a real `bool` even though the device sends
+/// the string `"true"`. Any of the three may be `None` on a firmware that does
+/// not report it, which is deliberately distinct from `0`/`False`.
+///
+/// `extra` holds keys this type does not name, each as **JSON text** —
+/// `json.loads` one if you want it. Text rather than a native object so that
+/// this surface and the HTTP API state the same rule about unattested fields.
+#[pyclass(name = "RecordingEvent", frozen, get_all)]
+#[derive(Clone)]
+struct RecordingEvent {
+    db_id: u64,
+    start: Option<i64>,
+    identifier: String,
+    creator: String,
+    title: String,
+    state: Option<u8>,
+    media_present: Option<bool>,
+    package: String,
+    extra: BTreeMap<String, String>,
+}
+
+#[pymethods]
+impl RecordingEvent {
+    fn __repr__(&self) -> String {
+        format!(
+            "RecordingEvent(db_id={}, identifier={:?}, state={:?})",
+            self.db_id, self.identifier, self.state
+        )
+    }
+}
+
+impl From<sismatic_core::protocol::RecordingEvent> for RecordingEvent {
+    fn from(event: sismatic_core::protocol::RecordingEvent) -> Self {
+        RecordingEvent {
+            db_id: event.db_id,
+            start: event.start,
+            identifier: event.identifier,
+            creator: event.creator,
+            title: event.title,
+            state: event.state,
+            media_present: event.media_present,
+            package: event.package,
+            extra: event
+                .extra
+                .into_iter()
+                .filter_map(|(k, v)| serde_json::to_string(&v).ok().map(|text| (k, text)))
+                .collect(),
+        }
     }
 }
 
@@ -305,9 +360,19 @@ fn close_session_at_exit(session_ref: &Bound<'_, PyAny>) -> PyResult<()> {
 }
 
 /// Map a decoded [`Value`] onto the natural Python type: ports/numbers become
-/// `int`, flags become `bool`, active alarms become a `list[Alarm]`, and
-/// everything else falls back to its string rendering (text, version, ack
-/// token, MAC address, recording state).
+/// `int`, flags become `bool`, active alarms become a `list[Alarm]`, recording
+/// events a `list[RecordingEvent]`, and everything else falls back to its
+/// string rendering (text, version, ack token, MAC address, recording state).
+///
+/// # The wildcard is a hazard, not a convenience
+///
+/// The `other` arm below means a variant added to [`Value`] compiles here
+/// silently and arrives in Python as a `str` — unlike the `to_dto` seam in
+/// `sismatic-sync`, which is wildcard-free precisely so that drift is a build
+/// error. There is no compile-time signal for this file. **A new `Value`
+/// variant that is not a plain scalar needs an arm added here by hand**, and
+/// the matching entry in `stub.rs`, or the SDK quietly ships the `Display`
+/// rendering of a structure.
 fn value_into_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
     match value {
         Value::Port(p) => p.into_py_any(py),
@@ -316,6 +381,11 @@ fn value_into_py(py: Python<'_>, value: Value) -> PyResult<Py<PyAny>> {
         Value::Alarms(a) => a
             .into_iter()
             .map(|(name, level)| Alarm { name, level })
+            .collect::<Vec<_>>()
+            .into_py_any(py),
+        Value::RecordingEvents(events) => events
+            .into_iter()
+            .map(RecordingEvent::from)
             .collect::<Vec<_>>()
             .into_py_any(py),
         other => other.to_string().into_py_any(py),
@@ -332,5 +402,6 @@ fn sismatic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = pyo3_log::init();
     m.add_class::<Sismatic>()?;
     m.add_class::<Alarm>()?;
+    m.add_class::<RecordingEvent>()?;
     Ok(())
 }
