@@ -131,6 +131,61 @@ pub struct RecordingEvent {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// Every recording event a device knows about, as one JSON document.
+///
+/// The reply itself is a *list*: one JSON object per line. A list is not a
+/// value a config file cell or a `NAME=VALUE` flag can hold, so this folds it
+/// into a single object under one key, which both of those can:
+///
+/// ```json
+/// {"recording_events": [{"db_id": 58, "title": "Lecture 1"}]}
+/// ```
+///
+/// It carries the same [`RecordingEvent`] the parser produces, so a document
+/// cannot describe an event a client could not have read, and
+/// [`wire_body`](Self::wire_body) renders it back to the device's own framing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingEvents {
+    /// The events, in the order the device would list them.
+    #[serde(default)]
+    pub recording_events: Vec<RecordingEvent>,
+}
+
+impl From<Vec<RecordingEvent>> for RecordingEvents {
+    fn from(recording_events: Vec<RecordingEvent>) -> Self {
+        RecordingEvents { recording_events }
+    }
+}
+
+impl RecordingEvents {
+    /// The reply body: each event as one JSON object, each terminated by
+    /// `CR LF` — the `RECORDING_EVENTS` frame *minus* its final `CR LF`.
+    ///
+    /// The terminator is left to the caller because that makes the body the
+    /// same shape as every other query's: a simulated device renders any field
+    /// as `format!("{value}\r\n")`, so an empty list is the empty string, which
+    /// that rendering turns into the bare terminator a device with no
+    /// recordings sends, and `n` events become `n` lines plus the terminator.
+    ///
+    /// The framing lives here rather than at the call site for the reason the
+    /// rest of this module gives: the layer that parses a frame is the layer
+    /// that publishes it, so the two cannot drift apart silently.
+    pub fn wire_body(&self) -> String {
+        let mut out = String::new();
+        for event in &self.recording_events {
+            // Infallible: every key is a `String` and every value is already
+            // `serde_json`'s own, so there is no non-string map key and no
+            // custom `Serialize` to fail.
+            let line = serde_json::to_string(event)
+                .expect("a RecordingEvent serializes: its keys are all strings");
+            out.push_str(&line);
+            out.push_str("\r\n");
+        }
+        out
+    }
+}
+
 /// Accept a boolean written either as a JSON boolean or as a string.
 ///
 /// The accepted spellings are the ones `Setting`'s encoder folds onto `1`/`0`,
@@ -343,7 +398,7 @@ mod tests {
         }
     }
 
-    const EVENT_A: &str = r#"{"db_id":58,"start":1767879511,"identifier":"A_1","creator":"c102259","title":"Spread Your Wings","state":11,"media_present":"true","package":"/var/internal/A_1"}"#;
+    const EVENT_A: &str = r#"{"db_id":58,"start":1767879511,"identifier":"A_1","creator":"c900011","title":"Mechanics I","state":11,"media_present":"true","package":"/var/internal/A_1"}"#;
     const EVENT_B: &str = r#"{"db_id":59,"start":1767883456,"identifier":"A_2","creator":"","title":"","state":5,"media_present":"true","package":"/var/internal/A_2"}"#;
 
     #[test]
@@ -360,7 +415,7 @@ mod tests {
         assert_eq!(events[0].db_id, 58);
         assert_eq!(events[0].state, Some(11));
         assert_eq!(events[0].start, Some(1767879511));
-        assert_eq!(events[0].title, "Spread Your Wings");
+        assert_eq!(events[0].title, "Mechanics I");
         // The device sends this as the string `"true"`, not a JSON boolean.
         assert_eq!(events[0].media_present, Some(true));
     }
@@ -474,18 +529,19 @@ mod tests {
         }
     }
 
-    /// A verbatim excerpt of a real `LRCDR` reply, framed as the device frames
-    /// it. Guards the shape against a "simplification" that happens to satisfy
+    /// An excerpt of a real `LRCDR` reply, framed as the device frames it,
+    /// with identifiers, staff ids and titles replaced: the shape is the
+    /// device's, the data is not. Guards the shape against a "simplification" that happens to satisfy
     /// the synthetic cases above: mixed empty and populated metadata, the
     /// stringly boolean, and both observed state codes, all in one reply.
     #[test]
     fn parses_a_captured_device_reply() {
         const CAPTURED: &str = concat!(
-            r#"{"db_id":58,"start":1767879511,"identifier":"GeiWi-AV-Studio-A_20260108-143831","creator":"c102259","title":"2026-01-08 - Spread Your Wings","state":11,"media_present":"true","package":"/var/internal/GeiWi-AV-Studio-A_20260108-143831"}"#,
+            r#"{"db_id":58,"start":1767879511,"identifier":"Sim-Studio-A_20260108-143831","creator":"c900011","title":"2026-01-08 - Mechanics I","state":11,"media_present":"true","package":"/var/internal/Sim-Studio-A_20260108-143831"}"#,
             "\r\n",
-            r#"{"db_id":67,"start":1774626149,"identifier":"GeiWi-AV-Studio-A_20260327-164229","creator":"","title":"","state":11,"media_present":"true","package":"/var/internal/GeiWi-AV-Studio-A_20260327-164229"}"#,
+            r#"{"db_id":67,"start":1774626149,"identifier":"Sim-Studio-A_20260327-164229","creator":"","title":"","state":11,"media_present":"true","package":"/var/internal/Sim-Studio-A_20260327-164229"}"#,
             "\r\n",
-            r#"{"db_id":163,"start":1792494612,"identifier":"GeiWi-AV-Studio-A_20261020-131012","creator":"c102358","title":"2026-10-20 - Aperture science 101 - Basic portal theory","state":5,"media_present":"true","package":"/var/internal/GeiWi-AV-Studio-A_20261020-131012"}"#,
+            r#"{"db_id":163,"start":1792494612,"identifier":"Sim-Studio-A_20261020-131012","creator":"c900022","title":"2026-10-20 - Optics II","state":5,"media_present":"true","package":"/var/internal/Sim-Studio-A_20261020-131012"}"#,
             "\r\n",
             "\r\n",
         );
@@ -507,9 +563,93 @@ mod tests {
         // back as the empty string rather than becoming an absence.
         assert_eq!(events[1].creator, "");
         assert_eq!(events[1].title, "");
-        assert_eq!(events[2].creator, "c102358");
+        assert_eq!(events[2].creator, "c900022");
         // Nothing in this firmware's field set lands outside the named fields.
         assert!(events.iter().all(|e| e.extra.is_empty()));
+    }
+
+    /// The drift net for the document form: the body a config renders is fed
+    /// to the *production* parser, framed the way a simulated device frames
+    /// every field. A change to either side fails here rather than later, as a
+    /// simulated recorder that answers bytes no client can read.
+    #[test]
+    fn a_document_renders_a_body_the_parser_reads_back() {
+        let document = RecordingEvents {
+            recording_events: events_of(drive(
+                &Query::RecordingEvents.instruction(),
+                &format!("{EVENT_A}\r\n{EVENT_B}\r\n\r\n"),
+            )),
+        };
+
+        let instr = Query::RecordingEvents.instruction();
+        let rendered = format!("{}\r\n", document.wire_body());
+        assert_eq!(
+            events_of(drive(&instr, &rendered)),
+            document.recording_events
+        );
+    }
+
+    /// The empty document is the empty body, which the uniform
+    /// `format!("{value}\r\n")` rendering turns into the bare terminator a
+    /// device with no recordings sends. Separate from the test above because
+    /// this is the case the frame is ambiguous about, and the one a `Vec`
+    /// joined on `\r\n` would get wrong.
+    #[test]
+    fn an_empty_document_renders_the_bare_terminator() {
+        let document = RecordingEvents::default();
+        assert_eq!(document.wire_body(), "");
+
+        let rendered = format!("{}\r\n", document.wire_body());
+        assert_eq!(rendered, "\r\n");
+        assert_eq!(
+            events_of(drive(&Query::RecordingEvents.instruction(), &rendered)),
+            vec![]
+        );
+    }
+
+    /// A single event is the other end of that ambiguity: one line plus the
+    /// terminator is `\r\n\r\n` only because the body carries its own line
+    /// ending.
+    #[test]
+    fn a_one_event_document_still_carries_the_terminator() {
+        let document = RecordingEvents::from(events_of(drive(
+            &Query::RecordingEvents.instruction(),
+            &format!("{EVENT_A}\r\n\r\n"),
+        )));
+        let rendered = format!("{}\r\n", document.wire_body());
+        assert!(rendered.ends_with("\r\n\r\n"), "{rendered:?}");
+        assert_eq!(
+            events_of(drive(&Query::RecordingEvents.instruction(), &rendered)).len(),
+            1
+        );
+    }
+
+    /// The document is also the file format, so it must survive JSON — and an
+    /// unattested key must survive it too, or a config could not describe the
+    /// firmware that sends one.
+    #[test]
+    fn a_document_round_trips_through_json_with_unattested_keys() {
+        let text = r#"{"recording_events":[{"db_id":7,"title":"Lecture 7","chapters":3}]}"#;
+        let document: RecordingEvents = serde_json::from_str(text).expect("parses");
+        assert_eq!(document.recording_events[0].db_id, 7);
+        assert_eq!(
+            document.recording_events[0].extra.get("chapters"),
+            Some(&serde_json::json!(3))
+        );
+
+        let again: RecordingEvents =
+            serde_json::from_str(&serde_json::to_string(&document).expect("serializes"))
+                .expect("re-parses");
+        assert_eq!(again, document);
+    }
+
+    /// A misspelled key at the document's own level is an error, not an event
+    /// list that silently came back empty. `RecordingEvent` is lenient about
+    /// unknown keys because firmwares differ; the wrapper is not, because its
+    /// one key is ours.
+    #[test]
+    fn a_misspelled_document_key_is_rejected() {
+        assert!(serde_json::from_str::<RecordingEvents>(r#"{"recordings":[]}"#).is_err());
     }
 
     #[test]

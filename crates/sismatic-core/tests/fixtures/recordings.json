@@ -1,0 +1,30 @@
+{
+  "recording_events": [
+    {
+      "db_id": 58,
+      "start": 1767879511,
+      "identifier": "sim-smp-351_20260108-143831",
+      "creator": "c900011",
+      "title": "2026-01-08 - Lecture 1",
+      "state": 11,
+      "media_present": "true",
+      "package": "/var/internal/sim-smp-351_20260108-143831"
+    },
+    {
+      "db_id": 59,
+      "start": 1767883456,
+      "identifier": "sim-smp-351_20260108-154417",
+      "creator": "",
+      "title": "",
+      "state": 5,
+      "media_present": "true",
+      "package": "/var/internal/sim-smp-351_20260108-154417"
+    },
+    {
+      "db_id": 60,
+      "start": 1767883494,
+      "identifier": "sim-smp-351_20260108-154454",
+      "package": "/var/internal/sim-smp-351_20260108-154454"
+    }
+  ]
+}

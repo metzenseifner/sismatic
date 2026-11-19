@@ -23,11 +23,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::Deserialize;
 
+use crate::protocol::RecordingEvents;
 use crate::protocol::Step;
 use crate::protocol::Value;
 use crate::protocol::control_chars::RCDR_LOWER;
@@ -81,13 +83,154 @@ impl<'de> Deserialize<'de> for WireScalar {
     }
 }
 
+/// A field value as the config file writes it.
+///
+/// Three forms, because one of them has to carry a *list*. Nearly every reply
+/// in this protocol is one line, which [`WireScalar`] covers; `RECORDING_EVENTS`
+/// is a list of JSON objects, and a list is not something a YAML scalar or a
+/// `--field NAME=VALUE` flag can hold. So the file may also give a
+/// [`RecordingEvents`] document inline, or name a file holding one:
+///
+/// ```yaml
+/// fields:
+///   UNIT_NAME: Main Hall SMP            # a scalar, as before
+///   RECORDING_EVENTS:
+///     recording_events:                 # the document, inline
+///       - db_id: 1
+///         title: Lecture 1
+/// ```
+///
+/// ```yaml
+///   RECORDING_EVENTS:
+///     file: ./recordings.json           # the same document, from a file
+/// ```
+///
+/// All three end up as the one thing the store holds — wire text — so nothing
+/// downstream of the loader knows which form was used.
+///
+/// The mapping forms are read key-first rather than through an untagged enum:
+/// a mapping that is neither is then an error naming the key the file actually
+/// wrote, instead of serde's "data did not match any variant".
+#[derive(Debug, Clone)]
+enum RawFieldValue {
+    /// A single-line value, used verbatim as wire text.
+    Scalar(WireScalar),
+    /// A recording-event document written out in the config itself.
+    Events(RecordingEvents),
+    /// A path to a file holding that document as JSON (or YAML — the loader
+    /// reads both, so `.json` and `.yaml` are equally valid).
+    ///
+    /// Relative to the **process working directory**, not to the config: a
+    /// config may be a compiled-in string (`simulated-device` with no
+    /// `--config`) or a `--device-config-for` template, so there is not always
+    /// a config directory to anchor to, and one rule everywhere beats a rule
+    /// that depends on where the YAML came from.
+    File(PathBuf),
+}
+
+/// The keys [`RawFieldValue`] accepts in its mapping form, for error messages.
+const DOCUMENT_KEYS: &str = "`recording_events` or `file`";
+
+impl<'de> Deserialize<'de> for RawFieldValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RawFieldValue;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(
+                    f,
+                    "a string, integer, or boolean field value, or a mapping with {DOCUMENT_KEYS}"
+                )
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<RawFieldValue, E> {
+                Ok(RawFieldValue::Scalar(WireScalar(v.to_string())))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<RawFieldValue, E> {
+                Ok(RawFieldValue::Scalar(WireScalar(v.to_string())))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<RawFieldValue, E> {
+                Ok(RawFieldValue::Scalar(WireScalar(v.to_string())))
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<RawFieldValue, E> {
+                Ok(RawFieldValue::Scalar(WireScalar(
+                    if v { "1" } else { "0" }.to_string(),
+                )))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<RawFieldValue, A::Error> {
+                use serde::de::Error as _;
+
+                let Some(key) = map.next_key::<String>()? else {
+                    return Err(A::Error::custom(format!(
+                        "an empty mapping is not a field value; expected {DOCUMENT_KEYS}"
+                    )));
+                };
+                let value = match key.as_str() {
+                    "recording_events" => RawFieldValue::Events(RecordingEvents {
+                        recording_events: map.next_value()?,
+                    }),
+                    "file" => RawFieldValue::File(map.next_value::<PathBuf>()?),
+                    other => {
+                        return Err(A::Error::custom(format!(
+                            "unknown field-value key `{other}`; expected {DOCUMENT_KEYS}"
+                        )));
+                    }
+                };
+                // Both forms are the whole value, so a second key is a config
+                // that means two things at once rather than one to merge.
+                if let Some(extra) = map.next_key::<String>()? {
+                    return Err(A::Error::custom(format!(
+                        "a field value takes one of {DOCUMENT_KEYS}, not both: found `{key}` and `{extra}`"
+                    )));
+                }
+                Ok(value)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+impl RawFieldValue {
+    /// The wire text this value seeds its field with.
+    ///
+    /// The document forms render through [`RecordingEvents::wire_body`], so the
+    /// framing comes from the protocol layer that parses it rather than from
+    /// here — the rule the module docs set out, applied to a value that happens
+    /// to span several lines.
+    fn into_wire_text(self) -> Result<String, LoadError> {
+        match self {
+            RawFieldValue::Scalar(WireScalar(text)) => Ok(text),
+            RawFieldValue::Events(document) => Ok(document.wire_body()),
+            RawFieldValue::File(path) => {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| LoadError(format!("cannot read {}: {e}", path.display())))?;
+                // One reader for both extensions: JSON is a subset of YAML, so
+                // a `{"recording_events": [...]}` document parses either way
+                // and an operator need not think about which they wrote.
+                let document: RecordingEvents = serde_saphyr::from_str(&text).map_err(|e| {
+                    LoadError(format!(
+                        "{} is not a recording-event document: {e}",
+                        path.display()
+                    ))
+                })?;
+                Ok(document.wire_body())
+            }
+        }
+    }
+}
+
 /// The on-disk shape of a device config file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(flatten)]
     credentials: Credentials,
-    fields: BTreeMap<String, WireScalar>,
+    fields: BTreeMap<String, RawFieldValue>,
     /// Absent means "every stream the catalog knows about", which is what keeps
     /// a config written before licensing existed meaning what it meant.
     #[serde(default)]
@@ -307,10 +450,14 @@ impl DeviceState {
 
         let mut fields = BTreeMap::new();
         let mut unknown = Vec::new();
-        for (key, WireScalar(value)) in raw.fields {
+        for (key, raw_value) in raw.fields {
             match canonical_name(&key) {
                 Some(name) => {
-                    fields.insert(name, value);
+                    // Resolved here rather than at use time so a config naming
+                    // an unreadable file fails the load, where the path is
+                    // still in hand to name, instead of answering a query with
+                    // an empty list later.
+                    fields.insert(name, raw_value.into_wire_text()?);
                 }
                 None => unknown.push(key),
             }
@@ -656,6 +803,99 @@ fields:
         let state = DeviceState::from_yaml_str(MINIMAL).expect("loads");
         assert_eq!(state.get("SNMP_STATE").as_deref(), Some("1"));
         assert_eq!(state.get("DHCP_MODE").as_deref(), Some("0"));
+    }
+
+    /// The document form renders the device's framing, not YAML: one JSON
+    /// object per line, each line CR LF terminated, with the frame's final
+    /// terminator left to the uniform `format!("{value}\r\n")` rendering.
+    #[test]
+    fn a_document_field_becomes_the_wire_frame() {
+        let state = DeviceState::from_yaml_str(
+            "\
+username: admin
+password: extron
+fields:
+  RECORDING_EVENTS:
+    recording_events:
+      - db_id: 7
+        title: Lecture 7
+",
+        )
+        .expect("loads");
+
+        let body = state.get("RECORDING_EVENTS").expect("set");
+        assert!(body.ends_with("\r\n"), "{body:?}");
+        assert_eq!(body.lines().count(), 1);
+
+        // And the device answers the full frame, which the client's own parser
+        // reads back as one event.
+        let reply = state
+            .handle(Request::Get(Query::RecordingEvents))
+            .expect("answered");
+        assert!(reply.ends_with("\r\n\r\n"), "{reply:?}");
+        assert!(matches!(
+            Query::RecordingEvents.instruction().parse_step(&reply),
+            Step::Done(Value::RecordingEvents(ref events)) if events.len() == 1
+        ));
+    }
+
+    /// An empty document is a recorder that has never recorded, and must answer
+    /// the bare terminator rather than going silent — silence is a timeout, and
+    /// "no recordings" is an answer.
+    #[test]
+    fn an_empty_document_answers_the_bare_terminator() {
+        let state = DeviceState::from_yaml_str(
+            "username: admin\npassword: extron\nfields:\n  RECORDING_EVENTS:\n    recording_events: []\n",
+        )
+        .expect("loads");
+        assert_eq!(state.get("RECORDING_EVENTS").as_deref(), Some(""));
+        assert_eq!(
+            state
+                .handle(Request::Get(Query::RecordingEvents))
+                .as_deref(),
+            Some("\r\n")
+        );
+    }
+
+    /// A mapping that is neither form names the key the file wrote. Serde's own
+    /// untagged error ("data did not match any variant") would not, which is
+    /// the reason the value is read key-first.
+    #[test]
+    fn an_unknown_document_key_names_itself() {
+        let err = DeviceState::from_yaml_str(
+            "username: admin\npassword: extron\nfields:\n  RECORDING_EVENTS:\n    recordings: []\n",
+        )
+        .expect_err("rejected");
+        assert!(err.to_string().contains("recordings"), "{err}");
+    }
+
+    /// Both forms are the whole value, so giving both is a config that means
+    /// two things at once rather than one to merge.
+    #[test]
+    fn a_document_cannot_be_inline_and_a_file_at_once() {
+        let err = DeviceState::from_yaml_str(
+            "\
+username: admin
+password: extron
+fields:
+  RECORDING_EVENTS:
+    recording_events: []
+    file: ./recordings.json
+",
+        )
+        .expect_err("rejected");
+        assert!(err.to_string().contains("file"), "{err}");
+    }
+
+    /// A file that cannot be read fails the *load*, naming the path, rather
+    /// than leaving a cell empty and answering "no recordings" later.
+    #[test]
+    fn an_unreadable_document_file_fails_the_load() {
+        let err = DeviceState::from_yaml_str(
+            "username: admin\npassword: extron\nfields:\n  RECORDING_EVENTS:\n    file: ./no-such-recordings.json\n",
+        )
+        .expect_err("rejected");
+        assert!(err.to_string().contains("no-such-recordings.json"), "{err}");
     }
 
     #[test]

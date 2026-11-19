@@ -143,8 +143,8 @@ mod tests {
             db_id: 58,
             start: Some(1767879511),
             identifier: "A_1".into(),
-            creator: "c102259".into(),
-            title: "Spread Your Wings".into(),
+            creator: "c900011".into(),
+            title: "Mechanics I".into(),
             state: Some(11),
             media_present: Some(true),
             package: "/var/internal/A_1".into(),
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(got.start, Some(1767879511));
         assert_eq!(got.state, Some(11));
         assert_eq!(got.media_present, Some(true));
-        assert_eq!(got.title, "Spread Your Wings");
+        assert_eq!(got.title, "Mechanics I");
         // Each value is the JSON *text* of what core held, so a client gets it
         // back with one `JSON.parse` and nothing is lost on the way.
         assert_eq!(got.extra["duration"], "1200");
