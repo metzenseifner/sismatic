@@ -28,7 +28,10 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 # Config-file deserializers, each optional and gated by a same-named feature
 # below. The library is format-agnostic by default; a consumer opts into one.
 toml = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# Required, not optional: the `RECORDING_EVENTS` reply is a list of JSON
+# objects, so the protocol layer itself needs a JSON reader. The `json` feature
+# below still exists, but now gates only the JSON *config-file* loader.
+serde_json.workspace = true
 serde-saphyr = { workspace = true, optional = true }
 winnow.workspace = true
 tracing.workspace = true
@@ -46,7 +49,10 @@ testing = []
 # (`config::from_toml_str` and friends, plus extension-dispatching `config::load`);
 # enable none to keep the crate format-free and call `resolve_config` yourself.
 toml = ["dep:toml"]
-json = ["dep:serde_json"]
+# `serde_json` is an unconditional dependency (see above), so this gates the
+# config loader alone and no longer pulls the crate in. Kept as a no-op feature
+# so an existing `features = ["json"]` keeps working.
+json = []
 yaml = ["dep:serde-saphyr"]
 # The simulated device: an SSH *server* that answers SIS requests from a YAML
 # config. Off by default so it never links into the production front-ends —

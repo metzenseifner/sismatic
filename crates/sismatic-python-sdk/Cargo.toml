@@ -26,6 +26,9 @@ pyo3-log = { workspace = true, optional = true }
 # `Sis.from_config`, the bring-your-own-parser entry point.
 pythonize = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
+# Renders a recording event's unattested `extra` keys to JSON text, matching
+# what the HTTP DTO carries so both client surfaces state one rule.
+serde_json.workspace = true
 
 [features]
 # The blocking Python facade. It drives real hardware, so it pulls in core's

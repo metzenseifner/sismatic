@@ -18,8 +18,10 @@
 //! rather than a silent wrong value on the wire. Do not add a catch-all arm; the
 //! wildcard is the only thing that could hide a new variant.
 
-use sismatic_api_types::{Alarm, MacAddr, ReadValue, RecordingState};
-use sismatic_core::protocol::{RecordingState as CoreState, Value};
+use sismatic_api_types::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState};
+use sismatic_core::protocol::{
+    RecordingEvent as CoreRecordingEvent, RecordingState as CoreState, Value,
+};
 
 /// Convert a decoded device value into its wire DTO.
 ///
@@ -44,6 +46,40 @@ pub fn to_dto(value: Value) -> ReadValue {
                 .map(|(name, level)| Alarm { name, level })
                 .collect(),
         ),
+        Value::RecordingEvents(events) => {
+            ReadValue::RecordingEvents(events.into_iter().map(event_to_dto).collect())
+        }
+    }
+}
+
+/// Convert one recording event into its wire DTO.
+///
+/// The one shape change is `extra`: core holds the unattested keys as real
+/// `serde_json::Value`s, while the DTO holds each one's **JSON text**, so that
+/// `api-types` can keep `serde` as its only dependency (see the field's docs
+/// there). This crate sees both models and already has `serde_json`, so the
+/// rendering lands here, which is where every other translation does.
+///
+/// A value that will not render is dropped rather than failing the whole read:
+/// it is by definition a key nothing is attested to depend on, and losing one
+/// speculative field beats losing a hundred recordings. `serde_json::Value` is
+/// in fact infallible to serialize, so this is a defensive branch, not a
+/// path with a known trigger.
+fn event_to_dto(event: CoreRecordingEvent) -> RecordingEvent {
+    RecordingEvent {
+        db_id: event.db_id,
+        start: event.start,
+        identifier: event.identifier,
+        creator: event.creator,
+        title: event.title,
+        state: event.state,
+        media_present: event.media_present,
+        package: event.package,
+        extra: event
+            .extra
+            .into_iter()
+            .filter_map(|(k, v)| serde_json::to_string(&v).ok().map(|text| (k, text)))
+            .collect(),
     }
 }
 
@@ -96,6 +132,71 @@ mod tests {
         ] {
             assert_eq!(to_dto(Value::State(core)), ReadValue::State(wire));
         }
+    }
+
+    /// The `extra` map changes representation across this seam — core holds
+    /// JSON values, the DTO holds their text — so it is asserted directly
+    /// rather than inferred from the struct copy around it.
+    #[test]
+    fn renders_unattested_event_keys_as_json_text() {
+        let event = CoreRecordingEvent {
+            db_id: 58,
+            start: Some(1767879511),
+            identifier: "A_1".into(),
+            creator: "c102259".into(),
+            title: "Spread Your Wings".into(),
+            state: Some(11),
+            media_present: Some(true),
+            package: "/var/internal/A_1".into(),
+            extra: [
+                ("duration".to_string(), serde_json::json!(1200)),
+                ("channel".to_string(), serde_json::json!("B")),
+                ("tags".to_string(), serde_json::json!(["a", "b"])),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let ReadValue::RecordingEvents(events) = to_dto(Value::RecordingEvents(vec![event])) else {
+            panic!("expected a recording-event list");
+        };
+        let got = &events[0];
+
+        assert_eq!(got.db_id, 58);
+        assert_eq!(got.start, Some(1767879511));
+        assert_eq!(got.state, Some(11));
+        assert_eq!(got.media_present, Some(true));
+        assert_eq!(got.title, "Spread Your Wings");
+        // Each value is the JSON *text* of what core held, so a client gets it
+        // back with one `JSON.parse` and nothing is lost on the way.
+        assert_eq!(got.extra["duration"], "1200");
+        assert_eq!(got.extra["channel"], r#""B""#);
+        assert_eq!(got.extra["tags"], r#"["a","b"]"#);
+    }
+
+    /// Absence survives the crossing. A firmware that omits a field must not
+    /// have `0`/`false` invented for it on the way to the wire.
+    #[test]
+    fn a_sparse_event_crosses_the_seam_still_sparse() {
+        let event = CoreRecordingEvent {
+            db_id: 42,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: None,
+            media_present: None,
+            package: String::new(),
+            extra: Default::default(),
+        };
+
+        let ReadValue::RecordingEvents(events) = to_dto(Value::RecordingEvents(vec![event])) else {
+            panic!("expected a recording-event list");
+        };
+        assert_eq!(events[0].start, None);
+        assert_eq!(events[0].state, None);
+        assert_eq!(events[0].media_present, None);
+        assert!(events[0].extra.is_empty());
     }
 
     #[test]

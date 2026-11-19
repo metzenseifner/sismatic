@@ -3255,6 +3255,7 @@ dependencies = [
  "pyo3",
  "pyo3-log",
  "pythonize",
+ "serde_json",
  "sismatic-core",
  "tokio",
 ]
@@ -3316,6 +3317,7 @@ version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "serde_json",
  "sismatic-api-types",
  "sismatic-core",
  "sismatic-store",

@@ -21,6 +21,11 @@ tokio-util = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
+# Renders a recording event's unattested `extra` keys back to JSON text for
+# the DTO, which carries them as text so `api-types` can keep `serde` as its
+# only dependency. This crate already sees both models, so the cost lands here.
+serde_json.workspace = true
+
 [dev-dependencies]
 # The driver's tests drive real poll loops over core's test doubles
 # (`CountingConnector`/`FakeTransport`, behind core's `testing` feature) and
