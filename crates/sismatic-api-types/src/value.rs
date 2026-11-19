@@ -12,6 +12,8 @@
 //! `sismatic-sync` (which writes reads) or `sismatic-db` — never here. This
 //! crate stays a pure description of bytes on the wire.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Recording state reported by an SMP, mirroring
@@ -62,6 +64,71 @@ pub struct Alarm {
     pub level: String,
 }
 
+/// One recording event, as `RECORDING_EVENTS` reports it.
+///
+/// Mirrors `sismatic-core::protocol::RecordingEvent`, re-declared here for the
+/// reason the module docs give: `api-types` must not depend on `core`.
+///
+/// # Optionality is load-bearing
+///
+/// The device's field set is not uniform across firmwares. Only `db_id` is
+/// required; the rest is optional in one of two ways, chosen by what absence
+/// would *mean*. `start`, `state` and `media_present` are nullable, because a
+/// missing value is a different claim from `0` or `false`. The text fields
+/// default to `""`, because the device already sends `""` for an unset one.
+///
+/// `state` is the device's raw code, left undecoded: only `5` and `11` have
+/// been observed and the vocabulary is not documented — the same restraint
+/// [`Alarm`]'s free-text `level` is given above.
+///
+/// `start` is epoch seconds, which is *not* the RFC 3339 form `Read.at` uses.
+/// It is passed through as the device sends it; converting is the client's
+/// decision, taken at the client's own boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RecordingEvent {
+    pub db_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub creator: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_present: Option<bool>,
+    #[serde(default)]
+    pub package: String,
+    /// Keys the device sent that this type does not name, preserved verbatim so
+    /// a richer firmware loses nothing on the way through.
+    ///
+    /// Each value is the **raw JSON text** of that key — `"1200"` for a number,
+    /// `"\"B\""` for a string, `"{\"a\":1}"` for an object. A client that wants
+    /// one parses it at its own boundary, exactly as [`MacAddr`] above expects
+    /// of a caller that wants the raw octets.
+    ///
+    /// Text rather than a JSON value type because this crate takes `serde` and
+    /// nothing else (see the module docs): a `serde_json::Value` here would put
+    /// `serde_json` in the dependency cone of every client of the API. Text
+    /// costs the client a `JSON.parse` and loses nothing — JSON text round-trips.
+    ///
+    /// Nested under its own key rather than flattened back into the object,
+    /// which is the one place this DTO's shape departs from the device's. That
+    /// is deliberate: it puts the stability contract *in the type*. Everything
+    /// above this field is attested against real hardware; everything inside it
+    /// is whatever a firmware happened to add. Flattening the two together
+    /// would hide exactly the distinction a client needs in order to know what
+    /// it can rely on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, string>"))]
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+    pub extra: BTreeMap<String, String>,
+}
+
 /// A decoded read value. The variant reflects what the field *means*, so a
 /// client pattern-matches instead of re-parsing a string — the same benefit the
 /// core `Value` enum gives in-process, preserved across the network boundary.
@@ -95,4 +162,6 @@ pub enum ReadValue {
     State(RecordingState),
     /// Active alarms.
     Alarms(Vec<Alarm>),
+    /// Every recording event the device knows about.
+    RecordingEvents(Vec<RecordingEvent>),
 }

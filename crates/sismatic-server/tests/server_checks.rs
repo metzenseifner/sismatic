@@ -133,6 +133,7 @@ fn the_fixture_config_resolves_its_sync_and_http_sections() {
             ("RUNNING_STATE", Some(5)),
             ("FIRMWARE", Some(3600)),
             ("UNIT_NAME", None),
+            ("RECORDING_EVENTS", Some(900)),
         ]
     );
 }

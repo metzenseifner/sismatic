@@ -12,6 +12,8 @@ sync:
       interval_secs: 5      # ...except the one worth watching closely
     - name: MAC_ADDRESS
       interval_secs: 0      # ...and the one that never changes
+    - name: RECORDING_EVENTS
+      interval_secs: 900    # ...and the one that answers a whole table per poll
 
 http:
   host: 0.0.0.0

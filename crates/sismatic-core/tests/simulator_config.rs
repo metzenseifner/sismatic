@@ -281,3 +281,63 @@ fn a_base_unit_config_has_no_drift_either() {
     // state, two push URLs, a push enable and two live states each.
     assert_eq!(state.license().refused_fields().len(), 14);
 }
+
+/// `RECORDING_EVENTS` from a file, which is the form a realistic recorder
+/// needs: a device with a few hundred recordings is a table, not something to
+/// paste into a device config.
+///
+/// The path is absolute, built from `CARGO_MANIFEST_DIR`, because a relative
+/// one in a config resolves against the process working directory — see
+/// `RawFieldValue::File`.
+#[test]
+fn a_recording_event_document_can_come_from_a_file() {
+    use sismatic_core::protocol::{Step, Value};
+
+    let path = format!(
+        "{}/tests/fixtures/recordings.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = format!(
+        "\
+username: admin
+password: extron
+fields:
+  RECORDING_EVENTS:
+    file: {path}
+"
+    );
+
+    let state = DeviceState::from_yaml_str(&text).expect("the config loads");
+    let reply = state
+        .get(Query::RecordingEvents.name())
+        .map(|body| format!("{body}\r\n"))
+        .expect("the field is seeded");
+
+    // The fixture's three rows, read back through the client's own parser —
+    // including the sparse row, whose absent fields must stay absent rather
+    // than being invented by the round trip through the file.
+    match Query::RecordingEvents.instruction().parse_step(&reply) {
+        Step::Done(Value::RecordingEvents(events)) => {
+            assert_eq!(
+                events.iter().map(|e| e.db_id).collect::<Vec<_>>(),
+                vec![58, 59, 60]
+            );
+            assert_eq!(events[2].state, None);
+            assert_eq!(events[2].media_present, None);
+            assert_eq!(events[0].media_present, Some(true));
+        }
+        other => panic!("the simulator's own rendering did not parse: {other:?}"),
+    }
+}
+
+/// The checked-in `recordings.json` is the documented example of the file form,
+/// so it has to stay a valid document — a broken example is worse than none.
+#[test]
+fn the_checked_in_recordings_document_parses() {
+    use sismatic_core::protocol::RecordingEvents;
+
+    const DOCUMENT: &str = include_str!("fixtures/recordings.json");
+    let document: RecordingEvents = serde_json::from_str(DOCUMENT).expect("valid JSON document");
+    assert_eq!(document.recording_events.len(), 3);
+    assert!(!document.wire_body().is_empty());
+}

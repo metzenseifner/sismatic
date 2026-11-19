@@ -11,6 +11,7 @@
 from typing import Literal
 
 QueryName = Literal[
+    "recording_events",
     "stream_1_name",
     "stream_name_1",
     "stream_2_name",
@@ -120,6 +121,34 @@ class Alarm:
     @property
     def level(self) -> str: ...
 
+class RecordingEvent:
+    """One recording event reported by a device.
+
+    `start` is epoch seconds and `state` the device's raw, undecoded code. Any
+    of the optional fields may be `None` on a firmware that does not report it,
+    which is distinct from `0`/`False`. `extra` holds keys this class does not
+    name, each as JSON text -- `json.loads` one if you want it.
+    """
+
+    @property
+    def db_id(self) -> int: ...
+    @property
+    def start(self) -> int | None: ...
+    @property
+    def identifier(self) -> str: ...
+    @property
+    def creator(self) -> str: ...
+    @property
+    def title(self) -> str: ...
+    @property
+    def state(self) -> int | None: ...
+    @property
+    def media_present(self) -> bool | None: ...
+    @property
+    def package(self) -> str: ...
+    @property
+    def extra(self) -> dict[str, str]: ...
+
 class Sis:
     """A pool of Extron devices, addressable from Python by id."""
 
@@ -146,7 +175,7 @@ class Sis:
         """The ids of every configured device group."""
         ...
 
-    def query(self, target: str, name: QueryName) -> int | bool | str | list[Alarm] | dict[str, int | bool | str | list[Alarm]]:
+    def query(self, target: str, name: QueryName) -> int | bool | str | list[Alarm] | list[RecordingEvent] | dict[str, int | bool | str | list[Alarm] | list[RecordingEvent]]:
         """Read a built-in field (e.g. \"firmware\", \"ssh_port\") from a device, or from a group (returns a dict keyed by member id)."""
         ...
 

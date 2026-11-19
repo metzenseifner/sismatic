@@ -57,6 +57,36 @@ fields:
   RUNNING_STATE: 0
   # An empty list. Populated as `<name:video_loss,level:critical>*<name:...>`.
   ACTIVE_ALARMS: ""
+  # The recorder's own table, and the one field whose reply is a *list* rather
+  # than a line — so it is written as a document rather than as wire text. The
+  # loader renders it back to the device's framing (one JSON object per line,
+  # the list terminated by a blank one), which is why the drift guards can feed
+  # it to the real parser like any other field.
+  #
+  # `recording_events: []` is a recorder that has never recorded. For a longer
+  # table than belongs in a config, name a file holding the same document:
+  #
+  #   RECORDING_EVENTS:
+  #     file: ./recordings.json
+  #
+  RECORDING_EVENTS:
+    recording_events:
+      # A complete row, as a current firmware reports one. `media_present`
+      # really does arrive as the string "true"; a JSON boolean is accepted too.
+      - db_id: 1
+        start: 1767879511
+        identifier: sim-smp-351_20260108-143831
+        creator: c900011
+        title: Lecture 1
+        state: 11
+        media_present: "true"
+        package: /var/internal/sim-smp-351_20260108-143831
+      # A sparse row: the fields a firmware may simply not report are absent
+      # rather than zeroed, which is the distinction `Option` exists to carry.
+      - db_id: 2
+        start: 1767883456
+        identifier: sim-smp-351_20260108-154417
+        package: /var/internal/sim-smp-351_20260108-154417
 
   # --- network ------------------------------------------------------------
   TELNET_PORT: 23
