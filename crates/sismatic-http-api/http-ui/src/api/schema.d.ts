@@ -1860,6 +1860,69 @@ export interface components {
             type: "alarms";
             /** @description Active alarms. */
             value: components["schemas"]["Alarm"][];
+        } | {
+            /** @enum {string} */
+            type: "recording_events";
+            /** @description Every recording event the device knows about. */
+            value: components["schemas"]["RecordingEvent"][];
+        };
+        /**
+         * @description One recording event, as `RECORDING_EVENTS` reports it.
+         *
+         *     Mirrors `sismatic-core::protocol::RecordingEvent`, re-declared here for the
+         *     reason the module docs give: `api-types` must not depend on `core`.
+         *
+         *     # Optionality is load-bearing
+         *
+         *     The device's field set is not uniform across firmwares. Only `db_id` is
+         *     required; the rest is optional in one of two ways, chosen by what absence
+         *     would *mean*. `start`, `state` and `media_present` are nullable, because a
+         *     missing value is a different claim from `0` or `false`. The text fields
+         *     default to `""`, because the device already sends `""` for an unset one.
+         *
+         *     `state` is the device's raw code, left undecoded: only `5` and `11` have
+         *     been observed and the vocabulary is not documented — the same restraint
+         *     [`Alarm`]'s free-text `level` is given above.
+         *
+         *     `start` is epoch seconds, which is *not* the RFC 3339 form `Read.at` uses.
+         *     It is passed through as the device sends it; converting is the client's
+         *     decision, taken at the client's own boundary.
+         */
+        RecordingEvent: {
+            creator?: string;
+            /** Format: int64 */
+            db_id: number;
+            /**
+             * @description Keys the device sent that this type does not name, preserved verbatim so
+             *     a richer firmware loses nothing on the way through.
+             *
+             *     Each value is the **raw JSON text** of that key — `"1200"` for a number,
+             *     `"\"B\""` for a string, `"{\"a\":1}"` for an object. A client that wants
+             *     one parses it at its own boundary, exactly as [`MacAddr`] above expects
+             *     of a caller that wants the raw octets.
+             *
+             *     Text rather than a JSON value type because this crate takes `serde` and
+             *     nothing else (see the module docs): a `serde_json::Value` here would put
+             *     `serde_json` in the dependency cone of every client of the API. Text
+             *     costs the client a `JSON.parse` and loses nothing — JSON text round-trips.
+             *
+             *     Nested under its own key rather than flattened back into the object,
+             *     which is the one place this DTO's shape departs from the device's. That
+             *     is deliberate: it puts the stability contract *in the type*. Everything
+             *     above this field is attested against real hardware; everything inside it
+             *     is whatever a firmware happened to add. Flattening the two together
+             *     would hide exactly the distinction a client needs in order to know what
+             *     it can rely on.
+             */
+            extra?: Record<string, never>;
+            identifier?: string;
+            media_present?: boolean | null;
+            package?: string;
+            /** Format: int64 */
+            start?: number | null;
+            /** Format: int32 */
+            state?: number | null;
+            title?: string;
         };
         /**
          * @description Recording state reported by an SMP, mirroring
