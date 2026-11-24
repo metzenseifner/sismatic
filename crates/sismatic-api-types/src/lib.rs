@@ -92,7 +92,7 @@ pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, GroupWrite, Removed}
 pub use read::{
     DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
 };
-pub use value::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState};
+pub use value::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState, ScheduleState};
 pub use write::{
     Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
     Intent, Rejection, WriteId, WriteList, WriteRecord, WriteStatus,

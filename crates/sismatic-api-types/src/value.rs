@@ -64,6 +64,154 @@ pub struct Alarm {
     pub level: String,
 }
 
+/// Where one recording event is in its schedule's lifecycle. Mirrors
+/// `sismatic-core::protocol::ScheduleState`.
+///
+/// A listed code is serialized as the device's `SCHEDULE_*` name without the
+/// prefix, in `snake_case`: `5` becomes `"archived"` and `200` becomes
+/// `"package_resched"`. That matches how [`RecordingState`] reads, and a
+/// browser can `switch` on it without a lookup table.
+///
+/// A code the device does not document (the list skips `7`, and a later
+/// firmware may add more) is serialized as the **bare integer**, so a
+/// client's type is `"pending" | … | number`. Falling back to a number keeps
+/// the value: a client can still show it, and nothing on the wire changes
+/// when the list grows. A single `"unknown"` string would drop the code, and
+/// rejecting the row would drop the whole event list.
+///
+/// The OpenAPI schema is written by hand (below) because utoipa does not
+/// support a variant-level `untagged`: it would document the fallback as
+/// `{"unrecognized": 7}`, which is not what serde sends. ts-rs supports it, so
+/// the TypeScript type is derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleState {
+    /// `0` — Recording Scheduled.
+    Pending,
+    /// `1` — Recording Now.
+    Current,
+    /// `2` — Recording Finalized.
+    Processed,
+    /// `3` — Ready to Upload.
+    Finished,
+    /// `4` — Uploading to Server.
+    Archiving,
+    /// `5` — Uploading to Server Complete.
+    Archived,
+    /// `6` — Uploading to Server Failed (retry pending).
+    ArchiveFailed,
+    /// `8` — Recording Deleted (to recover disk space).
+    PackageDeleted,
+    /// `9` — Recording Failed (package corrupted).
+    RecordFailed,
+    /// `10` — No Transfer Method Defined.
+    ArchiveNomethod,
+    /// `11` — Transfer Skipped.
+    RecordSkipped,
+    /// `200` — Transfer Rescheduled (one time).
+    PackageResched,
+    /// A code not listed above, as the device sent it.
+    #[serde(untagged)]
+    Unrecognized(u8),
+}
+
+impl ScheduleState {
+    /// Every listed state with its device code, in code order. The wire
+    /// names are written out once here and nowhere else.
+    pub const KNOWN: [(ScheduleState, u8, &'static str); 12] = [
+        (ScheduleState::Pending, 0, "pending"),
+        (ScheduleState::Current, 1, "current"),
+        (ScheduleState::Processed, 2, "processed"),
+        (ScheduleState::Finished, 3, "finished"),
+        (ScheduleState::Archiving, 4, "archiving"),
+        (ScheduleState::Archived, 5, "archived"),
+        (ScheduleState::ArchiveFailed, 6, "archive_failed"),
+        (ScheduleState::PackageDeleted, 8, "package_deleted"),
+        (ScheduleState::RecordFailed, 9, "record_failed"),
+        (ScheduleState::ArchiveNomethod, 10, "archive_nomethod"),
+        (ScheduleState::RecordSkipped, 11, "record_skipped"),
+        (ScheduleState::PackageResched, 200, "package_resched"),
+    ];
+
+    /// The device's integer code.
+    pub fn code(self) -> u8 {
+        match self {
+            ScheduleState::Unrecognized(code) => code,
+            known => Self::KNOWN
+                .iter()
+                .find(|(state, _, _)| *state == known)
+                .map(|(_, code, _)| *code)
+                .expect("every listed variant is in KNOWN"),
+        }
+    }
+
+    /// The device's integer code mapped to a variant. Total: an unlisted
+    /// code is [`Unrecognized`](Self::Unrecognized).
+    pub fn from_code(code: u8) -> Self {
+        Self::KNOWN
+            .iter()
+            .find(|(_, c, _)| *c == code)
+            .map_or(ScheduleState::Unrecognized(code), |(state, _, _)| *state)
+    }
+
+    /// Read a state as a caller types it in a filter. Three spellings are
+    /// accepted, all case-insensitive: the wire name (`archive_failed`), the
+    /// device's name (`SCHEDULE_ARCHIVE_FAILED`), and the integer code (`6`).
+    /// The code is the only way to name an unrecognized state.
+    ///
+    /// `None` means the text names no state. That is not an error here,
+    /// because a misspelled state and a state no event is in both select no
+    /// device.
+    pub fn from_text(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Ok(code) = text.parse::<u8>() {
+            return Some(Self::from_code(code));
+        }
+        let lower = text.to_ascii_lowercase();
+        let name = lower.strip_prefix("schedule_").unwrap_or(&lower);
+        Self::KNOWN
+            .iter()
+            .find(|(_, _, wire)| *wire == name)
+            .map(|(state, _, _)| *state)
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for ScheduleState {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{
+            KnownFormat, ObjectBuilder, OneOfBuilder, SchemaFormat, Type,
+        };
+        let names = ObjectBuilder::new()
+            .schema_type(Type::String)
+            .enum_values(Some(Self::KNOWN.iter().map(|(_, _, name)| *name)))
+            .description(Some(
+                "A listed state: the device's `SCHEDULE_*` name without the prefix, in \
+                 `snake_case`. Codes: pending 0, current 1, processed 2, finished 3, \
+                 archiving 4, archived 5, archive_failed 6, package_deleted 8, \
+                 record_failed 9, archive_nomethod 10, record_skipped 11, package_resched 200.",
+            ));
+        let code = ObjectBuilder::new()
+            .schema_type(Type::Integer)
+            .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int32)))
+            .minimum(Some(0))
+            .maximum(Some(255))
+            .description(Some("A code the device does not document, as it sent it."));
+        OneOfBuilder::new()
+            .item(names)
+            .item(code)
+            .description(Some(
+                "Where one recording event is in its schedule's lifecycle: a state name, or \
+                 the raw integer code for a state the device does not document.",
+            ))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for ScheduleState {}
+
 /// One recording event, as `RECORDING_EVENTS` reports it.
 ///
 /// Mirrors `sismatic-core::protocol::RecordingEvent`, re-declared here for the
@@ -77,9 +225,8 @@ pub struct Alarm {
 /// missing value is a different claim from `0` or `false`. The text fields
 /// default to `""`, because the device already sends `""` for an unset one.
 ///
-/// `state` is the device's raw code, left undecoded: only `5` and `11` have
-/// been observed and the vocabulary is not documented — the same restraint
-/// [`Alarm`]'s free-text `level` is given above.
+/// `state` is decoded into a [`ScheduleState`]; see that type for how a code
+/// the device does not document is carried.
 ///
 /// `start` is epoch seconds, which is *not* the RFC 3339 form `Read.at` uses.
 /// It is passed through as the device sends it; converting is the client's
@@ -98,7 +245,7 @@ pub struct RecordingEvent {
     #[serde(default)]
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<u8>,
+    pub state: Option<ScheduleState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_present: Option<bool>,
     #[serde(default)]
@@ -164,4 +311,69 @@ pub enum ReadValue {
     Alarms(Vec<Alarm>),
     /// Every recording event the device knows about.
     RecordingEvents(Vec<RecordingEvent>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listed_state_is_its_name_and_an_unlisted_one_its_code() {
+        for (state, _, name) in ScheduleState::KNOWN {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::json!(name)
+            );
+            assert_eq!(
+                serde_json::from_value::<ScheduleState>(name.into()).unwrap(),
+                state
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&ScheduleState::Unrecognized(7)).unwrap(),
+            "7"
+        );
+        assert_eq!(
+            serde_json::from_str::<ScheduleState>("7").unwrap(),
+            ScheduleState::Unrecognized(7)
+        );
+    }
+
+    #[test]
+    fn an_event_carries_the_decoded_state() {
+        let event: RecordingEvent =
+            serde_json::from_str(r#"{"db_id":58,"state":"record_skipped"}"#).unwrap();
+        assert_eq!(event.state, Some(ScheduleState::RecordSkipped));
+    }
+
+    #[test]
+    fn a_state_is_read_from_any_of_its_three_spellings() {
+        for text in [
+            "archive_failed",
+            "ARCHIVE_FAILED",
+            "SCHEDULE_ARCHIVE_FAILED",
+            "6",
+            " 6 ",
+        ] {
+            assert_eq!(
+                ScheduleState::from_text(text),
+                Some(ScheduleState::ArchiveFailed),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            ScheduleState::from_text("7"),
+            Some(ScheduleState::Unrecognized(7))
+        );
+        assert_eq!(ScheduleState::from_text("SCHEDULE_7"), None);
+        assert_eq!(ScheduleState::from_text("archive-failed"), None);
+        assert_eq!(ScheduleState::from_text("schedule_"), None);
+    }
+
+    #[test]
+    fn codes_round_trip() {
+        for code in 0..=u8::MAX {
+            assert_eq!(ScheduleState::from_code(code).code(), code);
+        }
+    }
 }

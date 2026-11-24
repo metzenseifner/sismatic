@@ -1880,9 +1880,8 @@ export interface components {
          *     missing value is a different claim from `0` or `false`. The text fields
          *     default to `""`, because the device already sends `""` for an unset one.
          *
-         *     `state` is the device's raw code, left undecoded: only `5` and `11` have
-         *     been observed and the vocabulary is not documented — the same restraint
-         *     [`Alarm`]'s free-text `level` is given above.
+         *     `state` is decoded into a [`ScheduleState`]; see that type for how a code
+         *     the device does not document is carried.
          *
          *     `start` is epoch seconds, which is *not* the RFC 3339 form `Read.at` uses.
          *     It is passed through as the device sends it; converting is the client's
@@ -1920,8 +1919,7 @@ export interface components {
             package?: string;
             /** Format: int64 */
             start?: number | null;
-            /** Format: int32 */
-            state?: number | null;
+            state?: null | components["schemas"]["ScheduleState"];
             title?: string;
         };
         /**
@@ -2025,6 +2023,8 @@ export interface components {
              */
             writes_canceled: number;
         };
+        /** @description Where one recording event is in its schedule's lifecycle: a state name, or the raw integer code for a state the device does not document. */
+        ScheduleState: ("pending" | "current" | "processed" | "finished" | "archiving" | "archived" | "archive_failed" | "package_deleted" | "record_failed" | "archive_nomethod" | "record_skipped" | "package_resched") | number;
         /**
          * @description A change to what the store keeps. Each key carries its own unit, as in the
          *     config file; see [`StoreSettings`] for the accepted spellings.
@@ -2903,6 +2903,12 @@ export interface operations {
                  *     every stopped recorder". The value is compared in whatever shape the
                  *     device answered in, so `8080` matches a port and `stopped` matches a
                  *     recording state without the caller spelling out a type.
+                 *
+                 *     `RECORDING_EVENTS:<state>` keeps a device when *any* of its recording
+                 *     events is in that schedule state. The state may be written as its wire
+                 *     name (`archive_failed`), its device name (`SCHEDULE_ARCHIVE_FAILED`), or
+                 *     its integer code (`6`), case-insensitively. Only the code form can
+                 *     name a state the device does not document.
                  *
                  *     A device that has never reported the named field cannot satisfy the
                  *     predicate and is excluded — which does not distinguish "not stopped"

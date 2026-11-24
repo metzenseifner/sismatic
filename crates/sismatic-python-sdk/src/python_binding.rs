@@ -75,9 +75,9 @@ impl Alarm {
 
 /// One recording event, exposed to Python with an attribute per field.
 ///
-/// `start` is epoch seconds, `state` the device's raw code (undecoded — see the
-/// core type), and `media_present` a real `bool` even though the device sends
-/// the string `"true"`. Any of the three may be `None` on a firmware that does
+/// `start` is epoch seconds, `state` the device's integer schedule code (core
+/// decodes it as `ScheduleState`; Python keeps the int), and `media_present`
+/// a real `bool` even though the device sends the string `"true"`. Any of the three may be `None` on a firmware that does
 /// not report it, which is deliberately distinct from `0`/`False`.
 ///
 /// `extra` holds keys this type does not name, each as **JSON text** —
@@ -115,7 +115,7 @@ impl From<sismatic_core::protocol::RecordingEvent> for RecordingEvent {
             identifier: event.identifier,
             creator: event.creator,
             title: event.title,
-            state: event.state,
+            state: event.state.map(u8::from),
             media_present: event.media_present,
             package: event.package,
             extra: event

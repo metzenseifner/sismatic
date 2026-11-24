@@ -373,7 +373,7 @@ pub(crate) fn csv(raw: &Option<String>) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{RecordingState, Timestamp};
+    use sismatic_api_types::{RecordingEvent, RecordingState, ScheduleState, Timestamp};
 
     const AT: &str = "2026-08-17T00:00:00.000Z";
 
@@ -423,6 +423,45 @@ mod tests {
                 "{spelling} should not have matched"
             );
         }
+    }
+
+    /// The question the filter exists for: which devices have a failed
+    /// upload. Reached through the URL syntax a caller actually types.
+    #[test]
+    fn a_device_is_selected_by_the_state_of_any_of_its_recording_events() {
+        let event = |db_id, state| RecordingEvent {
+            db_id,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: Some(state),
+            media_present: None,
+            package: String::new(),
+            extra: Default::default(),
+        };
+        let latest = vec![read(
+            "RECORDING_EVENTS",
+            ReadValue::RecordingEvents(vec![
+                event(58, ScheduleState::Archived),
+                event(59, ScheduleState::ArchiveFailed),
+            ]),
+        )];
+
+        for spelling in [
+            "RECORDING_EVENTS:SCHEDULE_ARCHIVE_FAILED",
+            "recording-events:archive_failed",
+            "RECORDING_EVENTS:6",
+        ] {
+            let predicates = predicates_of(&query(spelling)).expect("a well-formed predicate");
+            assert!(
+                predicates[0].holds(&latest),
+                "{spelling} should have matched"
+            );
+        }
+        let predicates =
+            predicates_of(&query("RECORDING_EVENTS:record_failed")).expect("well-formed");
+        assert!(!predicates[0].holds(&latest));
     }
 
     /// The case that separates "not stopped" from "never answered", and the

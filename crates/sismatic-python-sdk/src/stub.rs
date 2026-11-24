@@ -78,7 +78,8 @@ class Alarm:
 class RecordingEvent:
     \"\"\"One recording event reported by a device.
 
-    `start` is epoch seconds and `state` the device's raw, undecoded code. Any
+    `start` is epoch seconds and `state` the device's integer schedule code
+    (e.g. 6 is SCHEDULE_ARCHIVE_FAILED); the HTTP API serves it decoded. Any
     of the optional fields may be `None` on a firmware that does not report it,
     which is distinct from `0`/`False`. `extra` holds keys this class does not
     name, each as JSON text -- `json.loads` one if you want it.

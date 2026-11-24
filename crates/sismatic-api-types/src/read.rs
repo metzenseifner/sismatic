@@ -275,6 +275,12 @@ pub struct FleetQuery {
     /// device answered in, so `8080` matches a port and `stopped` matches a
     /// recording state without the caller spelling out a type.
     ///
+    /// `RECORDING_EVENTS:<state>` keeps a device when *any* of its recording
+    /// events is in that schedule state. The state may be written as its wire
+    /// name (`archive_failed`), its device name (`SCHEDULE_ARCHIVE_FAILED`), or
+    /// its integer code (`6`), case-insensitively. Only the code form can
+    /// name a state the device does not document.
+    ///
     /// A device that has never reported the named field cannot satisfy the
     /// predicate and is excluded — which does not distinguish "not stopped"
     /// from "never answered". A row-less device is exactly what the unfiltered

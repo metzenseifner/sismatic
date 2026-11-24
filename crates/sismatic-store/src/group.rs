@@ -41,7 +41,9 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{FieldName, GroupExpectation, GroupId, Intent, ReadValue, RecordingState};
+use sismatic_api_types::{
+    FieldName, GroupExpectation, GroupId, Intent, ReadValue, RecordingState, ScheduleState,
+};
 
 use crate::ReadError;
 
@@ -162,10 +164,14 @@ fn matches_text(want: &str, observed: &ReadValue) -> bool {
         // one — `ACTIVE_ALARMS` is a query with no setting behind it. Nothing
         // can legitimately expect this, so nothing satisfies it.
         ReadValue::Alarms(_) => false,
-        // Same reasoning, and a stronger case: `RECORDING_EVENTS` is the
-        // recorder's own table, read-only and with no setting behind it. An
-        // expectation over it could not be *written*, so none can be met.
-        ReadValue::RecordingEvents(_) => false,
+        // `RECORDING_EVENTS` is the recorder's own read-only table, so no
+        // write can expect it. A `?where=` filter can, though, and
+        // `RECORDING_EVENTS:archive_failed` means "some event is in that
+        // state". The device is selected for one matching event, the way
+        // `RUNNING_STATE:stopped` selects it for one matching read. An event
+        // with no state cannot match, and neither can text that names no state.
+        ReadValue::RecordingEvents(events) => ScheduleState::from_text(want)
+            .is_some_and(|want| events.iter().any(|event| event.state == Some(want))),
     }
 }
 
@@ -193,7 +199,64 @@ const fn state_name(state: RecordingState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{Alarm, MacAddr};
+    use sismatic_api_types::{Alarm, MacAddr, RecordingEvent};
+
+    fn events(states: &[Option<ScheduleState>]) -> ReadValue {
+        ReadValue::RecordingEvents(
+            states
+                .iter()
+                .enumerate()
+                .map(|(i, state)| RecordingEvent {
+                    db_id: i as u64,
+                    start: None,
+                    identifier: String::new(),
+                    creator: String::new(),
+                    title: String::new(),
+                    state: *state,
+                    media_present: None,
+                    package: String::new(),
+                    extra: Default::default(),
+                })
+                .collect(),
+        )
+    }
+
+    /// One matching event is enough, in any of the three spellings.
+    #[test]
+    fn an_event_list_satisfies_a_state_some_event_is_in() {
+        let observed = events(&[
+            Some(ScheduleState::Archived),
+            None,
+            Some(ScheduleState::ArchiveFailed),
+        ]);
+        for want in ["archive_failed", "SCHEDULE_ARCHIVE_FAILED", "6", "archived"] {
+            assert!(
+                satisfies(&ReadValue::Text(want.into()), &observed),
+                "{want}"
+            );
+        }
+        for want in ["pending", "0", "not_a_state", ""] {
+            assert!(
+                !satisfies(&ReadValue::Text(want.into()), &observed),
+                "{want}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_state_is_reached_by_its_code() {
+        let observed = events(&[Some(ScheduleState::Unrecognized(7))]);
+        assert!(satisfies(&ReadValue::Text("7".into()), &observed));
+        assert!(!satisfies(&ReadValue::Text("8".into()), &observed));
+    }
+
+    #[test]
+    fn an_empty_event_list_satisfies_no_state() {
+        assert!(!satisfies(
+            &ReadValue::Text("archived".into()),
+            &events(&[])
+        ));
+    }
 
     #[test]
     fn the_lifecycle_verbs_expect_a_recording_state() {

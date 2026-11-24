@@ -18,9 +18,12 @@
 //! rather than a silent wrong value on the wire. Do not add a catch-all arm; the
 //! wildcard is the only thing that could hide a new variant.
 
-use sismatic_api_types::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState};
+use sismatic_api_types::{
+    Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState, ScheduleState,
+};
 use sismatic_core::protocol::{
-    RecordingEvent as CoreRecordingEvent, RecordingState as CoreState, Value,
+    RecordingEvent as CoreRecordingEvent, RecordingState as CoreState,
+    ScheduleState as CoreSchedule, Value,
 };
 
 /// Convert a decoded device value into its wire DTO.
@@ -72,7 +75,7 @@ fn event_to_dto(event: CoreRecordingEvent) -> RecordingEvent {
         identifier: event.identifier,
         creator: event.creator,
         title: event.title,
-        state: event.state,
+        state: event.state.map(schedule_to_dto),
         media_present: event.media_present,
         package: event.package,
         extra: event
@@ -80,6 +83,26 @@ fn event_to_dto(event: CoreRecordingEvent) -> RecordingEvent {
             .into_iter()
             .filter_map(|(k, v)| serde_json::to_string(&v).ok().map(|text| (k, text)))
             .collect(),
+    }
+}
+
+/// Map core's schedule state onto the wire enum. Wildcard-free, like
+/// [`state_to_dto`], so a state added in core is a compile error here.
+pub fn schedule_to_dto(state: CoreSchedule) -> ScheduleState {
+    match state {
+        CoreSchedule::Pending => ScheduleState::Pending,
+        CoreSchedule::Current => ScheduleState::Current,
+        CoreSchedule::Processed => ScheduleState::Processed,
+        CoreSchedule::Finished => ScheduleState::Finished,
+        CoreSchedule::Archiving => ScheduleState::Archiving,
+        CoreSchedule::Archived => ScheduleState::Archived,
+        CoreSchedule::ArchiveFailed => ScheduleState::ArchiveFailed,
+        CoreSchedule::PackageDeleted => ScheduleState::PackageDeleted,
+        CoreSchedule::RecordFailed => ScheduleState::RecordFailed,
+        CoreSchedule::ArchiveNomethod => ScheduleState::ArchiveNomethod,
+        CoreSchedule::RecordSkipped => ScheduleState::RecordSkipped,
+        CoreSchedule::PackageResched => ScheduleState::PackageResched,
+        CoreSchedule::Unrecognized(code) => ScheduleState::Unrecognized(code),
     }
 }
 
@@ -134,6 +157,27 @@ mod tests {
         }
     }
 
+    /// Core and the DTO each spell out the codes, so this pins the two lists
+    /// to each other: same codes, and each wire name is the device name with
+    /// its prefix removed.
+    #[test]
+    fn maps_every_schedule_state() {
+        assert_eq!(CoreSchedule::KNOWN.len(), ScheduleState::KNOWN.len());
+        for (wire, code, name) in ScheduleState::KNOWN {
+            let core = CoreSchedule::from_code(code);
+            assert_eq!(schedule_to_dto(core), wire, "code {code}");
+            assert_eq!(
+                core.device_name(),
+                Some(format!("SCHEDULE_{}", name.to_uppercase()).as_str()),
+                "code {code}"
+            );
+        }
+        assert_eq!(
+            schedule_to_dto(CoreSchedule::Unrecognized(7)),
+            ScheduleState::Unrecognized(7)
+        );
+    }
+
     /// The `extra` map changes representation across this seam — core holds
     /// JSON values, the DTO holds their text — so it is asserted directly
     /// rather than inferred from the struct copy around it.
@@ -145,7 +189,7 @@ mod tests {
             identifier: "A_1".into(),
             creator: "c900011".into(),
             title: "Mechanics I".into(),
-            state: Some(11),
+            state: Some(CoreSchedule::RecordSkipped),
             media_present: Some(true),
             package: "/var/internal/A_1".into(),
             extra: [
@@ -164,7 +208,7 @@ mod tests {
 
         assert_eq!(got.db_id, 58);
         assert_eq!(got.start, Some(1767879511));
-        assert_eq!(got.state, Some(11));
+        assert_eq!(got.state, Some(ScheduleState::RecordSkipped));
         assert_eq!(got.media_present, Some(true));
         assert_eq!(got.title, "Mechanics I");
         // Each value is the JSON *text* of what core held, so a client gets it

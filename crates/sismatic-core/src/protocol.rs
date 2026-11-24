@@ -35,7 +35,7 @@ use winnow::{ModalResult, Partial};
 // Re-exported so consumers (e.g. the DTO conversion in `sismatic-sync`) can name
 // the type for an *exhaustive* match — the private `states` module keeps its
 // other items internal.
-pub use crate::protocol::states::RecordingState;
+pub use crate::protocol::states::{RecordingState, ScheduleState};
 
 // Re-exported because it travels out of the crate inside a `ControllerError`,
 // so a caller matching on why a command failed has to be able to name it.
@@ -87,9 +87,9 @@ pub enum Value {
 ///
 /// # `state`
 ///
-/// Kept as the raw code. Only `5` and `11` have been observed and the
-/// vocabulary is not documented, so there is nothing here to decode it into —
-/// the same restraint `Alarm`'s free-text `level` is given in `api-types`.
+/// Decoded into a [`ScheduleState`]. A code the device documents nowhere is
+/// kept as [`ScheduleState::Unrecognized`], so it neither fails the parse nor
+/// loses its value.
 ///
 /// # `extra`
 ///
@@ -110,9 +110,9 @@ pub struct RecordingEvent {
     pub creator: String,
     #[serde(default)]
     pub title: String,
-    /// The device's raw state code; see the type docs on why it is not decoded.
+    /// Where the event is in its schedule's lifecycle; see the type docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<u8>,
+    pub state: Option<ScheduleState>,
     /// Whether the recording's media is still present.
     ///
     /// The device sends this as the *string* `"true"`, not a JSON boolean, so
@@ -413,7 +413,7 @@ mod tests {
         let events = events_of(drive(&instr, &format!("{EVENT_A}\r\n\r\n")));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].db_id, 58);
-        assert_eq!(events[0].state, Some(11));
+        assert_eq!(events[0].state, Some(ScheduleState::RecordSkipped));
         assert_eq!(events[0].start, Some(1767879511));
         assert_eq!(events[0].title, "Mechanics I");
         // The device sends this as the string `"true"`, not a JSON boolean.
@@ -555,7 +555,11 @@ mod tests {
         );
         assert_eq!(
             events.iter().map(|e| e.state).collect::<Vec<_>>(),
-            vec![Some(11), Some(11), Some(5)]
+            vec![
+                Some(ScheduleState::RecordSkipped),
+                Some(ScheduleState::RecordSkipped),
+                Some(ScheduleState::Archived)
+            ]
         );
         // Every row in the capture carries the flag as the string `"true"`.
         assert!(events.iter().all(|e| e.media_present == Some(true)));
