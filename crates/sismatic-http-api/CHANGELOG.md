@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/metzenseifner/sismatic/compare/v0.8.0...v0.9.0) - 2026-11-24
+
+### Added
+
+- *(http)* [**breaking**] WHERE filters devices, filter filters results of subset
+- recording_events state integers mapped to semantics
+- *(sismatic-core)* simulated device server binary
+
+### Fixed
+
+- fixup! feat: recorder events support
+
+### Other
+
+- openapi check compares ui and server drift
+
 ## [0.8.0](https://github.com/metzenseifner/sismatic/compare/v0.7.5...v0.8.0) - 2026-10-23
 
 ### Added
