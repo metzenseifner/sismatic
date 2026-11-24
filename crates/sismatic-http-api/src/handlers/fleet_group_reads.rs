@@ -31,7 +31,7 @@
 //! one value per field *per member*, and they need not agree, so the two
 //! quantifiers come apart and the choice is load-bearing.
 //!
-//! [`Predicate::matches`] is quantified with **every**: a group satisfies
+//! Each [`Check`] of `where` is quantified with **every**: a group satisfies
 //! `RUNNING_STATE:stopped` only if every member that has reported
 //! `RUNNING_STATE` reports a stopped one. Quantified with "some", a group where
 //! four members are stopped and one is recording would answer to
@@ -43,6 +43,16 @@
 //!
 //! A group no member of which has reported the field cannot satisfy the
 //! predicate and is excluded, exactly as a silent device is on the device index.
+//!
+//! The quantifier applies per check (one field-level clause, or one list's
+//! clauses together), not to the whole `where` per member. A member that
+//! reported `RUNNING_STATE` and never `FIRMWARE` counts as evidence for a
+//! clause on the first and is silent on the second.
+//!
+//! `filter` trims every member's lists after the row is assembled, so the
+//! `sync` and `uniform` verdicts describe what the members really hold.
+//!
+//! [`Check`]: crate::query::Check
 //!
 //! # Selection before projection, twice over
 //!
@@ -85,9 +95,10 @@ use sismatic_store::group::GroupState;
 use sismatic_store::outbox::WriteLog;
 
 use crate::handlers::error::ApiFailure;
-use crate::handlers::fleet_reads::{Predicate, csv, page_size, predicates_of, wanted_fields};
-use crate::handlers::group_reads::group_state_of;
+use crate::handlers::fleet_reads::{csv, page_size, wanted_fields};
+use crate::handlers::group_reads::{group_state_of, narrow_fields};
 use crate::handlers::reads::normalize_field;
+use crate::query::{Check, Query};
 
 /// `GET /v1/reads/groups?fields=&groups=&where=&sync=&limit=&after=` — every
 /// configured device group's state, one row per group, ordered by id.
@@ -135,7 +146,7 @@ pub async fn list_fleet_groups(
     let query = query.into_inner();
 
     let fields = wanted_fields(&query.fields);
-    let predicates = predicates_of(&query.predicates)?;
+    let plan = Query::parse(&query.predicates, &query.filter)?;
     let sync = wanted_sync(&query.sync)?;
     let limit = page_size(query.limit)?;
     let candidates = candidates(&**catalog, &query).await?;
@@ -149,7 +160,7 @@ pub async fn list_fleet_groups(
         // them. Projection happens after the row survives.
         let row = group_state_of(&**catalog, &**store, &**state, &**log, group).await?;
 
-        if !predicates.iter().all(|p| holds(p, &row.fields)) {
+        if !plan.checks().all(|check| holds(&check, &row.fields)) {
             continue;
         }
         // The verdict the row itself carries, computed over the whole field set
@@ -177,7 +188,7 @@ pub async fn list_fleet_groups(
             // is not a field of the group at all, so there is no column for a
             // projection to drop.
             desired_recording_state: row.desired_recording_state,
-            fields: project(row.fields, fields.as_ref()),
+            fields: project(narrow_fields(&plan, row.fields), fields.as_ref()),
         });
     }
 
@@ -236,12 +247,12 @@ async fn unknown_group(catalog: &dyn DeviceCatalog, id: &str) -> ApiFailure {
     ApiFailure::NotFound(format!("no device group '{id}' is configured"))
 }
 
-/// Whether a group's state satisfies one `?where=` predicate.
+/// Whether a group's state satisfies one check of `?where=`.
 ///
 /// Quantified with *every reporting member* rather than *some* — see the module
 /// docs for why that difference is the whole point of the filter on this route.
-fn holds(predicate: &Predicate, fields: &[GroupFieldState]) -> bool {
-    let Some(state) = fields.iter().find(|f| f.field == predicate.field) else {
+fn holds(check: &Check<'_>, fields: &[GroupFieldState]) -> bool {
+    let Some(state) = fields.iter().find(|f| &f.field == check.field()) else {
         return false;
     };
 
@@ -251,11 +262,11 @@ fn holds(predicate: &Predicate, fields: &[GroupFieldState]) -> bool {
         .filter_map(|m| m.read.as_ref())
         .peekable();
     // A group nobody has reported this field for holds nothing that could
-    // satisfy the predicate, so "every" is not allowed to be vacuously true.
+    // satisfy the check, so "every" is not allowed to be vacuously true.
     if reported.peek().is_none() {
         return false;
     }
-    reported.all(|read| predicate.matches(read))
+    reported.all(|read| check.holds(std::slice::from_ref(read)))
 }
 
 /// The `?sync=` verdict asked for, or `None` for "do not narrow".
@@ -300,7 +311,8 @@ fn project(
 mod tests {
     use super::*;
     use sismatic_api_types::{
-        GroupExpectation, MemberState, Read, ReadValue, RecordingState, Timestamp,
+        GroupExpectation, MemberState, Read, ReadValue, RecordingEvent, RecordingState,
+        ScheduleState, Timestamp,
     };
 
     const AT: &str = "2026-08-17T00:00:00.000Z";
@@ -336,11 +348,42 @@ mod tests {
         }
     }
 
-    fn predicate(raw: &str) -> Predicate {
-        predicates_of(&Some(raw.to_owned()))
-            .expect("a well-formed predicate")
-            .pop()
-            .expect("one predicate")
+    fn predicate(raw: &str) -> Query {
+        where_filter(raw, "")
+    }
+
+    fn where_filter(where_raw: &str, filter_raw: &str) -> Query {
+        let some = |raw: &str| (!raw.is_empty()).then(|| raw.to_owned());
+        Query::parse(&some(where_raw), &some(filter_raw)).expect("a well-formed query")
+    }
+
+    /// Whether the group satisfies every check, as the handler asks.
+    fn selects(q: &Query, fields: &[GroupFieldState]) -> bool {
+        q.checks().all(|check| holds(&check, fields))
+    }
+
+    fn events(device: &str, states: &[ScheduleState]) -> MemberState {
+        member(
+            device,
+            "RECORDING_EVENTS",
+            Some(ReadValue::RecordingEvents(
+                states
+                    .iter()
+                    .enumerate()
+                    .map(|(i, state)| RecordingEvent {
+                        db_id: i as u64,
+                        start: None,
+                        identifier: String::new(),
+                        creator: String::new(),
+                        title: String::new(),
+                        state: Some(*state),
+                        media_present: None,
+                        package: String::new(),
+                        extra: Default::default(),
+                    })
+                    .collect(),
+            )),
+        )
     }
 
     fn state(value: RecordingState) -> Option<ReadValue> {
@@ -359,7 +402,7 @@ mod tests {
                 member("annex", "RUNNING_STATE", state(RecordingState::Stopped)),
             ],
         )];
-        assert!(holds(&predicate("RUNNING_STATE:stopped"), &all_stopped));
+        assert!(selects(&predicate("RUNNING_STATE:stopped"), &all_stopped));
 
         // Four stopped and one recording is not a stopped device group. A
         // filter that said otherwise would hide exactly the group worth seeing.
@@ -371,7 +414,10 @@ mod tests {
                 member("annex", "RUNNING_STATE", state(RecordingState::Started)),
             ],
         )];
-        assert!(!holds(&predicate("RUNNING_STATE:stopped"), &one_disagrees));
+        assert!(!selects(
+            &predicate("RUNNING_STATE:stopped"),
+            &one_disagrees
+        ));
     }
 
     /// Silence is missing evidence rather than contrary evidence — the same
@@ -386,7 +432,7 @@ mod tests {
                 member("annex", "RUNNING_STATE", None),
             ],
         )];
-        assert!(holds(&predicate("RUNNING_STATE:stopped"), &one_silent));
+        assert!(selects(&predicate("RUNNING_STATE:stopped"), &one_silent));
 
         // ...but a group nobody has reported for cannot satisfy it, so "every"
         // is not vacuously true.
@@ -395,7 +441,7 @@ mod tests {
             GroupSyncState::Unknown,
             vec![member("atrium", "RUNNING_STATE", None)],
         )];
-        assert!(!holds(&predicate("RUNNING_STATE:stopped"), &all_silent));
+        assert!(!selects(&predicate("RUNNING_STATE:stopped"), &all_silent));
     }
 
     #[test]
@@ -410,7 +456,81 @@ mod tests {
             )],
         )];
 
-        assert!(!holds(&predicate("RUNNING_STATE:stopped"), &other_field));
+        assert!(!selects(&predicate("RUNNING_STATE:stopped"), &other_field));
+    }
+
+    /// A list clause is quantified like any other: every member that reported
+    /// the list must have a passing element.
+    #[test]
+    fn a_list_clause_needs_every_reporting_member_to_have_a_passing_element() {
+        let both_failed = vec![field(
+            "RECORDING_EVENTS",
+            GroupSyncState::Unknown,
+            vec![
+                events(
+                    "atrium",
+                    &[ScheduleState::Archived, ScheduleState::ArchiveFailed],
+                ),
+                events("annex", &[ScheduleState::ArchiveFailed]),
+                member("beacon", "RECORDING_EVENTS", None),
+            ],
+        )];
+        let one_clean = vec![field(
+            "RECORDING_EVENTS",
+            GroupSyncState::Unknown,
+            vec![
+                events("atrium", &[ScheduleState::ArchiveFailed]),
+                events("annex", &[ScheduleState::Archived]),
+            ],
+        )];
+        let q = where_filter("@filter", "RECORDING_EVENTS.state:archive_failed");
+        assert!(selects(&q, &both_failed));
+        assert!(!selects(&q, &one_clean));
+
+        // `!@`: every reporting member is free of failures.
+        let none = where_filter(
+            "!@RECORDING_EVENTS",
+            "RECORDING_EVENTS.state:archive_failed",
+        );
+        assert!(!selects(&none, &one_clean));
+        let clean = vec![field(
+            "RECORDING_EVENTS",
+            GroupSyncState::Unknown,
+            vec![events("annex", &[ScheduleState::Archived])],
+        )];
+        assert!(selects(&none, &clean));
+    }
+
+    /// Per check, not per member: a member that never reported FIRMWARE does
+    /// not stop the group from satisfying a RUNNING_STATE clause.
+    #[test]
+    fn each_check_is_quantified_over_its_own_reporters() {
+        let fields = vec![
+            field(
+                "FIRMWARE",
+                GroupSyncState::Unknown,
+                vec![
+                    member(
+                        "atrium",
+                        "FIRMWARE",
+                        Some(ReadValue::Version("2.11".into())),
+                    ),
+                    member("annex", "FIRMWARE", None),
+                ],
+            ),
+            field(
+                "RUNNING_STATE",
+                GroupSyncState::Unknown,
+                vec![
+                    member("atrium", "RUNNING_STATE", state(RecordingState::Stopped)),
+                    member("annex", "RUNNING_STATE", state(RecordingState::Stopped)),
+                ],
+            ),
+        ];
+        assert!(selects(
+            &predicate("RUNNING_STATE:stopped,FIRMWARE:ge:2.11"),
+            &fields
+        ));
     }
 
     #[test]

@@ -67,8 +67,8 @@
 use actix_web::web;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes below.
 use sismatic_api_types::{
-    ApiError, DeviceId, FieldName, GroupExpectation, GroupFieldState, GroupFieldStateList,
-    GroupHistory, GroupSyncState, MemberHistory, MemberState, Read, ReadQuery,
+    ApiError, DeviceId, FieldName, FilterQuery, GroupExpectation, GroupFieldState,
+    GroupFieldStateList, GroupHistory, GroupSyncState, MemberHistory, MemberState, Read, ReadQuery,
 };
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
@@ -79,6 +79,7 @@ use crate::handlers::error::ApiFailure;
 use crate::handlers::reads::{normalize_field, reject_conflicting_field, span_of, truncate};
 use crate::handlers::target::{READS, group_members};
 use crate::handlers::writes::group_desired_recording_state;
+use crate::query::Query;
 
 /// `GET /v1/reads/groups/{id}/fields` — every field any member has reported
 /// or the group has been told about, with each member's latest value.
@@ -93,7 +94,10 @@ use crate::handlers::writes::group_desired_recording_state;
     path = "/groups/{id}/fields",
     context_path = "/v1/reads",
     tag = "reads",
-    params(("id" = String, Path, description = "Group id, as written in the devices file.")),
+    params(
+        ("id" = String, Path, description = "Group id, as written in the devices file."),
+        FilterQuery,
+    ),
     responses(
         (status = 200, description = "Every field known for this group, ordered by \
              field name, each with what the group was told and what every member \
@@ -102,6 +106,10 @@ use crate::handlers::writes::group_desired_recording_state;
              `sync: unknown` with `desired_recording_state: idle` is a device group \
              at rest, while the same `unknown` with `recording` is one that was told \
              to record and has answered nothing.", body = GroupFieldStateList),
+        (status = 400, description = "A malformed `?filter=` clause, or any \
+             `?where=`: this route answers for one group, so there are no rows to \
+             pick. The body names the index route that takes `where`.",
+         body = ApiError),
         (status = 404, description = "No group has this id. Unlike the device reads \
              routes' answer for an unknown device, this is a claim about \
              configuration — these routes cannot answer without the catalog.",
@@ -115,11 +123,15 @@ pub async fn list_group_fields(
     state: web::Data<dyn GroupState>,
     log: web::Data<dyn WriteLog>,
     path: web::Path<String>,
+    query: web::Query<FilterQuery>,
 ) -> Result<web::Json<GroupFieldStateList>, ApiFailure> {
     let group = path.into_inner();
-    Ok(web::Json(
-        group_state_of(&**catalog, &**store, &**state, &**log, group).await?,
-    ))
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.without_where(&format!("/v1/reads/groups?groups={group}&where=…"))?;
+
+    let mut list = group_state_of(&**catalog, &**store, &**state, &**log, group).await?;
+    list.fields = narrow_fields(&plan, list.fields);
+    Ok(web::Json(list))
 }
 
 /// One device group's whole state: every field it knows about, each with what
@@ -253,12 +265,17 @@ pub(crate) fn rolled_up(fields: &[GroupFieldState]) -> GroupSyncState {
          description = "Field name. Case-insensitive, and `-` is read as `_`, exactly \
              as on the device reads routes.",
          example = "RUNNING_STATE"),
+        FilterQuery,
     ),
     responses(
         (status = 200, description = "The field across the group. A member that has \
              never reported it carries a `null` read rather than being omitted, \
              and a field no member has reported is still a 200 — the group exists \
              and the silence is the answer.", body = GroupFieldState),
+        (status = 400, description = "A malformed `?filter=` clause, a clause on \
+             another field than the path names, or any `?where=`: this route \
+             answers for one group, so there are no rows to pick. The body names \
+             the index route that takes `where`.", body = ApiError),
         (status = 404, description = "No group has this id.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
     ),
@@ -268,9 +285,13 @@ pub async fn read_group_field(
     store: web::Data<dyn ReadStore>,
     state: web::Data<dyn GroupState>,
     path: web::Path<(String, String)>,
+    query: web::Query<FilterQuery>,
 ) -> Result<web::Json<GroupFieldState>, ApiFailure> {
     let (group, field) = path.into_inner();
     let field = normalize_field(&field);
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.without_where(&format!("/v1/reads/groups?groups={group}&where=…"))?;
+    plan.only_about(&field)?;
     let members = group_members(&**catalog, &group, READS, "fields").await?;
 
     let expected = state.expected(group.clone(), field.clone()).await?;
@@ -281,12 +302,9 @@ pub async fn read_group_field(
         observed.push((device, read));
     }
 
-    Ok(web::Json(assemble(
-        group,
-        field,
-        expected,
-        observed.into_iter(),
-    )))
+    let mut state = assemble(group, field, expected, observed.into_iter());
+    narrow_field(&plan, &mut state);
+    Ok(web::Json(state))
 }
 
 /// `GET /v1/reads/groups/{id}/fields/{field}/history?start=&end=&limit=` —
@@ -318,7 +336,9 @@ pub async fn read_group_field(
              the span carries an empty list rather than being omitted.",
          body = GroupHistory),
         (status = 400, description = "A `?field=` that contradicts the field in the \
-             path, refused for the reason the device history route refuses it.",
+             path, refused for the reason the device history route refuses it; a \
+             malformed `?where=` or `?filter=` clause; or a clause on another field \
+             than the path names.",
          body = ApiError),
         (status = 404, description = "No group has this id.", body = ApiError),
         (status = 500, description = "The storage backend failed.", body = ApiError),
@@ -335,6 +355,8 @@ pub async fn group_field_history(
     let field = normalize_field(&field);
     let query = query.into_inner();
     reject_conflicting_field(&query, &field)?;
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.only_about(&field)?;
 
     let member_ids = group_members(&**catalog, &group, READS, "fields").await?;
     let span = span_of(&query);
@@ -344,8 +366,14 @@ pub async fn group_field_history(
         let mut reads = store
             .between(device.clone(), field.clone(), span.clone())
             .await?;
+        // `where` before `limit`, so `limit` counts matching reads; `filter`
+        // after, since it removes none.
+        reads.retain(|read| plan.selects(std::slice::from_ref(read)));
         truncate(&mut reads, query.limit);
-        members.push(MemberHistory { device, reads });
+        members.push(MemberHistory {
+            device,
+            reads: plan.narrow(reads),
+        });
     }
 
     // The expectation describes *now*, not the window — see `GroupHistory`.
@@ -361,6 +389,29 @@ pub async fn group_field_history(
         expected,
         members,
     }))
+}
+
+/// Apply `filter` to every member's read of every field.
+///
+/// Runs on an assembled answer, after `sync` and `uniform` are computed, so a
+/// trimmed list never changes a verdict.
+pub(crate) fn narrow_fields(
+    plan: &Query,
+    mut fields: Vec<GroupFieldState>,
+) -> Vec<GroupFieldState> {
+    for state in &mut fields {
+        narrow_field(plan, state);
+    }
+    fields
+}
+
+/// Apply `filter` to every member's read of one field.
+fn narrow_field(plan: &Query, state: &mut GroupFieldState) {
+    for member in &mut state.members {
+        if let Some(read) = &mut member.read {
+            plan.narrow_read(read);
+        }
+    }
 }
 
 /// Fold one field's members and expectation into the answer, computing both

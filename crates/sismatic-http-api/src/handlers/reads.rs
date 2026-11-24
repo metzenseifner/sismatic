@@ -75,12 +75,15 @@
 use actix_web::web;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes below —
 // the handlers never build one, they return `ApiFailure` and let it render.
-use sismatic_api_types::{ApiError, FieldName, Read, ReadList, ReadQuery, TimeSpan, Timestamp};
+use sismatic_api_types::{
+    ApiError, FieldName, FilterQuery, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
+};
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
 
 use crate::handlers::error::ApiFailure;
 use crate::handlers::target::{READS, reject_group};
+use crate::query::Query;
 
 /// The most reads one request can return.
 ///
@@ -178,11 +181,18 @@ pub(crate) fn reject_conflicting_field(query: &ReadQuery, field: &str) -> Result
     path = "/devices/{id}/fields",
     context_path = "/v1/reads",
     tag = "reads",
-    params(("id" = String, Path, description = "Device id, as configured on the write side.")),
+    params(
+        ("id" = String, Path, description = "Device id, as configured on the write side."),
+        FilterQuery,
+    ),
     responses(
         (status = 200, description = "Every field's latest value. An unknown device \
              yields an empty list rather than a 404 — see the handler's docs.",
          body = ReadList),
+        (status = 400, description = "A malformed `?filter=` clause, or any \
+             `?where=`: this route answers for one device, so there are no rows to \
+             pick. The body names the index route that takes `where`.",
+         body = ApiError),
         (status = 404, description = "This id names a device group, not a device. \
              The body carries the `/v1/reads/groups` URL that answers instead.",
          body = ApiError),
@@ -193,11 +203,16 @@ pub async fn list_fields(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<String>,
+    query: web::Query<FilterQuery>,
 ) -> Result<web::Json<ReadList>, ApiFailure> {
     let device = path.into_inner();
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.without_where(&format!("/v1/reads/devices?devices={device}&where=…"))?;
     reject_group(&**catalog, &device, READS, "fields").await?;
     let reads = store.latest_all(device).await?;
-    Ok(web::Json(ReadList { reads }))
+    Ok(web::Json(ReadList {
+        reads: plan.narrow(reads),
+    }))
 }
 
 /// `GET /v1/reads/devices/{id}/fields/{field}` — one field's most recent
@@ -217,9 +232,14 @@ pub async fn list_fields(
          description = "Field name. Case-insensitive, and `-` is read as `_`, so \
              `running-state` and `RUNNING_STATE` name the same field.",
          example = "RUNNING_STATE"),
+        FilterQuery,
     ),
     responses(
         (status = 200, description = "The field's most recent value.", body = Read),
+        (status = 400, description = "A malformed `?filter=` clause, a clause on \
+             another field than the path names, or any `?where=`: this route \
+             answers for one device, so there are no rows to pick.",
+         body = ApiError),
         (status = 404, description = "Nothing is stored for this device and field, \
              or the id names a device group. The first is not a claim that either \
              does not exist — an unknown device, an unpolled field and a device that \
@@ -233,19 +253,26 @@ pub async fn read_field(
     catalog: web::Data<dyn DeviceCatalog>,
     store: web::Data<dyn ReadStore>,
     path: web::Path<(String, String)>,
+    query: web::Query<FilterQuery>,
 ) -> Result<web::Json<Read>, ApiFailure> {
     let (device, field) = path.into_inner();
     let field = normalize_field(&field);
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.without_where(&format!("/v1/reads/devices?devices={device}&where=…"))?;
+    plan.only_about(&field)?;
     reject_group(&**catalog, &device, READS, &format!("fields/{field}")).await?;
 
     store
         .latest(device.clone(), field.clone())
         .await?
-        .map(web::Json)
+        .map(|mut read| {
+            plan.narrow_read(&mut read);
+            web::Json(read)
+        })
         .ok_or_else(|| ApiFailure::NotFound(format!("no read of '{field}' for device '{device}'")))
 }
 
-/// `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&limit=` —
+/// `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&where=&filter=&limit=` —
 /// one field over time, oldest first.
 ///
 /// Every parameter is optional: omit the bounds for all of recorded history,
@@ -274,7 +301,8 @@ pub async fn read_field(
          body = ReadList),
         (status = 400, description = "A `?field=` that contradicts the field in the \
              path. Rejected rather than ignored, so a caller can never be served a \
-             different field than the one it spelled out.",
+             different field than the one it spelled out. Also a malformed \
+             `?where=` or `?filter=` clause, or a clause on another field.",
          body = ApiError),
         (status = 404, description = "This id names a device group, not a device.",
          body = ApiError),
@@ -291,6 +319,8 @@ pub async fn field_history(
     let field = normalize_field(&field);
     let query = query.into_inner();
     reject_conflicting_field(&query, &field)?;
+    let plan = Query::parse(&query.predicates, &query.filter)?;
+    plan.only_about(&field)?;
     reject_group(
         &**catalog,
         &device,
@@ -300,9 +330,13 @@ pub async fn field_history(
     .await?;
 
     let mut reads = store.between(device, field, span_of(&query)).await?;
+    // `where` picks reads before `limit` counts them; `filter` trims after.
+    reads.retain(|read| plan.selects(std::slice::from_ref(read)));
     truncate(&mut reads, query.limit);
 
-    Ok(web::Json(ReadList { reads }))
+    Ok(web::Json(ReadList {
+        reads: plan.narrow(reads),
+    }))
 }
 
 /// Fold a URL path segment onto the canonical field spelling: upper-case, with

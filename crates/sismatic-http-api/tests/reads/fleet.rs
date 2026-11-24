@@ -13,7 +13,8 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use sismatic_api_types::{
-    Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Read, ReadValue, RecordingState,
+    Alarm, Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Read, ReadValue, RecordingEvent,
+    RecordingState, ScheduleState,
 };
 use sismatic_store::WriteStore;
 use sismatic_store_memory::{MemoryCatalog, MemoryStore};
@@ -255,6 +256,172 @@ async fn a_malformed_predicate_is_refused_rather_than_ignored() {
             .as_str()
             .expect("error is a string")
             .contains("RUNNING_STATE"),
+        "the message should quote what could not be read, got {body}"
+    );
+}
+
+/// A `RECORDING_EVENTS` read of `(db_id, package, state)` rows.
+fn events(device: &str, rows: &[(u64, &str, ScheduleState)]) -> Read {
+    let events = rows
+        .iter()
+        .map(|(db_id, package, state)| RecordingEvent {
+            db_id: *db_id,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: Some(*state),
+            media_present: None,
+            package: (*package).to_owned(),
+            extra: Default::default(),
+        })
+        .collect();
+    read_at(
+        device,
+        "RECORDING_EVENTS",
+        ReadValue::RecordingEvents(events),
+        AT,
+    )
+}
+
+#[tokio::test]
+async fn the_failed_uploads_of_the_fleet_come_back_and_nothing_else() {
+    // The admin's worklist: which packages failed to upload, and where.
+    // `filter` drops the events that did not fail; `where=@filter` drops the
+    // device that is left with none.
+    let address = spawn(
+        [
+            events(
+                ATRIUM,
+                &[
+                    (1, "/var/internal/A_1", ScheduleState::Archived),
+                    (2, "/var/internal/A_2", ScheduleState::ArchiveFailed),
+                ],
+            ),
+            events(ANNEX, &[(7, "/var/internal/B_7", ScheduleState::Archived)]),
+            events(
+                BEACON,
+                &[
+                    (3, "/var/internal/C_3", ScheduleState::ArchiveFailed),
+                    (4, "/var/internal/C_4", ScheduleState::ArchiveFailed),
+                ],
+            ),
+        ],
+        fleet(),
+    )
+    .await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices?fields=RECORDING_EVENTS\
+         &filter=RECORDING_EVENTS.state:SCHEDULE_ARCHIVE_FAILED&where=@filter"
+    ))
+    .await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ids(&body), [ATRIUM, BEACON]);
+    let packages = |row: &serde_json::Value| -> Vec<String> {
+        row["latest"][0]["value"]["value"]
+            .as_array()
+            .expect("an event list")
+            .iter()
+            .map(|e| {
+                assert_eq!(e["state"], "archive_failed");
+                e["package"].as_str().expect("a package").to_owned()
+            })
+            .collect()
+    };
+    assert_eq!(packages(&body["devices"][0]), ["/var/internal/A_2"]);
+    assert_eq!(
+        packages(&body["devices"][1]),
+        ["/var/internal/C_3", "/var/internal/C_4"]
+    );
+}
+
+#[tokio::test]
+async fn filter_alone_trims_lists_and_keeps_every_row() {
+    // Without `where`, a device left with no matching event is still a row.
+    let address = spawn(
+        [
+            events(ATRIUM, &[(1, "/var/internal/A_1", ScheduleState::Archived)]),
+            events(
+                ANNEX,
+                &[(7, "/var/internal/B_7", ScheduleState::ArchiveFailed)],
+            ),
+        ],
+        fleet(),
+    )
+    .await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices?filter=RECORDING_EVENTS.state:archive_failed"
+    ))
+    .await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ids(&body), [ANNEX, ATRIUM, BEACON]);
+    let count = |i: usize| {
+        body["devices"][i]["latest"][0]["value"]["value"]
+            .as_array()
+            .expect("an event list")
+            .len()
+    };
+    assert_eq!((count(0), count(1)), (1, 0));
+}
+
+#[tokio::test]
+async fn a_failed_upload_with_no_critical_alarm_is_one_request() {
+    // `!@ACTIVE_ALARMS`: the alarm list was reported and none is critical.
+    let address = spawn(
+        [
+            events(
+                ATRIUM,
+                &[(2, "/var/internal/A_2", ScheduleState::ArchiveFailed)],
+            ),
+            read_at(
+                ATRIUM,
+                "ACTIVE_ALARMS",
+                ReadValue::Alarms(vec![Alarm {
+                    name: "video_loss".into(),
+                    level: "critical".into(),
+                }]),
+                AT,
+            ),
+            events(
+                BEACON,
+                &[(3, "/var/internal/C_3", ScheduleState::ArchiveFailed)],
+            ),
+            read_at(BEACON, "ACTIVE_ALARMS", ReadValue::Alarms(vec![]), AT),
+        ],
+        fleet(),
+    )
+    .await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices?fields=RECORDING_EVENTS\
+         &filter=RECORDING_EVENTS.state:archive_failed,ACTIVE_ALARMS.level:critical\
+         &where=@RECORDING_EVENTS,!@ACTIVE_ALARMS"
+    ))
+    .await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ids(&body), [BEACON]);
+}
+
+#[tokio::test]
+async fn a_value_its_attribute_cannot_hold_is_refused() {
+    let address = spawn([], fleet()).await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices?filter=RECORDING_EVENTS.state:archive-failed"
+    ))
+    .await;
+
+    assert_eq!(status, 400);
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error is a string")
+            .contains("archive-failed"),
         "the message should quote what could not be read, got {body}"
     );
 }

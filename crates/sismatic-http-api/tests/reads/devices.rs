@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use sismatic_api_types::{Read, ReadValue};
+use sismatic_api_types::{Read, ReadValue, RecordingEvent, ScheduleState};
 
 use crate::{FailingStore, SCOPE, get, read_at, spawn_app, spawn_over};
 
@@ -255,6 +255,142 @@ async fn the_reads_routes_are_gets() {
         response.headers().get("allow").map(|v| v.as_bytes()),
         Some(&b"GET"[..])
     );
+}
+
+/// A `RECORDING_EVENTS` read for [`DEVICE`] whose events have `states`, in order.
+fn events(states: &[ScheduleState], at: &str) -> Read {
+    let events = states
+        .iter()
+        .enumerate()
+        .map(|(i, state)| RecordingEvent {
+            db_id: i as u64,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: Some(*state),
+            media_present: None,
+            package: format!("/var/internal/P_{i}"),
+            extra: Default::default(),
+        })
+        .collect();
+    read_at(
+        DEVICE,
+        "RECORDING_EVENTS",
+        ReadValue::RecordingEvents(events),
+        at,
+    )
+}
+
+/// The `state` of every event in a read's list, as the wire spells it.
+fn states(read: &serde_json::Value) -> Vec<String> {
+    read["value"]["value"]
+        .as_array()
+        .expect("an event list")
+        .iter()
+        .map(|e| e["state"].as_str().expect("a state").to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn where_on_a_history_picks_reads_before_limit_counts_them() {
+    // Five readings, of which 0, 2 and 3 are over 1. `limit=2` counts matching
+    // reads, so it returns the two most recent matches rather than whichever of
+    // the last two rows happen to match.
+    let readings = [5, 1, 7, 9, 0];
+    let address = spawn_with(
+        readings
+            .iter()
+            .enumerate()
+            .map(|(i, v)| read(DEVICE, "T", *v, &format!("2026-07-23T14:0{i}:00Z"))),
+    )
+    .await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices/{DEVICE}/fields/T/history?where=T:gt:1&limit=2"
+    ))
+    .await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(values(&body), [7, 9]);
+}
+
+#[tokio::test]
+async fn a_history_can_be_asked_when_an_upload_failed() {
+    let address = spawn_with([
+        events(&[ScheduleState::Archiving], "2026-07-23T14:00:00Z"),
+        events(&[ScheduleState::ArchiveFailed], "2026-07-23T14:01:00Z"),
+        events(&[ScheduleState::Archived], "2026-07-23T14:02:00Z"),
+    ])
+    .await;
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices/{DEVICE}/fields/RECORDING_EVENTS/history\
+         ?filter=RECORDING_EVENTS.state:archive_failed&where=@filter"
+    ))
+    .await;
+
+    assert_eq!(status, 200, "{body}");
+    let reads = body["reads"].as_array().expect("reads is an array");
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0]["at"], "2026-07-23T14:01:00Z");
+}
+
+#[tokio::test]
+async fn filter_trims_the_latest_routes() {
+    let address = spawn_with([
+        events(
+            &[ScheduleState::Archived, ScheduleState::ArchiveFailed],
+            "2026-07-23T14:00:00Z",
+        ),
+        read(DEVICE, "T", 1, "2026-07-23T14:00:00Z"),
+    ])
+    .await;
+    let filter = "filter=RECORDING_EVENTS.state:archive_failed";
+
+    let (status, body) = get(format!("{address}{SCOPE}/devices/{DEVICE}/fields?{filter}")).await;
+    assert_eq!(status, 200, "{body}");
+    // Both reads stay; only the list inside one of them is trimmed.
+    assert_eq!(body["reads"].as_array().expect("reads").len(), 2);
+    assert_eq!(states(&body["reads"][0]), ["archive_failed"]);
+
+    let (status, body) = get(format!(
+        "{address}{SCOPE}/devices/{DEVICE}/fields/RECORDING_EVENTS?{filter}"
+    ))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(states(&body), ["archive_failed"]);
+}
+
+#[tokio::test]
+async fn where_on_a_route_for_one_device_points_at_the_index() {
+    let address = spawn_with([read(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
+
+    for route in ["fields", "fields/T"] {
+        let (status, body) = get(format!(
+            "{address}{SCOPE}/devices/{DEVICE}/{route}?where=T:1"
+        ))
+        .await;
+        assert_eq!(status, 400, "{route}");
+        let message = body["error"].as_str().expect("error is a string");
+        assert!(
+            message.contains(&format!("/v1/reads/devices?devices={DEVICE}")),
+            "{route}: the message should name the index route, got {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_clause_on_another_field_than_the_path_names_is_refused() {
+    let address = spawn_with([read(DEVICE, "T", 1, "2026-07-23T14:00:00Z")]).await;
+
+    for query in ["where=FIRMWARE:2.11", "filter=ACTIVE_ALARMS.level:critical"] {
+        let (status, _) = get(format!(
+            "{address}{SCOPE}/devices/{DEVICE}/fields/T/history?{query}"
+        ))
+        .await;
+        assert_eq!(status, 400, "{query}");
+    }
 }
 
 /// The numeric values of a history response, in the order they were served.

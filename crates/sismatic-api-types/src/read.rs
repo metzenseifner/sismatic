@@ -140,11 +140,69 @@ pub struct ReadQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", param(example = "2026-07-24T00:00:00Z"))]
     pub end: Option<Timestamp>,
+    /// Keep only the reads that satisfy every clause, written as on the
+    /// device index's `where` (see [`FleetQuery::predicates`]). Applied before
+    /// `limit`, so `limit` counts matching reads.
+    ///
+    /// A history is a series of one field, so every clause must name the
+    /// field in the path. A clause on any other field could never hold and is
+    /// a `400`.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RECORDING_EVENTS.state:archive_failed"),
+        schema(value_type = Option<String>)
+    )]
+    pub predicates: Option<String>,
+    /// Trim each read's list to the elements that pass, written as on the
+    /// device index's `filter` (see [`FleetQuery::filter`]). Never removes a
+    /// read; pair it with `where=@filter` for that. Clauses must name the
+    /// field in the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RECORDING_EVENTS.state:archive_failed"),
+        schema(value_type = Option<String>)
+    )]
+    pub filter: Option<String>,
     /// Maximum rows to return, counted from the most recent. Omitted means the
     /// server's default page size; the server also caps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", param(example = 100))]
     pub limit: Option<u32>,
+}
+
+/// The query string of a route that answers for one device or one group, and
+/// so has lists to trim but no rows to pick.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(
+    feature = "openapi",
+    derive(utoipa::ToSchema, utoipa::IntoParams),
+    into_params(parameter_in = Query)
+)]
+pub struct FilterQuery {
+    /// Trim each read's list to the elements that pass, written as on the
+    /// device index's `filter` (see [`FleetQuery::filter`]). On a route that
+    /// names a field in its path, clauses must name that field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RECORDING_EVENTS.state:archive_failed"),
+        schema(value_type = Option<String>)
+    )]
+    pub filter: Option<String>,
+    /// Not accepted here. `where` picks rows, and this route answers for one
+    /// device or group, so there is nothing to pick. Read rather than ignored
+    /// so that it is a `400` naming the index route that takes it, instead of
+    /// a filter that silently did nothing.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>),
+        schema(value_type = Option<String>)
+    )]
+    pub predicates: Option<String>,
 }
 
 /// A page of reads, wrapped in an object (rather than a bare array) so the
@@ -265,29 +323,30 @@ pub struct FleetQuery {
         schema(value_type = Option<String>)
     )]
     pub group: Option<GroupId>,
-    /// Keep only devices whose reads satisfy every `FIELD:value` predicate,
-    /// comma-separated — e.g. `RUNNING_STATE:stopped,FIRMWARE:2.11`.
+    /// Keep only the devices that satisfy every clause, comma-separated, e.g.
+    /// `RUNNING_STATE:stopped,FIRMWARE:ge:2.11`.
     ///
-    /// A predicate selects *devices*, not reads: a row that satisfies it still
-    /// carries every field `fields` asked for, so
-    /// `?fields=FIRMWARE&where=RUNNING_STATE:stopped` reads "the firmware of
-    /// every stopped recorder". The value is compared in whatever shape the
-    /// device answered in, so `8080` matches a port and `stopped` matches a
-    /// recording state without the caller spelling out a type.
+    /// A clause is `PATH:VALUE`, `PATH!:VALUE` (negated) or `PATH:OP:VALUE`,
+    /// with `OP` one of `gt ge lt le has`; `a|b` matches either value. `PATH`
+    /// is a field (`RUNNING_STATE`) or a list field's attribute
+    /// (`RECORDING_EVENTS.state`, `ACTIVE_ALARMS.level`). A field's value is
+    /// compared in the shape the device answered in, so `8080` matches a port
+    /// and `stopped` a recording state. An attribute clause holds when some
+    /// element passes it, and clauses on the same list must hold for the same
+    /// element.
     ///
-    /// `RECORDING_EVENTS:<state>` keeps a device when *any* of its recording
-    /// events is in that schedule state. The state may be written as its wire
-    /// name (`archive_failed`), its device name (`SCHEDULE_ARCHIVE_FAILED`), or
-    /// its integer code (`6`), case-insensitively. Only the code form can
-    /// name a state the device does not document.
+    /// `where` can also refer to `filter`: `@filter` keeps a device when every
+    /// list `filter` names is non-empty after trimming, `@LIST` when that one
+    /// list is, and `!@LIST` when the list was reported and no element passes.
     ///
-    /// A device that has never reported the named field cannot satisfy the
-    /// predicate and is excluded — which does not distinguish "not stopped"
-    /// from "never answered". A row-less device is exactly what the unfiltered
-    /// page shows, so that distinction is one request away.
+    /// `where` selects *devices*, never changes them: a row that satisfies it
+    /// still carries every field `fields` asked for. A device that never
+    /// reported a field satisfies no clause on it, negated or not; the
+    /// unfiltered page shows such a device as a row with no reads.
     ///
-    /// The separator is `:` so a value needs no percent-encoding, and the list
-    /// separator is `,` — which a value therefore cannot contain.
+    /// An unknown field matches nothing. An unknown attribute, a value its
+    /// attribute cannot hold, an operator its type cannot take, or a reference
+    /// to a list `filter` does not name is a `400`.
     #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
@@ -295,6 +354,23 @@ pub struct FleetQuery {
         schema(value_type = Option<String>)
     )]
     pub predicates: Option<String>,
+    /// Trim the lists inside each row to the elements that pass every clause
+    /// on them, comma-separated, e.g. `RECORDING_EVENTS.state:archive_failed`.
+    /// Omitted means no list is trimmed.
+    ///
+    /// Clauses are written as in `where`, but must name an attribute. `filter`
+    /// never removes a row; pair it with `where=@filter` to keep only the rows
+    /// it leaves something in. So
+    /// `?fields=RECORDING_EVENTS&filter=RECORDING_EVENTS.state:archive_failed&where=@filter`
+    /// reads "every device with a failed upload, and only the failed uploads".
+    /// An element without the attribute (an event with no `state`) is dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RECORDING_EVENTS.state:archive_failed"),
+        schema(value_type = Option<String>)
+    )]
+    pub filter: Option<String>,
     /// Maximum devices to return. Omitted means the server's default page size;
     /// the server also caps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -90,7 +90,8 @@ pub use group::{
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
 pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, GroupWrite, Removed};
 pub use read::{
-    DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
+    DeviceReads, FilterQuery, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan,
+    Timestamp,
 };
 pub use value::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState, ScheduleState};
 pub use write::{

@@ -1,7 +1,7 @@
 //! The fleet reads route — every device's latest values, filtered and paged.
 //!
 //! ```text
-//! GET /devices?fields=&devices=&group=&where=&limit=&after=
+//! GET /devices?fields=&devices=&group=&where=&filter=&limit=&after=
 //! ```
 //!
 //! One route, and the only one in the scope that answers about more than one
@@ -32,32 +32,25 @@
 //! something unconfigured is a `404` that names it — a filter that silently
 //! matched nothing would report a typo as a healthy, empty fleet.
 //!
-//! # Two filters, on two different axes
+//! # Three filters, on three different axes
 //!
-//! `fields` picks columns; `where` picks rows. They compose rather than
-//! competing, and the order is what makes the useful query expressible:
-//! `?fields=FIRMWARE&where=RUNNING_STATE:stopped` is "the firmware of every
-//! stopped recorder", so the predicate is evaluated against a device's *whole*
-//! snapshot and only then are the requested columns kept. Evaluated the other way
-//! around — project first, then filter — that query would match nothing, because
-//! the column the predicate reads would already have been dropped.
+//! `fields` picks columns, `where` picks rows, and `filter` trims the lists
+//! inside rows. They compose, and the order is what makes the useful queries
+//! expressible. `?fields=FIRMWARE&where=RUNNING_STATE:stopped` is "the firmware
+//! of every stopped recorder", so `where` is evaluated against a device's
+//! *whole* snapshot and only then are the requested columns kept. Projecting
+//! first would drop the column `where` reads and match nothing.
 //!
-//! Neither filter validates a field name against the instruction catalog, for
-//! the reason [`reads`](crate::handlers::reads) gives for the three routes
-//! beside it: the store cannot tell a misspelling from an unpolled field. Here
-//! that ambiguity is cheaper still — an unknown name in `?fields=` contributes
-//! no column and an unknown name in `?where=` matches no device, so neither can
-//! turn into a failure a caller has to interpret. `GET /v1/reads` publishes the
-//! names both accept, which is the same information at the only moment it is
-//! actionable.
+//! `where` runs before the page is cut, because it changes which rows exist.
+//! `filter` runs after, because it never does. The language both are written
+//! in, and how `where` can refer to `filter` (`@filter`, `@LIST`, `!@LIST`),
+//! lives in [`crate::query`].
 //!
-//! A predicate's value is compared with [`satisfies`], the same function the
-//! group routes use to decide whether a member did what it was told. It reads the
-//! caller's text *in the shape the device answered in*, so `8080` matches a
-//! `Port`, `true` matches a `Flag` and `stopped` matches a `State`, with no
-//! per-field type knowledge on this side of the seam. That is the whole reason
-//! `where` costs no new comparison logic: the question "does this read hold that
-//! value" was already answered once, for a different caller.
+//! No filter validates a field name against the instruction catalog, for the
+//! reason [`reads`](crate::handlers::reads) gives for the three routes beside
+//! it: the store cannot tell a misspelling from an unpolled field. An unknown
+//! name in `?fields=` contributes no column and one in `?where=` matches no
+//! device. `GET /v1/reads` publishes the names all three accept.
 //!
 //! # Paging by device, with the id as the cursor
 //!
@@ -79,15 +72,15 @@ use std::collections::BTreeSet;
 use actix_web::web;
 // `ApiError` is named only by the `#[utoipa::path]` response attributes below.
 use sismatic_api_types::{
-    ApiError, DeviceId, DeviceReads, FieldName, FleetQuery, FleetReads, Read, ReadValue,
+    ApiError, DeviceId, DeviceReads, FieldName, FleetQuery, FleetReads, Read,
 };
 use sismatic_store::ReadStore;
 use sismatic_store::catalog::DeviceCatalog;
-use sismatic_store::group::satisfies;
 
 use crate::handlers::error::ApiFailure;
 use crate::handlers::reads::normalize_field;
 use crate::handlers::target::{READS, group_members};
+use crate::query::Query;
 
 /// The most devices one page can hold.
 ///
@@ -102,7 +95,7 @@ const MAX_LIMIT: u32 = 1_000;
 /// fleet, rather than the whole of one.
 const DEFAULT_LIMIT: u32 = 100;
 
-/// `GET /v1/reads/devices?fields=&devices=&group=&where=&limit=&after=` —
+/// `GET /v1/reads/devices?fields=&devices=&group=&where=&filter=&limit=&after=` —
 /// every configured device's latest values, one row per device, ordered by id.
 ///
 /// Every filter is optional: omit them all for the whole fleet with every field
@@ -125,8 +118,10 @@ const DEFAULT_LIMIT: u32 = 100;
              following page, or `null` on the last one. A configured device that has \
              never answered is a row with an empty `latest`.",
          body = FleetReads),
-        (status = 400, description = "A malformed `?where=` predicate, or `?limit=0`. \
-             The body says which.", body = ApiError),
+        (status = 400, description = "A malformed `?where=` or `?filter=` clause \
+             (an unknown attribute, a value its attribute cannot hold, an operator \
+             its type does not support, or a reference to a list `?filter=` does \
+             not name), or `?limit=0`. The body says which.", body = ApiError),
         (status = 404, description = "A `?devices=` id that names no configured device, \
              or a `?group=` id that names no configured device group. Unlike the \
              per-device reads routes' answer for an unknown id, this is a claim \
@@ -143,7 +138,7 @@ pub async fn list_fleet(
     let query = query.into_inner();
 
     let fields = wanted_fields(&query.fields);
-    let predicates = predicates_of(&query.predicates)?;
+    let plan = Query::parse(&query.predicates, &query.filter)?;
     let limit = page_size(query.limit)?;
     let candidates = candidates(&**catalog, &query).await?;
 
@@ -154,7 +149,7 @@ pub async fn list_fleet(
         // The whole snapshot, because a predicate may read a field `?fields=`
         // does not ask for. Projection happens after the row survives.
         let latest = store.latest_all(device.clone()).await?;
-        if !predicates.iter().all(|predicate| predicate.holds(&latest)) {
+        if !plan.selects(&latest) {
             continue;
         }
 
@@ -170,7 +165,9 @@ pub async fn list_fleet(
 
         devices.push(DeviceReads {
             device,
-            latest: project(latest, fields.as_ref()),
+            // `filter` runs after the page is cut: it never removes a row, so it
+            // cannot move the cursor.
+            latest: project(plan.narrow(latest), fields.as_ref()),
         });
     }
 
@@ -249,72 +246,6 @@ async fn unknown_device(catalog: &dyn DeviceCatalog, id: &str) -> ApiFailure {
     ApiFailure::NotFound(format!("no device '{id}' is configured"))
 }
 
-/// One `FIELD:value` row filter.
-///
-/// `pub(crate)` for the reason [`crate::handlers::reads`]'s parsing helpers are:
-/// the group index parses the same `?where=` syntax, and two parsers would be
-/// two spellings of one filter that could drift apart.
-pub(crate) struct Predicate {
-    pub(crate) field: FieldName,
-    /// The caller's text, held as [`ReadValue::Text`] so [`satisfies`] reads it
-    /// in whatever shape the device answered in. Nothing here parses the value,
-    /// because nothing here knows what shape the field holds — the read does.
-    want: ReadValue,
-}
-
-impl Predicate {
-    pub(crate) fn parse(raw: &str) -> Result<Self, ApiFailure> {
-        let (field, want) = raw.split_once(':').ok_or_else(|| {
-            ApiFailure::BadRequest(format!(
-                "'{raw}' is not a filter; write one as 'FIELD:value', \
-                 e.g. 'RUNNING_STATE:stopped'"
-            ))
-        })?;
-
-        let field = normalize_field(field.trim());
-        if field.is_empty() {
-            return Err(ApiFailure::BadRequest(format!(
-                "'{raw}' names no field; write a filter as 'FIELD:value'"
-            )));
-        }
-
-        Ok(Predicate {
-            field,
-            want: ReadValue::Text(want.to_owned()),
-        })
-    }
-
-    /// Whether one read is of this filter's field *and* satisfies its value.
-    ///
-    /// Split out of [`holds`](Self::holds) because the two indexes quantify
-    /// over it differently: a device satisfies a predicate when *some* read of
-    /// it does, and a device group when *every* member that reported does. The
-    /// comparison itself is the same either way, and being one function is what
-    /// keeps it so.
-    pub(crate) fn matches(&self, read: &Read) -> bool {
-        read.field == self.field && satisfies(&self.want, &read.value)
-    }
-
-    /// Whether `latest` — one device's whole snapshot — satisfies this filter.
-    ///
-    /// A device with no read of the named field holds nothing that could satisfy
-    /// it and is excluded. That deliberately does not distinguish "not stopped"
-    /// from "never answered"; the unfiltered page shows the second as an empty
-    /// row, so the distinction is one request away rather than absent.
-    fn holds(&self, latest: &[Read]) -> bool {
-        latest.iter().any(|read| self.matches(read))
-    }
-}
-
-/// The `?where=` predicates, or an empty list if none were given.
-///
-/// Takes the raw parameter rather than the query struct, because the two
-/// indexes deserialize different structs and this is the one filter they spell
-/// identically.
-pub(crate) fn predicates_of(raw: &Option<String>) -> Result<Vec<Predicate>, ApiFailure> {
-    csv(raw).into_iter().map(Predicate::parse).collect()
-}
-
 /// The fields `?fields=` asked for, or `None` for "every field".
 ///
 /// `None` rather than an empty set, because the two mean opposite things and an
@@ -373,7 +304,7 @@ pub(crate) fn csv(raw: &Option<String>) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sismatic_api_types::{RecordingEvent, RecordingState, ScheduleState, Timestamp};
+    use sismatic_api_types::{ReadValue, RecordingState, Timestamp};
 
     const AT: &str = "2026-08-17T00:00:00.000Z";
 
@@ -383,124 +314,6 @@ mod tests {
             field: field.to_owned(),
             value,
             at: Timestamp(AT.to_owned()),
-        }
-    }
-
-    fn query(predicates: &str) -> Option<String> {
-        Some(predicates.to_owned())
-    }
-
-    /// The comparison `where` is built on, reached through the parser a caller
-    /// actually goes through: text in the URL, a decoded value in the store.
-    #[test]
-    fn a_predicate_reads_its_value_in_the_shape_the_device_answered_in() {
-        let latest = vec![
-            read("RUNNING_STATE", ReadValue::State(RecordingState::Stopped)),
-            read("HTTP_PORT", ReadValue::Port(8080)),
-            read("DHCP_MODE", ReadValue::Flag(true)),
-            read("FIRMWARE", ReadValue::Version("2.11".to_owned())),
-        ];
-
-        for spelling in [
-            "RUNNING_STATE:stopped",
-            "running-state:STOPPED",
-            "HTTP_PORT:8080",
-            "DHCP_MODE:true",
-            "DHCP_MODE:on",
-            "FIRMWARE:2.11",
-        ] {
-            let predicates = predicates_of(&query(spelling)).expect("a well-formed predicate");
-            assert!(
-                predicates.iter().all(|p| p.holds(&latest)),
-                "{spelling} should have matched"
-            );
-        }
-
-        for spelling in ["RUNNING_STATE:started", "HTTP_PORT:9090", "DHCP_MODE:no"] {
-            let predicates = predicates_of(&query(spelling)).expect("a well-formed predicate");
-            assert!(
-                !predicates.iter().all(|p| p.holds(&latest)),
-                "{spelling} should not have matched"
-            );
-        }
-    }
-
-    /// The question the filter exists for: which devices have a failed
-    /// upload. Reached through the URL syntax a caller actually types.
-    #[test]
-    fn a_device_is_selected_by_the_state_of_any_of_its_recording_events() {
-        let event = |db_id, state| RecordingEvent {
-            db_id,
-            start: None,
-            identifier: String::new(),
-            creator: String::new(),
-            title: String::new(),
-            state: Some(state),
-            media_present: None,
-            package: String::new(),
-            extra: Default::default(),
-        };
-        let latest = vec![read(
-            "RECORDING_EVENTS",
-            ReadValue::RecordingEvents(vec![
-                event(58, ScheduleState::Archived),
-                event(59, ScheduleState::ArchiveFailed),
-            ]),
-        )];
-
-        for spelling in [
-            "RECORDING_EVENTS:SCHEDULE_ARCHIVE_FAILED",
-            "recording-events:archive_failed",
-            "RECORDING_EVENTS:6",
-        ] {
-            let predicates = predicates_of(&query(spelling)).expect("a well-formed predicate");
-            assert!(
-                predicates[0].holds(&latest),
-                "{spelling} should have matched"
-            );
-        }
-        let predicates =
-            predicates_of(&query("RECORDING_EVENTS:record_failed")).expect("well-formed");
-        assert!(!predicates[0].holds(&latest));
-    }
-
-    /// The case that separates "not stopped" from "never answered", and the
-    /// reason it is documented rather than papered over.
-    #[test]
-    fn a_device_that_never_reported_the_field_does_not_satisfy_a_predicate() {
-        let latest = vec![read("FIRMWARE", ReadValue::Version("2.11".to_owned()))];
-        let predicates = predicates_of(&query("RUNNING_STATE:stopped")).expect("well-formed");
-
-        assert!(!predicates[0].holds(&latest));
-    }
-
-    #[test]
-    fn every_predicate_has_to_hold() {
-        let latest = vec![
-            read("RUNNING_STATE", ReadValue::State(RecordingState::Stopped)),
-            read("FIRMWARE", ReadValue::Version("2.11".to_owned())),
-        ];
-
-        let both =
-            predicates_of(&query("RUNNING_STATE:stopped,FIRMWARE:2.11")).expect("well-formed");
-        assert!(both.iter().all(|p| p.holds(&latest)));
-
-        let one_wrong =
-            predicates_of(&query("RUNNING_STATE:stopped,FIRMWARE:2.09")).expect("well-formed");
-        assert!(!one_wrong.iter().all(|p| p.holds(&latest)));
-    }
-
-    #[test]
-    fn a_predicate_without_a_colon_is_refused_rather_than_ignored() {
-        // Silently dropping it would answer a wider question than the one asked
-        // — every device rather than the stopped ones — which is the failure
-        // mode a filter must not have.
-        for malformed in ["RUNNING_STATE", ":stopped", " :stopped"] {
-            let refused = predicates_of(&query(malformed));
-            assert!(
-                matches!(refused, Err(ApiFailure::BadRequest(_))),
-                "{malformed} should have been refused"
-            );
         }
     }
 

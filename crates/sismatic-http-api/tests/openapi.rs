@@ -587,7 +587,7 @@ async fn tags_name_the_question_a_route_answers_not_the_resource_it_names() {
 
 #[tokio::test]
 async fn the_history_route_documents_the_query_filters() {
-    // These four come from `ReadQuery`'s `IntoParams` rather than from a list
+    // These come from `ReadQuery`'s `IntoParams` rather than from a list
     // restated in the route attribute, so this test is really about that
     // derivation still reaching the document.
     let address = spawn_app().await;
@@ -603,7 +603,32 @@ async fn the_history_route_documents_the_query_filters() {
         .map(|p| p["name"].as_str().expect("a parameter name"))
         .collect();
 
-    assert_eq!(query, ["field", "start", "end", "limit"]);
+    assert_eq!(query, ["field", "start", "end", "where", "filter", "limit"]);
+}
+
+#[tokio::test]
+async fn the_single_subject_routes_document_filter_and_the_where_they_refuse() {
+    // From `FilterQuery`'s `IntoParams`. `where` is documented because it is
+    // read, to be refused with a pointer to the index, rather than ignored.
+    let address = spawn_app().await;
+    let doc = document(&address).await;
+
+    for path in [
+        "/v1/reads/devices/{id}/fields",
+        "/v1/reads/devices/{id}/fields/{field}",
+        "/v1/reads/groups/{id}/fields",
+        "/v1/reads/groups/{id}/fields/{field}",
+    ] {
+        let params = doc["paths"][path]["get"]["parameters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} documents parameters"));
+        let query: Vec<&str> = params
+            .iter()
+            .filter(|p| p["in"] == "query")
+            .map(|p| p["name"].as_str().expect("a parameter name"))
+            .collect();
+        assert_eq!(query, ["filter", "where"], "{path}");
+    }
 }
 
 #[tokio::test]
@@ -629,7 +654,9 @@ async fn the_fleet_route_documents_its_filters_under_their_wire_names() {
 
     assert_eq!(
         query,
-        ["fields", "devices", "group", "where", "limit", "after"]
+        [
+            "fields", "devices", "group", "where", "filter", "limit", "after"
+        ]
     );
 }
 
@@ -657,7 +684,9 @@ async fn the_group_index_documents_the_filters_that_are_its_own() {
     // `where` under its wire name here too — same `serde` rename, same reason.
     assert_eq!(
         query,
-        ["fields", "groups", "where", "sync", "limit", "after"]
+        [
+            "fields", "groups", "where", "filter", "sync", "limit", "after"
+        ]
     );
 }
 
