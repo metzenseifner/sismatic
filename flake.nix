@@ -1510,14 +1510,37 @@
                     req = dep.version or null;
                   }) (lib.filterAttrs (_: dep: builtins.isAttrs dep && dep ? path) table);
 
+                memberManifest = m: builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml"));
+
+                # A member's dev-dependency on itself, under any table or rename.
+                isSelf = m: name: dep: (if builtins.isAttrs dep then dep.package or name else name) == (memberManifest m).package.name;
+
                 deps =
                   depsIn "Cargo.toml" (cargoToml.workspace.dependencies or { })
                   ++ lib.concatMap (
                     m:
-                    lib.concatMap (depsIn "${m}/Cargo.toml") (
-                      depTables (builtins.fromTOML (builtins.readFile (./. + "/${m}/Cargo.toml")))
+                    lib.concatMap (t: depsIn "${m}/Cargo.toml" (lib.filterAttrs (n: d: !(isSelf m n d)) t)) (
+                      depTables (memberManifest m)
                     )
                   ) cargoToml.workspace.members;
+
+                # Self dev-dependencies are the inverse case: they must be path-only.
+                # `cargo package` strips a versionless path dev-dependency, but keeps a
+                # versioned one (explicit, or inherited via `workspace = true`) and
+                # resolves it against the registry before the crate being packaged
+                # exists there — "no matching package named <self> found". That broke
+                # release-plz on the v0.9.0 baseline.
+                badSelf = lib.concatMap (
+                  m:
+                  lib.concatMap (
+                    t:
+                    lib.mapAttrsToList (name: _: "  ${m}/Cargo.toml: ${name}") (
+                      lib.filterAttrs (
+                        n: d: isSelf m n d && !(builtins.isAttrs d && d ? path && !(d ? version) && !(d.workspace or false))
+                      ) t
+                    )
+                  ) (depTables (memberManifest m))
+                ) cargoToml.workspace.members;
 
                 # `*` is unbounded, so always satisfied.
                 ok = d: d.req == "*" || (d.req != null && reqParts d.req != null && satisfies (reqParts d.req));
@@ -1559,6 +1582,16 @@
                 which covers every 0.x and never needs updating — see the note in
                 [workspace.dependencies]. Requirements other than the caret form
                 (`0`, `0.2`, `^0.2.3`) or `*` are not understood by this check.
+              '';
+              assert lib.assertMsg (badSelf == [ ]) ''
+                Self dev-dependencies that carry a version:
+                ${lib.concatStringsSep "\n" badSelf}
+                A crate's dependency on itself must be path-only, e.g.
+                  <crate> = { path = ".", features = [ ... ] }
+                not `workspace = true` and with no `version`. Otherwise `cargo package`
+                keeps it, looks for the crate on crates.io before it exists there, and
+                release-plz's release-pr job fails on every push for as long as the
+                offending manifest is the latest `v*` tag.
               '';
               pkgs.runCommand "internal-dep-versions-ok" { } "touch $out";
 
