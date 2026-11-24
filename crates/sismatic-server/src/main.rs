@@ -84,6 +84,7 @@ use sismatic_server::telemetry::{get_subscriber, init_subscriber};
 use clap::{CommandFactory, Parser};
 use sismatic_core::devices::config;
 use sismatic_core::devices::config::RawConfig;
+use sismatic_http_api::ApiDoc;
 use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides, ServerConfig};
 use sismatic_server::run;
 use sismatic_server::schema::EnvSchema;
@@ -120,6 +121,14 @@ struct Args {
     // maintainer rather than to an operator.
     #[arg(long, exclusive = true)]
     env_schema: bool,
+
+    /// Print the OpenAPI document this server serves at /api-docs/openapi.json, and exit
+    // Same reasoning as `--env-schema`: a fact about the binary, not a
+    // deployment. It is how `flake.nix` reads the document without starting a
+    // server in the build sandbox, which the http-ui schema check diffs the
+    // committed `schema.d.ts` against.
+    #[arg(long, exclusive = true)]
+    openapi: bool,
 }
 
 /// Which server config file to read. Pure and total: the environment is read by
@@ -164,6 +173,10 @@ async fn main() -> Result<(), std::io::Error> {
     // point logs, so there is nothing to lose by answering here and leaving.
     if args.env_schema {
         print_env_schema();
+        return Ok(());
+    }
+    if args.openapi {
+        print_openapi();
         return Ok(());
     }
 
@@ -234,6 +247,17 @@ fn print_env_schema() {
     match serde_json::to_string_pretty(&schema) {
         Ok(json) => println!("{json}"),
         Err(e) => exit_with_help(format_args!("rendering the environment schema: {e}")),
+    }
+}
+
+/// Write the OpenAPI document to stdout as JSON.
+///
+/// The same document `/api-docs/openapi.json` serves, from the same
+/// [`ApiDoc::document`]; pretty-printed only so a diff of it reads.
+fn print_openapi() {
+    match ApiDoc::document().to_pretty_json() {
+        Ok(json) => println!("{json}"),
+        Err(e) => exit_with_help(format_args!("rendering the OpenAPI document: {e}")),
     }
 }
 
