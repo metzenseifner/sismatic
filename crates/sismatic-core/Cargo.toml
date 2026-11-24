@@ -80,4 +80,12 @@ tokio = { workspace = true, features = ["test-util"] }
 # Nothing in the workspace depends on core with that feature (deliberately —
 # see above), and the workspace-root `cargo nextest` passes no `--features`, so
 # without this the simulator tests would silently never run in CI.
-sismatic-core = { workspace = true, features = ["simulator"] }
+#
+# Path-only, deliberately: the one internal dependency that must NOT carry a
+# `version` (nor inherit one via `workspace = true`). `cargo package` strips a
+# versionless path dev-dependency, but keeps a versioned one and rewrites it to
+# `sismatic-core = "0"` against the registry, where the crate it is packaging
+# cannot yet be found: "no matching package named `sismatic-core` found". That
+# wedged release-plz on the v0.9.0 baseline. `nix flake check`
+# (internal-dep-versions) enforces this form.
+sismatic-core = { path = ".", features = ["simulator"] }
