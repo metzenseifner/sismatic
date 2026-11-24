@@ -122,6 +122,7 @@ pub mod config;
 pub mod handlers;
 pub mod inventory;
 pub mod openapi;
+mod query;
 pub mod stamp;
 pub mod startup;
 pub mod ui;

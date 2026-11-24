@@ -8,11 +8,12 @@ use crate::protocol::instructions::Instruction;
 use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
-use crate::protocol::{In, MacAddr, ParseFn, Value, parser_of};
+use crate::protocol::{In, MacAddr, ParseFn, RecordingEvent, Step, Value, anchored, parser_of};
 
 instruction_catalog! {
     /// A built-in field that can be queried.
     pub enum Query {
+        RecordingEvents { name: "RECORDING_EVENTS", aliases: [], doc: "Read all recording events"},
         Stream1Name { name: "STREAM_1_NAME", aliases: ["STREAM_NAME_1"], doc: "Name of stream 1." },
         Stream2Name { name: "STREAM_2_NAME", aliases: ["STREAM_NAME_2"], doc: "Name of stream 2." },
         Stream3Name { name: "STREAM_3_NAME", aliases: ["STREAM_NAME_3"], doc: "Name of stream 3." },
@@ -114,6 +115,7 @@ impl Query {
     pub fn instruction(self) -> Instruction {
         use Query::*;
         let (payload, parser): (String, ParseFn) = match self {
+            RecordingEvents => (esc_cr("LRCDR"), recording_events()),
             Stream1Name => (esc_cr("N1STRC"), plain_text()),
             Stream2Name => (esc_cr("N2STRC"), plain_text()),
             Stream3Name => (esc_cr("N3STRC"), plain_text()),
@@ -192,6 +194,56 @@ impl Query {
 //        Value::Version,
 //    )
 //}
+
+/// The recording-event list: `(<json> CRLF)* CRLF`.
+///
+/// # The frame
+///
+/// Each event is one non-empty JSON object on its own CRLF-terminated line, and
+/// a final bare CRLF closes the list. So an empty list is exactly `\r\n`, and a
+/// non-empty one ends `\r\n\r\n`. Attested against a real SMP.
+///
+/// Items being *non-empty* is what makes that terminator unambiguous: `\r\n\r\n`
+/// cannot occur between two events, only after the last one. JSON escapes a
+/// carriage return inside a string as the two characters `\r`, never as a raw
+/// byte, so no event can forge a terminator from inside one of its values
+/// either.
+///
+/// # Why this is `anchored` and not `parser_of`
+///
+/// Because the frame matches the empty input, which `search` cannot be trusted
+/// with — see [`anchored`] for the full account and the wrong answer it would
+/// otherwise produce.
+///
+/// # Why a bad line asks for more bytes
+///
+/// A line that is not valid JSON returns [`Step::NeedMore`] rather than a
+/// shorter list. The alternative — skip it, or stop early — reports a
+/// recording count that is quietly wrong, and a wrong count is worse here than
+/// a visible `exchange_timeout`: nothing downstream can tell a short list from
+/// a true one. This mirrors the `Cut` discipline the numeric parsers use.
+fn recording_events() -> ParseFn {
+    anchored(|buf: &str| {
+        // Before the terminator search, because an empty list *is* the bare
+        // terminator and contains no `\r\n\r\n` to find.
+        if buf.starts_with("\r\n") {
+            return Step::Done(Value::RecordingEvents(Vec::new()));
+        }
+
+        let Some(end) = buf.find("\r\n\r\n") else {
+            return Step::NeedMore;
+        };
+
+        let mut events = Vec::new();
+        for line in buf[..end].split("\r\n") {
+            match serde_json::from_str::<RecordingEvent>(line) {
+                Ok(event) => events.push(event),
+                Err(_) => return Step::NeedMore,
+            }
+        }
+        Step::Done(Value::RecordingEvents(events))
+    })
+}
 
 /// Active-alarm list: `<name:NAME,level:LEVEL>` records joined by `*` and
 /// terminated by CR LF, decoded to `(name, level)` pairs. Example:

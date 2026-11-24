@@ -20,7 +20,8 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use sismatic_api_types::{
-    Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Read, ReadValue, RecordingState,
+    Barrier, ConnectionStatus, DeviceSummary, GroupSummary, Read, ReadValue, RecordingEvent,
+    RecordingState, ScheduleState,
 };
 use sismatic_store::WriteStore;
 use sismatic_store_memory::{MemoryCatalog, MemoryStore};
@@ -233,6 +234,67 @@ async fn where_needs_every_reporting_member_to_agree() {
     // ...and where they do agree, the group answers.
     let uniform = index(&address, "where=FIRMWARE:2.11").await;
     assert_eq!(ids(&uniform), [ATRIUM_ROOM]);
+}
+
+/// A `RECORDING_EVENTS` read for `device` with one event per state.
+fn events(device: &str, states: &[ScheduleState]) -> Read {
+    let events = states
+        .iter()
+        .enumerate()
+        .map(|(i, state)| RecordingEvent {
+            db_id: i as u64,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: Some(*state),
+            media_present: None,
+            package: String::new(),
+            extra: Default::default(),
+        })
+        .collect();
+    read_at(
+        device,
+        "RECORDING_EVENTS",
+        ReadValue::RecordingEvents(events),
+        AT,
+    )
+}
+
+#[tokio::test]
+async fn where_and_filter_reach_into_every_members_lists() {
+    // `atrium-room` has a failed upload on both members; `beacon-hall`'s one
+    // member has none. `@filter` is quantified like any clause: every member
+    // that reported the list must keep something.
+    let address = spawn([
+        events(
+            ATRIUM,
+            &[ScheduleState::Archived, ScheduleState::ArchiveFailed],
+        ),
+        events(ANNEX, &[ScheduleState::ArchiveFailed]),
+        events(BEACON, &[ScheduleState::Archived]),
+    ])
+    .await;
+
+    let body = index(
+        &address,
+        "fields=RECORDING_EVENTS&filter=RECORDING_EVENTS.state:archive_failed&where=@filter",
+    )
+    .await;
+
+    assert_eq!(ids(&body), [ATRIUM_ROOM]);
+    let members = body["groups"][0]["fields"][0]["members"]
+        .as_array()
+        .expect("members is an array");
+    for member in members {
+        let states: Vec<&str> = member["read"]["value"]["value"]
+            .as_array()
+            .expect("an event list")
+            .iter()
+            .map(|e| e["state"].as_str().expect("a state"))
+            .collect();
+        assert_eq!(states, ["archive_failed"], "{member}");
+    }
 }
 
 #[tokio::test]

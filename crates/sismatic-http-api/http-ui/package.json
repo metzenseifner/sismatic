@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "gen:api": "openapi-typescript http://127.0.0.1:9000/api-docs/openapi.json -o src/api/schema.d.ts",
+    "gen:api": "mkdir -p node_modules/.tmp && cargo run -q -p sismatic-server -- --openapi > node_modules/.tmp/openapi.json && openapi-typescript node_modules/.tmp/openapi.json -o src/api/schema.d.ts",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui"
   },

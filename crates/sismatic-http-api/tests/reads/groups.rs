@@ -17,7 +17,9 @@
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use sismatic_api_types::{Read, ReadValue, RecordingState, Timestamp};
+use sismatic_api_types::{
+    Read, ReadValue, RecordingEvent, RecordingState, ScheduleState, Timestamp,
+};
 use sismatic_store::WriteStore;
 use sismatic_store_memory::MemoryStore;
 
@@ -698,6 +700,134 @@ async fn an_unknown_id_is_unaffected_by_the_group_refusal() {
     // from one that has not answered yet.
     let body = get_json(&address, "/devices/nobody/fields").await;
     assert_eq!(body["reads"].as_array().expect("reads").len(), 0);
+}
+
+/// A `RECORDING_EVENTS` read for `device` with the given `(db_id, state)` rows.
+fn events(device: &str, rows: &[(u64, ScheduleState)]) -> Read {
+    let events = rows
+        .iter()
+        .map(|(db_id, state)| RecordingEvent {
+            db_id: *db_id,
+            start: None,
+            identifier: String::new(),
+            creator: String::new(),
+            title: String::new(),
+            state: Some(*state),
+            media_present: None,
+            package: String::new(),
+            extra: Default::default(),
+        })
+        .collect();
+    read(
+        device,
+        "RECORDING_EVENTS",
+        ReadValue::RecordingEvents(events),
+    )
+}
+
+#[tokio::test]
+async fn filter_trims_the_members_lists_and_leaves_the_verdicts_alone() {
+    // Untrimmed, the members disagree (atrium has an extra archived event), so
+    // the field is not uniform. Trimmed to failures, the two lists would be
+    // equal; `uniform` must still describe what the members really hold.
+    let address = spawn([
+        events(
+            ATRIUM,
+            &[
+                (1, ScheduleState::Archived),
+                (2, ScheduleState::ArchiveFailed),
+            ],
+        ),
+        events(ANNEX, &[(2, ScheduleState::ArchiveFailed)]),
+    ])
+    .await;
+
+    let body = get_json(
+        &address,
+        &format!(
+            "/groups/{GROUP}/fields/RECORDING_EVENTS?filter=RECORDING_EVENTS.state:archive_failed"
+        ),
+    )
+    .await;
+
+    assert_eq!(body["uniform"], false);
+    for member in body["members"].as_array().expect("members") {
+        let ids: Vec<u64> = member["read"]["value"]["value"]
+            .as_array()
+            .expect("an event list")
+            .iter()
+            .map(|e| e["db_id"].as_u64().expect("db_id"))
+            .collect();
+        assert_eq!(ids, [2], "{member}");
+    }
+
+    // The index route trims the same way.
+    let body = get_json(
+        &address,
+        &format!("/groups/{GROUP}/fields?filter=RECORDING_EVENTS.state:archive_failed"),
+    )
+    .await;
+    assert_eq!(body["fields"][0]["uniform"], false);
+    assert_eq!(
+        body["fields"][0]["members"][0]["read"]["value"]["value"]
+            .as_array()
+            .expect("an event list")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn where_on_a_route_for_one_group_points_at_the_index() {
+    let address = spawn([state(ATRIUM, RecordingState::Started)]).await;
+
+    for route in ["fields", "fields/RUNNING_STATE"] {
+        let response = get(&format!(
+            "{address}{SCOPE}/groups/{GROUP}/{route}?where=RUNNING_STATE:started"
+        ))
+        .await;
+        assert_eq!(response.status().as_u16(), 400, "{route}");
+        let body: serde_json::Value = response.json().await.expect("a JSON body");
+        let message = body["error"].as_str().expect("error is a string");
+        assert!(
+            message.contains(&format!("/v1/reads/groups?groups={GROUP}")),
+            "{route}: the message should name the index route, got {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn where_on_a_group_history_picks_each_members_reads() {
+    let store = MemoryStore::default();
+    for (device, values) in [(ATRIUM, [1, 5, 2]), (ANNEX, [7, 0, 0])] {
+        for (i, value) in values.into_iter().enumerate() {
+            store
+                .upsert_latest(read_at(
+                    device,
+                    "T",
+                    ReadValue::Number(value),
+                    &format!("2026-08-17T00:0{i}:00.000Z"),
+                ))
+                .await
+                .expect("seeding the store");
+        }
+    }
+    let address = serve(store);
+
+    let body = get_json(
+        &address,
+        &format!("/groups/{GROUP}/fields/T/history?where=T:gt:1"),
+    )
+    .await;
+
+    let values = |member: usize| -> Vec<u64> {
+        series(&body, member)
+            .iter()
+            .map(|r| r["value"]["value"].as_u64().expect("a number"))
+            .collect()
+    };
+    assert_eq!(values(0), [5, 2]);
+    assert_eq!(values(1), [7]);
 }
 
 /// Serve `store` over the two-member device group on an ephemeral port.

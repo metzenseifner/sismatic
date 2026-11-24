@@ -297,6 +297,8 @@ sync:
       interval_secs: 5
     - name: MAC_ADDRESS
       interval_secs: 0
+    - name: RECORDING_EVENTS
+      interval_secs: 900
 
 store:
   retain: 24h
@@ -325,6 +327,7 @@ fields = [
   "*",
   { name = "RUNNING_STATE", interval_secs = 5 },
   { name = "MAC_ADDRESS", interval_secs = 0 },
+  { name = "RECORDING_EVENTS", interval_secs = 900 },
 ]
 
 [store]
@@ -372,6 +375,17 @@ deployment never has to spell the catalog out. A named field outranks the wildca
 which is what makes the idiom above work: everything at 300s, `RUNNING_STATE` at 5s,
 and `MAC_ADDRESS` listed but never polled (`interval_secs: 0`) because it does not
 change.
+
+`RECORDING_EVENTS` is the one field worth a deliberate decision, because it is the
+one whose reply is a *list*: the recorder answers its whole table, which on a unit
+with a year of recordings is tens of kilobytes, and it changes only when a recording
+starts or ends. The wildcard polls it at the default cadence like anything else, so
+a deployment that never names it is re-reading that table every `interval_secs`.
+How soon a new recording has to become visible is an operator's call rather than
+something this crate can guess, which is why it ships as a lever and not a special
+case: give it an interval of its own, or `0` to leave it in the file and never poll
+it at all. Reads are served from the store, so `0` means the field has no value to
+serve rather than one fetched on demand — the interval is also the staleness.
 
 #### `store`
 
@@ -1111,6 +1125,63 @@ fields:
 Config is the *initial* state, not a fixed answer table: register and setting writes
 overwrite a field, and recording commands rewrite `RUNNING_STATE`. The license is the
 exception — it is what the unit *is*, and no request changes it.
+
+#### A recorder with recordings in it
+
+`RECORDING_EVENTS` is the one field whose reply is a **list** rather than a line: the
+device answers the recorder's own table, one JSON object per line. A list does not
+fit in a YAML scalar or a `--field NAME=VALUE` flag, so that field takes a document —
+the same list folded into one JSON object under one key:
+
+```yaml
+fields:
+  RECORDING_EVENTS:
+    recording_events:
+      - db_id: 1
+        start: 1767879511          # epoch seconds, as the device sends it
+        identifier: sim-smp-351_20260108-143831
+        creator: c900011
+        title: Lecture 1
+        state: 11
+        media_present: "true"      # the device really does send a string
+        package: /var/internal/sim-smp-351_20260108-143831
+      - db_id: 2                   # a sparse row: absent fields stay absent
+        start: 1767883456
+        identifier: sim-smp-351_20260108-154417
+        package: /var/internal/sim-smp-351_20260108-154417
+```
+
+`recording_events: []` is a recorder that has never recorded — an *answer*, and not
+the same thing as leaving the field out, which is silence and reaches the client as a
+command timeout.
+
+A real recorder holds hundreds of rows, which belong in a file rather than in a device
+config. The same document, named:
+
+```yaml
+fields:
+  RECORDING_EVENTS:
+    file: ./recordings.json
+```
+
+Relative paths are resolved against the process working directory, because a device
+config can also be the compiled-in one, which has no directory of its own. An
+unreadable or malformed file fails the load naming the path, rather than leaving the
+field empty and claiming later that the recorder has nothing. Capturing a table off
+real hardware gives lines rather than a document, which `jq -s` folds:
+
+```console
+$ sismatic query hall-a recording_events > rows.jsonl
+$ jq -s '{recording_events: .}' rows.jsonl > recordings.json
+$ simulated-device --config ./device.yaml --check-config
+./device.yaml: ok
+```
+
+Only `db_id` is required. `start`, `state` and `media_present` stay absent when the
+document omits them — a firmware that does not report one is making a different claim
+than a `0` — and keys the type does not name are preserved verbatim, so a document can
+describe a firmware that reports more than this one does. `--check-config` feeds the
+rendered table to the client's own parser, like every other field.
 
 #### A fleet of them
 

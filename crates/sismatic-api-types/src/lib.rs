@@ -90,9 +90,10 @@ pub use group::{
 pub use instruction::{FieldCatalog, InstructionSummary, WritesCatalog};
 pub use inventory::{DeviceWrite, ExportFormat, ExportQuery, GroupWrite, Removed};
 pub use read::{
-    DeviceReads, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan, Timestamp,
+    DeviceReads, FilterQuery, FleetQuery, FleetReads, Read, ReadList, ReadQuery, TimeSpan,
+    Timestamp,
 };
-pub use value::{Alarm, MacAddr, ReadValue, RecordingState};
+pub use value::{Alarm, MacAddr, ReadValue, RecordingEvent, RecordingState, ScheduleState};
 pub use write::{
     Acceptance, Accepted, Barrier, BatchId, DesiredRecordingState, DeviceDesiredRecordingState,
     Intent, Rejection, WriteId, WriteList, WriteRecord, WriteStatus,

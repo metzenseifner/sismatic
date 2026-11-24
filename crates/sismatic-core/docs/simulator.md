@@ -105,6 +105,68 @@ CR LF. There is no per-field type table: a value is well-formed iff the producti
 parser accepts it. The config is the map's *initial* value; register and setting
 writes overwrite a field, and recording commands rewrite `RUNNING_STATE`.
 
+### A field whose reply is a list
+
+One field breaks the "wire text is a scalar" rule, because the device itself does:
+`RECORDING_EVENTS` answers with the recorder's table — one JSON object per line,
+the list terminated by a blank one. A list is not something a YAML scalar or a
+`--field NAME=VALUE` flag can hold, so that field takes a **document** instead,
+folded into a single JSON object under one key:
+
+```yaml
+fields:
+  RECORDING_EVENTS:
+    recording_events:
+      - db_id: 1
+        start: 1767879511
+        identifier: sim-smp-351_20260108-143831
+        creator: c900011
+        title: Lecture 1
+        state: 11
+        media_present: "true"      # the device really does send a string
+        package: /var/internal/sim-smp-351_20260108-143831
+      - db_id: 2                   # a sparse row: absent, not zeroed
+        start: 1767883456
+        identifier: sim-smp-351_20260108-154417
+        package: /var/internal/sim-smp-351_20260108-154417
+```
+
+`recording_events: []` is a recorder that has never recorded, and it is not the
+same as leaving the field out: an empty list is an *answer* (the bare terminator),
+while an absent field is silence, which reaches the client as a command timeout.
+
+A real recorder holds hundreds of rows, which belong in a file rather than in a
+device config. The same document, named:
+
+```yaml
+fields:
+  RECORDING_EVENTS:
+    file: ./recordings.json
+```
+
+The file is the identical `{"recording_events": [...]}` document, read with the
+same parser as the config, so `.json` and `.yaml` both work. A relative path is
+resolved against the **process working directory**, not the config's own
+directory — a device config can be a compiled-in string (`simulated-device` with
+no `--config`) or a `--device-config-for` template, so there is not always a
+directory to anchor to. An unreadable or malformed file fails the load, naming the
+path, rather than leaving the field empty and claiming later that the recorder has
+nothing.
+
+Capturing one off a real device gives you lines, not a document. `jq` folds them:
+
+```console
+$ sismatic query hall-a recording_events > rows.jsonl
+$ jq -s '{recording_events: .}' rows.jsonl > recordings.json
+```
+
+Only the `db_id` of a row is required; `start`, `state` and `media_present` stay
+absent when they are absent, because a firmware that does not report one is making
+a different claim than a `0`, and keys this type does not name are preserved
+verbatim. `--check-config` runs the rendered table through the client's own parser
+like every other field, so a document the client could not read is reported here
+rather than as a mysteriously empty list later.
+
 ### Licences, and why a refusal is not silence
 
 An SMP sells its second and third stream as licensed options, and a unit without
@@ -441,6 +503,8 @@ sync:
       interval_secs: 2     # ...except the one worth watching closely
     - name: ACTIVE_ALARMS
       interval_secs: 5
+    - name: RECORDING_EVENTS
+      interval_secs: 900   # a whole table per poll, and it changes per recording
     - name: MAC_ADDRESS
       interval_secs: 0     # ...and the one that never changes. 0 means never
 

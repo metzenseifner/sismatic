@@ -47,6 +47,22 @@
 //! The config is the map's *initial* value: writes overwrite a field, and
 //! recording commands rewrite `RUNNING_STATE`.
 //!
+//! One field's reply is a *list* rather than a line — `RECORDING_EVENTS`, the
+//! recorder's own table — which no YAML scalar can hold. That cell is written
+//! as a [`RecordingEvents`] document instead, inline or from a file, and
+//! rendered back to the device's framing by the protocol layer that parses it:
+//!
+//! ```yaml
+//! fields:
+//!   RECORDING_EVENTS:
+//!     recording_events: []        # a recorder that has never recorded
+//!   # ...or, for a table too long to paste:
+//!   # RECORDING_EVENTS:
+//!   #   file: ./recordings.json
+//! ```
+//!
+//! [`RecordingEvents`]: crate::protocol::RecordingEvents
+//!
 //! # License, and why it is not a field
 //!
 //! An SMP sells its second and third stream as licensed options, and an

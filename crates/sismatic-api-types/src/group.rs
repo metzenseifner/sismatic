@@ -292,19 +292,23 @@ pub struct FleetGroupQuery {
         schema(value_type = Option<String>)
     )]
     pub groups: Option<String>,
-    /// Keep only groups whose members agree on a value satisfying every
-    /// `FIELD:value` predicate, comma-separated — e.g. `RUNNING_STATE:stopped`.
+    /// Keep only groups that satisfy every clause, written as on the device
+    /// index's `where` (see [`FleetQuery::predicates`](crate::read::FleetQuery::predicates)), e.g.
+    /// `RUNNING_STATE:stopped` or `RECORDING_EVENTS.state:archive_failed`.
     ///
     /// Stricter than the device index's `where`, and necessarily so: a group
-    /// holds a value only if *every* member that has reported the field holds
-    /// one satisfying it. A group where four members are stopped and one is
-    /// recording is not a stopped group — that disagreement is the finding
-    /// these routes exist to surface, and a filter that reported such a group
-    /// as stopped would hide it.
+    /// satisfies a clause only if *every* member that has reported the field
+    /// does. A group where four members are stopped and one is recording is not
+    /// a stopped group — that disagreement is the finding these routes exist
+    /// to surface, and a filter that reported such a group as stopped would
+    /// hide it. The quantifier applies to each clause (and each list's clauses
+    /// together) separately, so a member that reported one field and not
+    /// another is counted only where it reported.
     ///
     /// A group no member of which has reported the field cannot satisfy the
-    /// predicate and is excluded, exactly as a silent device is on the device
-    /// index.
+    /// clause and is excluded, exactly as a silent device is on the device
+    /// index. References to `filter` (`@filter`, `@LIST`, `!@LIST`) are
+    /// quantified the same way.
     #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
@@ -312,6 +316,17 @@ pub struct FleetGroupQuery {
         schema(value_type = Option<String>)
     )]
     pub predicates: Option<String>,
+    /// Trim every member's lists to the elements that pass, written as on the
+    /// device index's `filter` (see [`FleetQuery::filter`](crate::read::FleetQuery::filter)). Never removes a
+    /// group, and never changes a `sync` or `uniform` verdict: those are
+    /// computed from the untrimmed reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        param(value_type = Option<String>, example = "RECORDING_EVENTS.state:archive_failed"),
+        schema(value_type = Option<String>)
+    )]
+    pub filter: Option<String>,
     /// Keep only groups whose rolled-up drift verdict is this one:
     /// `drifted`, `in_sync` or `unknown`. Case-insensitive, and `-` is read as
     /// `_`.

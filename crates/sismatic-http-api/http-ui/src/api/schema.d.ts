@@ -365,7 +365,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /v1/reads/devices?fields=&devices=&group=&where=&limit=&after=` —
+         * `GET /v1/reads/devices?fields=&devices=&group=&where=&filter=&limit=&after=` —
          *     every configured device's latest values, one row per device, ordered by id.
          * @description Every filter is optional: omit them all for the whole fleet with every field
          *     each device has reported. A device that is configured and has never answered
@@ -437,7 +437,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&limit=` —
+         * `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&where=&filter=&limit=` —
          *     one field over time, oldest first.
          * @description Every parameter is optional: omit the bounds for all of recorded history,
          *     omit `limit` for `DEFAULT_LIMIT`. An empty result is a `200` with an empty
@@ -1860,6 +1860,67 @@ export interface components {
             type: "alarms";
             /** @description Active alarms. */
             value: components["schemas"]["Alarm"][];
+        } | {
+            /** @enum {string} */
+            type: "recording_events";
+            /** @description Every recording event the device knows about. */
+            value: components["schemas"]["RecordingEvent"][];
+        };
+        /**
+         * @description One recording event, as `RECORDING_EVENTS` reports it.
+         *
+         *     Mirrors `sismatic-core::protocol::RecordingEvent`, re-declared here for the
+         *     reason the module docs give: `api-types` must not depend on `core`.
+         *
+         *     # Optionality is load-bearing
+         *
+         *     The device's field set is not uniform across firmwares. Only `db_id` is
+         *     required; the rest is optional in one of two ways, chosen by what absence
+         *     would *mean*. `start`, `state` and `media_present` are nullable, because a
+         *     missing value is a different claim from `0` or `false`. The text fields
+         *     default to `""`, because the device already sends `""` for an unset one.
+         *
+         *     `state` is decoded into a [`ScheduleState`]; see that type for how a code
+         *     the device does not document is carried.
+         *
+         *     `start` is epoch seconds, which is *not* the RFC 3339 form `Read.at` uses.
+         *     It is passed through as the device sends it; converting is the client's
+         *     decision, taken at the client's own boundary.
+         */
+        RecordingEvent: {
+            creator?: string;
+            /** Format: int64 */
+            db_id: number;
+            /**
+             * @description Keys the device sent that this type does not name, preserved verbatim so
+             *     a richer firmware loses nothing on the way through.
+             *
+             *     Each value is the **raw JSON text** of that key — `"1200"` for a number,
+             *     `"\"B\""` for a string, `"{\"a\":1}"` for an object. A client that wants
+             *     one parses it at its own boundary, exactly as [`MacAddr`] above expects
+             *     of a caller that wants the raw octets.
+             *
+             *     Text rather than a JSON value type because this crate takes `serde` and
+             *     nothing else (see the module docs): a `serde_json::Value` here would put
+             *     `serde_json` in the dependency cone of every client of the API. Text
+             *     costs the client a `JSON.parse` and loses nothing — JSON text round-trips.
+             *
+             *     Nested under its own key rather than flattened back into the object,
+             *     which is the one place this DTO's shape departs from the device's. That
+             *     is deliberate: it puts the stability contract *in the type*. Everything
+             *     above this field is attested against real hardware; everything inside it
+             *     is whatever a firmware happened to add. Flattening the two together
+             *     would hide exactly the distinction a client needs in order to know what
+             *     it can rely on.
+             */
+            extra?: Record<string, never>;
+            identifier?: string;
+            media_present?: boolean | null;
+            package?: string;
+            /** Format: int64 */
+            start?: number | null;
+            state?: null | components["schemas"]["ScheduleState"];
+            title?: string;
         };
         /**
          * @description Recording state reported by an SMP, mirroring
@@ -1962,6 +2023,8 @@ export interface components {
              */
             writes_canceled: number;
         };
+        /** @description Where one recording event is in its schedule's lifecycle: a state name, or the raw integer code for a state the device does not document. */
+        ScheduleState: ("pending" | "current" | "processed" | "finished" | "archiving" | "archived" | "archive_failed" | "package_deleted" | "record_failed" | "archive_nomethod" | "record_skipped" | "package_resched") | number;
         /**
          * @description A change to what the store keeps. Each key carries its own unit, as in the
          *     config file; see [`StoreSettings`] for the accepted spellings.
@@ -2831,26 +2894,47 @@ export interface operations {
                  */
                 group?: string;
                 /**
-                 * @description Keep only devices whose reads satisfy every `FIELD:value` predicate,
-                 *     comma-separated — e.g. `RUNNING_STATE:stopped,FIRMWARE:2.11`.
+                 * @description Keep only the devices that satisfy every clause, comma-separated, e.g.
+                 *     `RUNNING_STATE:stopped,FIRMWARE:ge:2.11`.
                  *
-                 *     A predicate selects *devices*, not reads: a row that satisfies it still
-                 *     carries every field `fields` asked for, so
-                 *     `?fields=FIRMWARE&where=RUNNING_STATE:stopped` reads "the firmware of
-                 *     every stopped recorder". The value is compared in whatever shape the
-                 *     device answered in, so `8080` matches a port and `stopped` matches a
-                 *     recording state without the caller spelling out a type.
+                 *     A clause is `PATH:VALUE`, `PATH!:VALUE` (negated) or `PATH:OP:VALUE`,
+                 *     with `OP` one of `gt ge lt le has`; `a|b` matches either value. `PATH`
+                 *     is a field (`RUNNING_STATE`) or a list field's attribute
+                 *     (`RECORDING_EVENTS.state`, `ACTIVE_ALARMS.level`). A field's value is
+                 *     compared in the shape the device answered in, so `8080` matches a port
+                 *     and `stopped` a recording state. An attribute clause holds when some
+                 *     element passes it, and clauses on the same list must hold for the same
+                 *     element.
                  *
-                 *     A device that has never reported the named field cannot satisfy the
-                 *     predicate and is excluded — which does not distinguish "not stopped"
-                 *     from "never answered". A row-less device is exactly what the unfiltered
-                 *     page shows, so that distinction is one request away.
+                 *     `where` can also refer to `filter`: `@filter` keeps a device when every
+                 *     list `filter` names is non-empty after trimming, `@LIST` when that one
+                 *     list is, and `!@LIST` when the list was reported and no element passes.
                  *
-                 *     The separator is `:` so a value needs no percent-encoding, and the list
-                 *     separator is `,` — which a value therefore cannot contain.
+                 *     `where` selects *devices*, never changes them: a row that satisfies it
+                 *     still carries every field `fields` asked for. A device that never
+                 *     reported a field satisfies no clause on it, negated or not; the
+                 *     unfiltered page shows such a device as a row with no reads.
+                 *
+                 *     An unknown field matches nothing. An unknown attribute, a value its
+                 *     attribute cannot hold, an operator its type cannot take, or a reference
+                 *     to a list `filter` does not name is a `400`.
                  * @example RUNNING_STATE:stopped
                  */
                 where?: string;
+                /**
+                 * @description Trim the lists inside each row to the elements that pass every clause
+                 *     on them, comma-separated, e.g. `RECORDING_EVENTS.state:archive_failed`.
+                 *     Omitted means no list is trimmed.
+                 *
+                 *     Clauses are written as in `where`, but must name an attribute. `filter`
+                 *     never removes a row; pair it with `where=@filter` to keep only the rows
+                 *     it leaves something in. So
+                 *     `?fields=RECORDING_EVENTS&filter=RECORDING_EVENTS.state:archive_failed&where=@filter`
+                 *     reads "every device with a failed upload, and only the failed uploads".
+                 *     An element without the attribute (an event with no `state`) is dropped.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
                 /**
                  * @description Maximum devices to return. Omitted means the server's default page size;
                  *     the server also caps it.
@@ -2879,7 +2963,7 @@ export interface operations {
                     "application/json": components["schemas"]["FleetReads"];
                 };
             };
-            /** @description A malformed `?where=` predicate, or `?limit=0`. The body says which. */
+            /** @description A malformed `?where=` or `?filter=` clause (an unknown attribute, a value its attribute cannot hold, an operator its type does not support, or a reference to a list `?filter=` does not name), or `?limit=0`. The body says which. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2910,7 +2994,22 @@ export interface operations {
     };
     list_fields: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). On a route that
+                 *     names a field in its path, clauses must name that field.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
+                 * @description Not accepted here. `where` picks rows, and this route answers for one
+                 *     device or group, so there is nothing to pick. Read rather than ignored
+                 *     so that it is a `400` naming the index route that takes it, instead of
+                 *     a filter that silently did nothing.
+                 */
+                where?: string;
+            };
             header?: never;
             path: {
                 /** @description Device id, as configured on the write side. */
@@ -2927,6 +3026,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReadList"];
+                };
+            };
+            /** @description A malformed `?filter=` clause, or any `?where=`: this route answers for one device, so there are no rows to pick. The body names the index route that takes `where`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description This id names a device group, not a device. The body carries the `/v1/reads/groups` URL that answers instead. */
@@ -2951,7 +3059,22 @@ export interface operations {
     };
     read_field: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). On a route that
+                 *     names a field in its path, clauses must name that field.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
+                 * @description Not accepted here. `where` picks rows, and this route answers for one
+                 *     device or group, so there is nothing to pick. Read rather than ignored
+                 *     so that it is a `400` naming the index route that takes it, instead of
+                 *     a filter that silently did nothing.
+                 */
+                where?: string;
+            };
             header?: never;
             path: {
                 /** @description Device id, as configured on the write side. */
@@ -2973,6 +3096,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Read"];
+                };
+            };
+            /** @description A malformed `?filter=` clause, a clause on another field than the path names, or any `?where=`: this route answers for one device, so there are no rows to pick. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description Nothing is stored for this device and field, or the id names a device group. The first is not a claim that either does not exist — an unknown device, an unpolled field and a device that has not answered yet are one answer from here — while the second is, and carries the `/v1/reads/groups` URL that answers instead. */
@@ -3017,6 +3149,25 @@ export interface operations {
                  */
                 end?: components["schemas"]["Timestamp"];
                 /**
+                 * @description Keep only the reads that satisfy every clause, written as on the
+                 *     device index's `where` (see [`FleetQuery::predicates`]). Applied before
+                 *     `limit`, so `limit` counts matching reads.
+                 *
+                 *     A history is a series of one field, so every clause must name the
+                 *     field in the path. A clause on any other field could never hold and is
+                 *     a `400`.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                where?: string;
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). Never removes a
+                 *     read; pair it with `where=@filter` for that. Clauses must name the
+                 *     field in the path.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
                  * @description Maximum rows to return, counted from the most recent. Omitted means the
                  *     server's default page size; the server also caps it.
                  * @example 100
@@ -3046,7 +3197,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReadList"];
                 };
             };
-            /** @description A `?field=` that contradicts the field in the path. Rejected rather than ignored, so a caller can never be served a different field than the one it spelled out. */
+            /** @description A `?field=` that contradicts the field in the path. Rejected rather than ignored, so a caller can never be served a different field than the one it spelled out. Also a malformed `?where=` or `?filter=` clause, or a clause on another field. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3098,22 +3249,34 @@ export interface operations {
                  */
                 groups?: string;
                 /**
-                 * @description Keep only groups whose members agree on a value satisfying every
-                 *     `FIELD:value` predicate, comma-separated — e.g. `RUNNING_STATE:stopped`.
+                 * @description Keep only groups that satisfy every clause, written as on the device
+                 *     index's `where` (see [`FleetQuery::predicates`](crate::read::FleetQuery::predicates)), e.g.
+                 *     `RUNNING_STATE:stopped` or `RECORDING_EVENTS.state:archive_failed`.
                  *
                  *     Stricter than the device index's `where`, and necessarily so: a group
-                 *     holds a value only if *every* member that has reported the field holds
-                 *     one satisfying it. A group where four members are stopped and one is
-                 *     recording is not a stopped group — that disagreement is the finding
-                 *     these routes exist to surface, and a filter that reported such a group
-                 *     as stopped would hide it.
+                 *     satisfies a clause only if *every* member that has reported the field
+                 *     does. A group where four members are stopped and one is recording is not
+                 *     a stopped group — that disagreement is the finding these routes exist
+                 *     to surface, and a filter that reported such a group as stopped would
+                 *     hide it. The quantifier applies to each clause (and each list's clauses
+                 *     together) separately, so a member that reported one field and not
+                 *     another is counted only where it reported.
                  *
                  *     A group no member of which has reported the field cannot satisfy the
-                 *     predicate and is excluded, exactly as a silent device is on the device
-                 *     index.
+                 *     clause and is excluded, exactly as a silent device is on the device
+                 *     index. References to `filter` (`@filter`, `@LIST`, `!@LIST`) are
+                 *     quantified the same way.
                  * @example RUNNING_STATE:stopped
                  */
                 where?: string;
+                /**
+                 * @description Trim every member's lists to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`](crate::read::FleetQuery::filter)). Never removes a
+                 *     group, and never changes a `sync` or `uniform` verdict: those are
+                 *     computed from the untrimmed reads.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
                 /**
                  * @description Keep only groups whose rolled-up drift verdict is this one:
                  *     `drifted`, `in_sync` or `unknown`. Case-insensitive, and `-` is read as
@@ -3190,7 +3353,22 @@ export interface operations {
     };
     list_group_fields: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). On a route that
+                 *     names a field in its path, clauses must name that field.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
+                 * @description Not accepted here. `where` picks rows, and this route answers for one
+                 *     device or group, so there is nothing to pick. Read rather than ignored
+                 *     so that it is a `400` naming the index route that takes it, instead of
+                 *     a filter that silently did nothing.
+                 */
+                where?: string;
+            };
             header?: never;
             path: {
                 /** @description Group id, as written in the devices file. */
@@ -3207,6 +3385,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupFieldStateList"];
+                };
+            };
+            /** @description A malformed `?filter=` clause, or any `?where=`: this route answers for one group, so there are no rows to pick. The body names the index route that takes `where`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description No group has this id. Unlike the device reads routes' answer for an unknown device, this is a claim about configuration — these routes cannot answer without the catalog. */
@@ -3231,7 +3418,22 @@ export interface operations {
     };
     read_group_field: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). On a route that
+                 *     names a field in its path, clauses must name that field.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
+                 * @description Not accepted here. `where` picks rows, and this route answers for one
+                 *     device or group, so there is nothing to pick. Read rather than ignored
+                 *     so that it is a `400` naming the index route that takes it, instead of
+                 *     a filter that silently did nothing.
+                 */
+                where?: string;
+            };
             header?: never;
             path: {
                 /** @description Group id, as written in the devices file. */
@@ -3253,6 +3455,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupFieldState"];
+                };
+            };
+            /** @description A malformed `?filter=` clause, a clause on another field than the path names, or any `?where=`: this route answers for one group, so there are no rows to pick. The body names the index route that takes `where`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description No group has this id. */
@@ -3297,6 +3508,25 @@ export interface operations {
                  */
                 end?: components["schemas"]["Timestamp"];
                 /**
+                 * @description Keep only the reads that satisfy every clause, written as on the
+                 *     device index's `where` (see [`FleetQuery::predicates`]). Applied before
+                 *     `limit`, so `limit` counts matching reads.
+                 *
+                 *     A history is a series of one field, so every clause must name the
+                 *     field in the path. A clause on any other field could never hold and is
+                 *     a `400`.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                where?: string;
+                /**
+                 * @description Trim each read's list to the elements that pass, written as on the
+                 *     device index's `filter` (see [`FleetQuery::filter`]). Never removes a
+                 *     read; pair it with `where=@filter` for that. Clauses must name the
+                 *     field in the path.
+                 * @example RECORDING_EVENTS.state:archive_failed
+                 */
+                filter?: string;
+                /**
                  * @description Maximum rows to return, counted from the most recent. Omitted means the
                  *     server's default page size; the server also caps it.
                  * @example 100
@@ -3326,7 +3556,7 @@ export interface operations {
                     "application/json": components["schemas"]["GroupHistory"];
                 };
             };
-            /** @description A `?field=` that contradicts the field in the path, refused for the reason the device history route refuses it. */
+            /** @description A `?field=` that contradicts the field in the path, refused for the reason the device history route refuses it; a malformed `?where=` or `?filter=` clause; or a clause on another field than the path names. */
             400: {
                 headers: {
                     [name: string]: unknown;

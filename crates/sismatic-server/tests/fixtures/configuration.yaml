@@ -6,6 +6,13 @@
 # table overrides it, and `0` turns a field off while leaving it written down.
 # A firmware string does not change between polls the way a recording state
 # does, and the unit name changes only when someone reconfigures the device.
+#
+# `RECORDING_EVENTS` is the reason the per-field schedule is worth having at
+# all: its reply is the recorder's whole table, tens of kilobytes of it, and it
+# changes only when a recording starts or ends. Inheriting the 5s default would
+# spend the fleet's bandwidth re-reading a list nobody asked for, so it is
+# written down here with an interval of its own — an operator's call, since only
+# they know how soon a new recording has to appear. `0` turns it off entirely.
 sync:
   interval_secs: 5
   fields:
@@ -14,6 +21,8 @@ sync:
       interval_secs: 3600
     - name: UNIT_NAME
       interval_secs: 0
+    - name: RECORDING_EVENTS
+      interval_secs: 900
 
 # All three lifecycle knobs, each in the natural-language spelling — so this
 # fixture is also the check that the shipped forms survive a real file read

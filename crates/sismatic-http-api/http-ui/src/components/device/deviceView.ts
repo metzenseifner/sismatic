@@ -221,7 +221,16 @@ function titleOf(value: ReadValue | undefined): string | null {
   return title === "" ? null : title;
 }
 
-/** Plain-English text for any read value. */
+/**
+ * Plain-English text for any read value.
+ *
+ * Total at runtime as well as at compile time. `schema.d.ts` describes the
+ * server this UI was built against, but a deployed UI can be talking to a newer
+ * server that sends a type it has never heard of. Without the `default`, that
+ * value comes back `undefined`, and the fleet page's search index crashes the
+ * whole render on it. The `never` binding keeps the compile-time half: a type
+ * added to the schema and not handled here is still a type error.
+ */
 export function formatValue(value: ReadValue): string {
   switch (value.type) {
     case "text":
@@ -240,6 +249,26 @@ export function formatValue(value: ReadValue): string {
       return value.value.length === 0
         ? "None"
         : value.value.map((alarm) => `${alarm.name} (${alarm.level})`).join(", ");
+    case "recording_events":
+      // A whole table per read, too much to show on one line, so the count.
+      return value.value.length === 0
+        ? "None"
+        : value.value.length === 1
+          ? "1 recording"
+          : `${value.value.length} recordings`;
+    default: {
+      const unhandled: never = value;
+      return describeUnknown(unhandled);
+    }
+  }
+}
+
+/** Best-effort text for a value whose `type` this build does not know. */
+function describeUnknown(value: unknown): string {
+  try {
+    return JSON.stringify((value as {value?: unknown})?.value) ?? "Unknown";
+  } catch {
+    return "Unknown";
   }
 }
 

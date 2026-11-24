@@ -29,6 +29,11 @@ sync:
       interval_secs: 5
     - name: MAC_ADDRESS
       interval_secs: 0
+    # The recorder's whole table per poll, changing only when a recording
+    # starts or ends. How soon a new recording has to appear is an operator's
+    # call; `0` turns it off entirely.
+    - name: RECORDING_EVENTS
+      interval_secs: 900
 
 # What the store keeps, and how much of the machine it may use.
 #
