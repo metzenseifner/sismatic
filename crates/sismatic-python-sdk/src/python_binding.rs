@@ -254,6 +254,24 @@ impl Sismatic {
             Register::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.execute(py, target, register.instruction(value))
     }
+
+    /// EXPERIMENTAL. Send `payload` verbatim and return everything the device
+    /// sent until `until` appeared (echo included). No catalog, no validation:
+    /// an instrument for attesting instructions the catalog does not have yet.
+    /// A refusal (`E13`, `E24`, ...) is raised, not returned.
+    ///
+    /// Runs through `Device::run` like everything else, so a failure on a
+    /// *cached* connection is retried once on a fresh one. For a payload that
+    /// is not safe to send twice (a reboot), make it the first exchange of a
+    /// fresh session.
+    #[pyo3(signature = (target, payload, until = "\r\n"))]
+    fn raw(&self, py: Python<'_>, target: &str, payload: &str, until: &str) -> PyResult<Py<PyAny>> {
+        self.execute(
+            py,
+            target,
+            Instruction::raw_until("RAW", payload, until.to_owned()),
+        )
+    }
 }
 
 impl Sismatic {
