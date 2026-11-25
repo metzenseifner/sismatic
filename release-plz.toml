@@ -254,3 +254,13 @@ version_group = "sismatic"
 name = "sismatic-intent-relay"
 semver_check = false
 version_group = "sismatic"
+
+# Step one of the two-step procedure for adding a crate (see the top of this
+# file): ship unreleased with a scoped template, so no `v*` tag can match it and
+# release-plz never looks for it in a worktree checked out at a tag that
+# predates it. Promote it, and add it to `expectedReleased` in flake.nix, in a
+# follow-up PR once a release tag containing it exists.
+[[package]]
+name = "sismatic-catalog-macros"
+release = false
+git_tag_name = "{{ package }}-v{{ version }}"

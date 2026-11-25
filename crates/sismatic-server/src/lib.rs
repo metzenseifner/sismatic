@@ -359,7 +359,7 @@ pub(crate) fn summarize_group(config: &GroupConfig) -> GroupSummary {
 ///
 /// A macro rather than a function, because the four catalogs share every method
 /// this needs — `ALL`, `name`, `accepted`, `description` — and share no *trait*
-/// that names them: `instruction_catalog!` generates them as inherent methods on
+/// that names them: `#[catalog]` generates them as inherent methods on
 /// four unrelated enums. The alternatives are a trait added to `core` purely so
 /// this one call site can be generic, or four near-identical functions; a macro
 /// over the four is the smaller of the three, and it inherits the property that

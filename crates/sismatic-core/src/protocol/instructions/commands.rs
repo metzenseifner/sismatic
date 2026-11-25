@@ -5,16 +5,24 @@ use winnow::token::literal;
 
 use crate::protocol::control_chars::{CR, ESC, RCDR, RCDR_LOWER};
 use crate::protocol::instructions::Instruction;
-use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::{In, ParseFn, Value, parser_of};
+use sismatic_catalog_macros::catalog;
 
-instruction_catalog! {
-    /// A built-in recorder command.
-    pub enum Command {
-        Start { name: "STARTRECORDING", aliases: ["START"], doc: "Start recording." },
-        Stop { name: "STOPRECORDING", aliases: ["STOP"], doc: "Stop recording." },
-        Pause { name: "PAUSERECORDING", aliases: ["PAUSE"], doc: "Pause recording." },
-    }
+/// A built-in recorder command.
+#[catalog]
+pub enum Command {
+    /// Start recording.
+    #[name("STARTRECORDING")]
+    #[alias("START")]
+    Start,
+    /// Stop recording.
+    #[name("STOPRECORDING")]
+    #[alias("STOP")]
+    Stop,
+    /// Pause recording.
+    #[name("PAUSERECORDING")]
+    #[alias("PAUSE")]
+    Pause,
 }
 
 impl Command {

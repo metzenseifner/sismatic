@@ -20,6 +20,8 @@
 // `pub(crate)`, not private: the simulator is a sibling module and builds its
 // replies from these same control characters and helpers rather than
 // re-spelling them. Still not part of the public API.
+#[cfg(test)]
+mod catalog_snapshot;
 pub(crate) mod control_chars;
 pub mod instructions;
 pub(crate) mod payload_helpers;

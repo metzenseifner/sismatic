@@ -5,98 +5,174 @@ use winnow::{ModalResult, Parser};
 
 // ---- Query (gettable) enum ------------------------------------------------
 use crate::protocol::instructions::Instruction;
-use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
 use crate::protocol::{In, MacAddr, ParseFn, RecordingEvent, Step, Value, anchored, parser_of};
+use sismatic_catalog_macros::catalog;
 
-instruction_catalog! {
-    /// A built-in field that can be queried.
-    pub enum Query {
-        RecordingEvents { name: "RECORDING_EVENTS", aliases: [], doc: "Read all recording events"},
-        Stream1Name { name: "STREAM_1_NAME", aliases: ["STREAM_NAME_1"], doc: "Name of stream 1." },
-        Stream2Name { name: "STREAM_2_NAME", aliases: ["STREAM_NAME_2"], doc: "Name of stream 2." },
-        Stream3Name { name: "STREAM_3_NAME", aliases: ["STREAM_NAME_3"], doc: "Name of stream 3." },
-        Firmware { name: "FIRMWARE", aliases: [], doc: "Firmware/version string, e.g. 2.11." },
-        RunningState { name: "RUNNING_STATE", aliases: [], doc: "Current recording state (stopped, started, or paused)." },
-        UnitName { name: "UNIT_NAME", aliases: [], doc: "Configured unit name." },
-        TelnetPort { name: "TELNET_PORT", aliases: [], doc: "Telnet service port." },
-        SshPort { name: "SSH_PORT", aliases: [], doc: "SSH service port." },
-        HttpPort { name: "HTTP_PORT", aliases: [], doc: "HTTP service port." },
-        SnmpPort { name: "SNMP_PORT", aliases: [], doc: "SNMP service port." },
-        HttpsPort { name: "HTTPS_PORT", aliases: [], doc: "HTTPS service port." },
-        SnmpUnitLocation { name: "SNMP_UNIT_LOCATION", aliases: [], doc: "SNMP unit location string." },
-        SnmpUnitContact { name: "SNMP_UNIT_CONTACT", aliases: [], doc: "SNMP unit contact string." },
-        SnmpPrivateCommunityString { name: "SNMP_PRIVATE_COMMUNITY_STRING", aliases: [], doc: "SNMP private community string." },
-        SnmpPublicCommunityString { name: "SNMP_PUBLIC_COMMUNITY_STRING", aliases: [], doc: "SNMP public community string." },
-        SnmpState { name: "SNMP_STATE", aliases: [], doc: "Whether SNMP is enabled." },
-        DhcpMode { name: "DHCP_MODE", aliases: [], doc: "Whether DHCP is enabled." },
-        Timezone { name: "TIMEZONE", aliases: [], doc: "Configured timezone." },
-        MacAddress { name: "MAC_ADDRESS", aliases: [], doc: "Hardware MAC address." },
-        PortTimeout { name: "PORT_TIMEOUT", aliases: [], doc: "Per-port timeout in tens of seconds; 30 tens of seconds=300 seconds." },
-        GlobalPortTimeout { name: "GLOBAL_PORT_TIMEOUT", aliases: [], doc: "Global port timeout in tens of seconds; 30 tens of seconds=300 seconds." },
-        ModelName { name: "MODEL_NAME", aliases: [], doc: "Device model name." },
-        ModelDescription { name: "MODEL_DESCRIPTION", aliases: [], doc: "Device model description." },
-        ActiveAlarms { name: "ACTIVE_ALARMS", aliases: [], doc: "Active alarms." },
-        PartNumber { name: "PART_NUMBER", aliases: [], doc: "Device part number." },
-        Contributor { name: "CONTRIBUTOR", aliases:[], doc:"Dublin Core Contributor (read)"},
-        Course {name:"COURSE", aliases:[], doc:"Course"},
-        Coverage { name: "COVERAGE", aliases: [], doc: "Dublin Core 'coverage' metadata register (read)." },
-        Date { name: "DATE", aliases: [], doc: "Dublin Core Date (read-only) (read)"},
-        Description { name:"DESCRIPTION", aliases:[], doc: "Dublin Core Description (read)"},
-        Format {name: "FORMAT", aliases: [], doc:"Dublin Core Format (read)"},
-        Identifier {name:"IDENTIFIER", aliases:[], doc: "Dublin Core Identifier (read-only) (read)"},
-        Language { name: "LANGUAGE", aliases: [], doc: "Dublin Core 'language' metadata register (read)." },
-        Presenter { name: "PRESENTER", aliases: [], doc: "Presenter metadata register (read)." },
-        Publisher { name: "PUBLISHER", aliases: [], doc: "Dublin Core 'publisher' metadata register (read)." },
-        Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation' metadata register (read)." },
-        Rights {name: "RIGHTS", aliases:[], doc: "Dublin Core Rights (read)"},
-        Source { name: "SOURCE", aliases: [], doc: "Dublin Core 'source' metadata register (read)." },
-        Subject { name: "SUBJECT", aliases: [], doc: "Dublin Core 'subject' metadata register (read)." },
-        SystemName {name:"SYSTEMNAME", aliases:[], doc: "System Name"},
-        Title { name: "TITLE", aliases: [], doc: "Recording title metadata register (read)." },
-        Type {name: "TYPE", aliases:[], doc: "Dublin Core Type (read)"},
-        // Enable state per stream. The index is part of the name for the same
-        // reason it is in the three entries above: a `Query` carries no
-        // argument, so the address has to live in the variant. `_STATE` follows
-        // `SNMP_STATE`/`DHCP_MODE`; `_ENABLED` and `_STATUS` are accepted too.
-        Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
-        Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
-        Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
-        // Whether each RTMP push target is actually publishing, as opposed to
-        // merely armed — the enable state is `Setting::RTMPStream1State`, and is
-        // not readable here yet for the reason given on `instruction` below.
-        //
-        // Read-only, and not for want of a wire form: SIS has no write for a
-        // live state. What puts a push on air is a scheduled session, which is
-        // outside this protocol entirely, so these are the one part of the RTMP
-        // catalog with no counterpart in `Setting`. A device with scheduling off
-        // or unsupported answers the read with an error code rather than a
-        // flag — see `SisError`, which is what keeps that from costing a
-        // `exchange_timeout` per poll.
-        //
-        // Per target rather than per stream, because the wire addresses them
-        // that way: a stream's primary push can be live while its backup is not,
-        // so three streams give six live states.
-        //
-        // `LIVE_STATE` is load-bearing, not decoration. Without it these read
-        // `RTMP_STREAM_<n>_STATE`, which is an accepted spelling of
-        // `Setting::RTMPStream<n>State` — the *enable* state, a different field
-        // with a write behind it. One name for two fields means a caller can
-        // read whether a push is on air and write whether it is armed through
-        // the same string and never be told they are not the same thing.
-        //
-        // The trailing alias is the spelling these shipped under before the
-        // index moved behind `STREAM_`; a `sync.fields` config naming fields
-        // explicitly would otherwise stop polling them, silently, at the next
-        // deploy.
-        RtmpStream1LiveState { name: "RTMP_STREAM_1_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_1", "RTMP_1_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 1 is live." },
-        RtmpStream2LiveState { name: "RTMP_STREAM_2_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_2", "RTMP_2_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 2 is live." },
-        RtmpStream3LiveState { name: "RTMP_STREAM_3_LIVE_STATE", aliases: ["RTMP_STREAM_LIVE_STATE_3", "RTMP_3_LIVE_STATE"], doc: "Whether the primary RTMP push for stream 3 is live." },
-        RtmpBackupStream1LiveState { name: "RTMP_BACKUP_STREAM_1_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_1", "RTMP_1_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 1 is live." },
-        RtmpBackupStream2LiveState { name: "RTMP_BACKUP_STREAM_2_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_2", "RTMP_2_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 2 is live." },
-        RtmpBackupStream3LiveState { name: "RTMP_BACKUP_STREAM_3_LIVE_STATE", aliases: ["RTMP_BACKUP_STREAM_LIVE_STATE_3", "RTMP_3_BACKUP_LIVE_STATE"], doc: "Whether the backup RTMP push for stream 3 is live." },
-    }
+/// A built-in field that can be queried.
+#[catalog]
+pub enum Query {
+    /// Read all recording events
+    RecordingEvents,
+    /// Name of stream 1.
+    #[name("STREAM_1_NAME")]
+    #[alias("STREAM_NAME_1")]
+    Stream1Name,
+    /// Name of stream 2.
+    #[name("STREAM_2_NAME")]
+    #[alias("STREAM_NAME_2")]
+    Stream2Name,
+    /// Name of stream 3.
+    #[name("STREAM_3_NAME")]
+    #[alias("STREAM_NAME_3")]
+    Stream3Name,
+    /// Firmware/version string, e.g. 2.11.
+    Firmware,
+    /// Current recording state (stopped, started, or paused).
+    RunningState,
+    /// Configured unit name.
+    UnitName,
+    /// Telnet service port.
+    TelnetPort,
+    /// SSH service port.
+    SshPort,
+    /// HTTP service port.
+    HttpPort,
+    /// SNMP service port.
+    SnmpPort,
+    /// HTTPS service port.
+    HttpsPort,
+    /// SNMP unit location string.
+    SnmpUnitLocation,
+    /// SNMP unit contact string.
+    SnmpUnitContact,
+    /// SNMP private community string.
+    SnmpPrivateCommunityString,
+    /// SNMP public community string.
+    SnmpPublicCommunityString,
+    /// Whether SNMP is enabled.
+    SnmpState,
+    /// Whether DHCP is enabled.
+    DhcpMode,
+    /// Configured timezone.
+    Timezone,
+    /// Hardware MAC address.
+    MacAddress,
+    /// Per-port timeout in tens of seconds; 30 tens of seconds=300 seconds.
+    PortTimeout,
+    /// Global port timeout in tens of seconds; 30 tens of seconds=300 seconds.
+    GlobalPortTimeout,
+    /// Device model name.
+    ModelName,
+    /// Device model description.
+    ModelDescription,
+    /// Active alarms.
+    ActiveAlarms,
+    /// Device part number.
+    PartNumber,
+    /// Dublin Core Contributor (read)
+    Contributor,
+    /// Course
+    Course,
+    /// Dublin Core 'coverage' metadata register (read).
+    Coverage,
+    /// Dublin Core Date (read-only) (read)
+    Date,
+    /// Dublin Core Description (read)
+    Description,
+    /// Dublin Core Format (read)
+    Format,
+    /// Dublin Core Identifier (read-only) (read)
+    Identifier,
+    /// Dublin Core 'language' metadata register (read).
+    Language,
+    /// Presenter metadata register (read).
+    Presenter,
+    /// Dublin Core 'publisher' metadata register (read).
+    Publisher,
+    /// Dublin Core 'relation' metadata register (read).
+    Relation,
+    /// Dublin Core Rights (read)
+    Rights,
+    /// Dublin Core 'source' metadata register (read).
+    Source,
+    /// Dublin Core 'subject' metadata register (read).
+    Subject,
+    /// System Name
+    #[name("SYSTEMNAME")]
+    SystemName,
+    /// Recording title metadata register (read).
+    Title,
+    /// Dublin Core Type (read)
+    Type,
+    // Enable state per stream. The index is part of the name for the same
+    // reason it is in the three entries above: a `Query` carries no
+    // argument, so the address has to live in the variant. `_STATE` follows
+    // `SNMP_STATE`/`DHCP_MODE`; `_ENABLED` and `_STATUS` are accepted too.
+    /// Whether stream 1 is enabled.
+    #[name("STREAM_1_STATE")]
+    #[alias("STREAM_1_ENABLED", "STREAM_1_STATUS")]
+    Stream1State,
+    /// Whether stream 2 is enabled.
+    #[name("STREAM_2_STATE")]
+    #[alias("STREAM_2_ENABLED", "STREAM_2_STATUS")]
+    Stream2State,
+    /// Whether stream 3 is enabled.
+    #[name("STREAM_3_STATE")]
+    #[alias("STREAM_3_ENABLED", "STREAM_3_STATUS")]
+    Stream3State,
+    // Whether each RTMP push target is actually publishing, as opposed to
+    // merely armed — the enable state is `Setting::RTMPStream1State`, and is
+    // not readable here yet for the reason given on `instruction` below.
+    //
+    // Read-only, and not for want of a wire form: SIS has no write for a
+    // live state. What puts a push on air is a scheduled session, which is
+    // outside this protocol entirely, so these are the one part of the RTMP
+    // catalog with no counterpart in `Setting`. A device with scheduling off
+    // or unsupported answers the read with an error code rather than a
+    // flag — see `SisError`, which is what keeps that from costing a
+    // `exchange_timeout` per poll.
+    //
+    // Per target rather than per stream, because the wire addresses them
+    // that way: a stream's primary push can be live while its backup is not,
+    // so three streams give six live states.
+    //
+    // `LIVE_STATE` is load-bearing, not decoration. Without it these read
+    // `RTMP_STREAM_<n>_STATE`, which is an accepted spelling of
+    // `Setting::RTMPStream<n>State` — the *enable* state, a different field
+    // with a write behind it. One name for two fields means a caller can
+    // read whether a push is on air and write whether it is armed through
+    // the same string and never be told they are not the same thing.
+    //
+    // The trailing alias is the spelling these shipped under before the
+    // index moved behind `STREAM_`; a `sync.fields` config naming fields
+    // explicitly would otherwise stop polling them, silently, at the next
+    // deploy.
+    /// Whether the primary RTMP push for stream 1 is live.
+    #[name("RTMP_STREAM_1_LIVE_STATE")]
+    #[alias("RTMP_STREAM_LIVE_STATE_1", "RTMP_1_LIVE_STATE")]
+    RtmpStream1LiveState,
+    /// Whether the primary RTMP push for stream 2 is live.
+    #[name("RTMP_STREAM_2_LIVE_STATE")]
+    #[alias("RTMP_STREAM_LIVE_STATE_2", "RTMP_2_LIVE_STATE")]
+    RtmpStream2LiveState,
+    /// Whether the primary RTMP push for stream 3 is live.
+    #[name("RTMP_STREAM_3_LIVE_STATE")]
+    #[alias("RTMP_STREAM_LIVE_STATE_3", "RTMP_3_LIVE_STATE")]
+    RtmpStream3LiveState,
+    /// Whether the backup RTMP push for stream 1 is live.
+    #[name("RTMP_BACKUP_STREAM_1_LIVE_STATE")]
+    #[alias("RTMP_BACKUP_STREAM_LIVE_STATE_1", "RTMP_1_BACKUP_LIVE_STATE")]
+    RtmpBackupStream1LiveState,
+    /// Whether the backup RTMP push for stream 2 is live.
+    #[name("RTMP_BACKUP_STREAM_2_LIVE_STATE")]
+    #[alias("RTMP_BACKUP_STREAM_LIVE_STATE_2", "RTMP_2_BACKUP_LIVE_STATE")]
+    RtmpBackupStream2LiveState,
+    /// Whether the backup RTMP push for stream 3 is live.
+    #[name("RTMP_BACKUP_STREAM_3_LIVE_STATE")]
+    #[alias("RTMP_BACKUP_STREAM_LIVE_STATE_3", "RTMP_3_BACKUP_LIVE_STATE")]
+    RtmpBackupStream3LiveState,
 }
 
 impl Query {

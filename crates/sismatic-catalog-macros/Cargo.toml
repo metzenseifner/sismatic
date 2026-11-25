@@ -1,0 +1,19 @@
+[package]
+name = "sismatic-catalog-macros"
+description = "Attribute macro that turns a fieldless enum into an instruction catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# No `publish = false` here, deliberately: sismatic-core depends on this crate,
+# and an unpublishable dependency of a publishable member breaks release-plz's
+# packaging pass (the "publishable dependency" rule in release-plz.toml).
+# Publication is already off workspace-wide there.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
