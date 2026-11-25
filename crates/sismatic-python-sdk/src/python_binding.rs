@@ -231,10 +231,15 @@ impl Sismatic {
         self.execute(py, target, query.instruction())
     }
 
-    /// Run a recorder command (e.g. `"start"`, `"stop"`, `"pause"`) on a device
-    /// or group. Against a group every member receives the command at once, and
-    /// the return is a `dict` of each member's reply; against a single device it
-    /// is that one reply.
+    /// Run a device command (e.g. `"start"`, `"stop"`, `"pause"`, `"reboot"`)
+    /// on a device or group. Against a group every member receives the command
+    /// at once, and the return is a `dict` of each member's reply; against a
+    /// single device it is that one reply.
+    ///
+    /// `"reboot"` ends any recording in progress and the SSH session; the
+    /// device is unreachable until it has booted. It is never resent: if the
+    /// session drops before `Boot1` arrives, the call raises even though the
+    /// device most likely rebooted.
     fn command(&self, py: Python<'_>, target: &str, name: &str) -> PyResult<Py<PyAny>> {
         let command = Command::from_str(name).map_err(|e| PyValueError::new_err(e.to_string()))?;
         self.execute(py, target, command.instruction())

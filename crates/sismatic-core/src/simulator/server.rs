@@ -18,7 +18,7 @@ use russh::server::{self, Auth, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use tokio::net::TcpListener;
 
-use crate::simulator::dispatch::classify;
+use crate::simulator::dispatch::{Request, classify};
 use crate::simulator::state::DeviceState;
 
 /// A throwaway ed25519 host key. Committing it is harmless: it authenticates
@@ -221,7 +221,14 @@ impl Handler for DeviceHandler {
         let Ok(request) = std::str::from_utf8(data) else {
             return Ok(());
         };
-        let Some(reply) = classify(request).and_then(|r| self.state.handle(r)) else {
+        let request_kind = classify(request);
+        // Read off the catalog, not re-decided here: the instruction that says
+        // the client must not reuse the session is the one the device ends.
+        let ends_session = matches!(
+            request_kind,
+            Some(Request::Do(c)) if c.session() == crate::protocol::instructions::Session::Ends
+        );
+        let Some(reply) = request_kind.and_then(|r| self.state.handle(r)) else {
             tracing::debug!(
                 request = %crate::protocol::control_chars::swap_non_printable(request),
                 "simulated device has no answer for this request"
@@ -232,6 +239,11 @@ impl Handler for DeviceHandler {
             ReplyStream::Stdout => session.data(channel, reply.into_bytes())?,
             // ext == 1 is stderr; this is the path a real Extron SMP uses.
             ReplyStream::Stderr => session.extended_data(channel, 1, reply.into_bytes())?,
+        }
+        if ends_session {
+            // A reboot: acknowledge, then drop the session like the hardware.
+            session.eof(channel)?;
+            session.close(channel)?;
         }
         Ok(())
     }

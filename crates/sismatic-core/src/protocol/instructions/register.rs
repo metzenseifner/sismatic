@@ -7,7 +7,7 @@ use winnow::{
     token::{literal, take_while},
 };
 
-use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::{Instruction, Session};
 use crate::protocol::{
     In, ParseFn, Value,
     control_chars::{CR, ESC, RCDR, RCDR_LOWER},
@@ -101,6 +101,7 @@ impl Register {
         Instruction {
             name: self.name().to_string(),
             payload,
+            session: Session::Preserved,
             parser: settable_echo(&reg),
         }
     }

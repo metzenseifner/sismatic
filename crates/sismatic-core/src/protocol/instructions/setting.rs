@@ -5,7 +5,7 @@ use winnow::token::{literal, take_while};
 use winnow::{ModalResult, Parser};
 
 use crate::protocol::control_chars::{CR, ESC};
-use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::{Instruction, Session};
 use crate::protocol::payload_helpers::{echoed, is_not_cr};
 use crate::protocol::{In, ParseFn, Value, parser_of};
 use sismatic_catalog_macros::catalog;
@@ -381,7 +381,7 @@ impl Setting {
     /// The SIS verb this setting writes through. Crate-visible so the simulator
     /// echoes the verb the client addressed rather than re-spelling the token,
     /// as [`Register::reg`](super::register::Register::reg) and
-    /// [`Command::verb`](super::commands::Command::verb) already are.
+    /// [`Command::echo_token`](super::commands::Command::echo_token) already are.
     ///
     /// Every verb below is the *read* verb attested in `query.rs`. The write
     /// form is the same verb with the value in front — verify per model against
@@ -498,6 +498,7 @@ impl Setting {
         Ok(Instruction {
             name: self.name().to_string(),
             payload,
+            session: Session::Preserved,
             parser,
         })
     }

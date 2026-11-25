@@ -575,7 +575,7 @@ impl DeviceState {
 
             Request::Do(c) => {
                 self.set(Query::RunningState.name(), running_state_code(c));
-                Some(format!("{RCDR_LOWER}{}\r\n", c.verb()))
+                Some(format!("{}\r\n", c.echo_token()))
             }
 
             // The echo comes from the catalog, not from here: a setting's
@@ -770,7 +770,8 @@ fn survives_the_read_path(field: &str, value: &str) -> bool {
 /// against [`Query::RunningState`]'s parser over a real connection.
 fn running_state_code(c: Command) -> &'static str {
     match c {
-        Command::Stop => "0",
+        // A reboot ends any recording in progress; the unit comes back stopped.
+        Command::Stop | Command::Reboot => "0",
         Command::Start => "1",
         Command::Pause => "2",
     }
