@@ -20,6 +20,8 @@ required-features = ["simulator"]
 
 [dependencies]
 async-trait.workspace = true
+# `#[catalog]`, which declares the four instruction catalogs.
+sismatic-catalog-macros.workspace = true
 clap = { workspace = true, optional = true }
 dashmap.workspace = true
 russh = { workspace = true, optional = true }

@@ -6,68 +6,120 @@ use winnow::{ModalResult, Parser};
 
 use crate::protocol::control_chars::{CR, ESC};
 use crate::protocol::instructions::Instruction;
-use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::payload_helpers::{echoed, is_not_cr};
 use crate::protocol::{In, ParseFn, Value, parser_of};
+use sismatic_catalog_macros::catalog;
 
-instruction_catalog! {
-    /// A built-in device setting that can be written.
-    ///
-    /// Names are the same canonical spellings [`Query`](super::query::Query)
-    /// uses for the read of the same field, so `GET .../fields/TIMEZONE` and
-    /// `PUT .../settings/TIMEZONE` name one thing.
-    pub enum Setting {
-        UnitName { name: "UNIT_NAME", aliases: [], doc: "Configured unit name." },
-        Timezone { name: "TIMEZONE", aliases: [], doc: "Configured timezone." },
-        DhcpMode { name: "DHCP_MODE", aliases: [], doc: "Whether DHCP is enabled." },
-        SnmpState { name: "SNMP_STATE", aliases: [], doc: "Whether SNMP is enabled." },
-        SnmpUnitLocation { name: "SNMP_UNIT_LOCATION", aliases: [], doc: "SNMP unit location string." },
-        SnmpUnitContact { name: "SNMP_UNIT_CONTACT", aliases: [], doc: "SNMP unit contact string." },
-        TelnetPort { name: "TELNET_PORT", aliases: [], doc: "Telnet service port." },
-        HttpPort { name: "HTTP_PORT", aliases: [], doc: "HTTP service port." },
-        // One variant per stream rather than one name plus an index argument:
-        // `instruction` is reached by name from `Intent::SetSetting`, and the
-        // whole write path — the `{field}` route, the outbox, the command log —
-        // addresses a setting by that name alone. Names and aliases match
-        // `Query`'s, so the read and the write of a stream are one field.
-        Stream1Name { name: "STREAM_1_NAME", aliases: ["STREAM_NAME_1"], doc: "Name of stream 1." },
-        Stream2Name { name: "STREAM_2_NAME", aliases: ["STREAM_NAME_2"], doc: "Name of stream 2." },
-        Stream3Name { name: "STREAM_3_NAME", aliases: ["STREAM_NAME_3"], doc: "Name of stream 3." },
-        Stream1State { name: "STREAM_1_STATE", aliases: ["STREAM_1_ENABLED", "STREAM_1_STATUS"], doc: "Whether stream 1 is enabled." },
-        Stream2State { name: "STREAM_2_STATE", aliases: ["STREAM_2_ENABLED", "STREAM_2_STATUS"], doc: "Whether stream 2 is enabled." },
-        Stream3State { name: "STREAM_3_STATE", aliases: ["STREAM_3_ENABLED", "STREAM_3_STATUS"], doc: "Whether stream 3 is enabled." },
-        // The RTMP push targets. Named `RTMP_<n>_<FIELD>` with a
-        // `RTMP_<FIELD>_<n>` alias, which is the `STREAM_1_NAME` /
-        // `STREAM_NAME_1` pattern above with `RTMP` in place of `STREAM` — the
-        // index sits in the same place across the whole catalog, so a caller
-        // that guesses one name from another guesses right.
-        //
-        // `<n>` is the stream throughout: 1 is Archive Channel A, 2 is Archive
-        // Channel B (Dual Mode only), 3 is Confidence. Each stream publishes to
-        // a primary and a backup target, which the wire selects with a separate
-        // index — hence a `BACKUP` variant of every field that has one, rather
-        // than six streams.
-        RTMPStream1PublishURL { name: "RTMP_1_URL", aliases: ["RTMP_URL_1"], doc: "Primary RTMP push target URL for stream 1." },
-        RTMPStream1BackupPublishURL { name: "RTMP_1_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_1"], doc: "Backup RTMP push target URL for stream 1." },
-        RTMPStream2PublishURL { name: "RTMP_2_URL", aliases: ["RTMP_URL_2"], doc: "Primary RTMP push target URL for stream 2." },
-        RTMPStream2BackupPublishURL { name: "RTMP_2_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_2"], doc: "Backup RTMP push target URL for stream 2." },
-        RTMPStream3PublishURL { name: "RTMP_3_URL", aliases: ["RTMP_URL_3"], doc: "Primary RTMP push target URL for stream 3." },
-        RTMPStream3BackupPublishURL { name: "RTMP_3_BACKUP_URL", aliases: ["RTMP_BACKUP_URL_3"], doc: "Backup RTMP push target URL for stream 3." },
-        // Enable state per push stream, aliased like `STREAM_1_STATE` is. The
-        // `RTMP_STREAM_<n>_STATE` spelling is carried as an alias rather than as
-        // the canonical name: a name literal must be normalized (uppercase, `_`
-        // for `-`) or `FromStr` — which normalizes its *input* before matching —
-        // can never reach it.
-        RTMPStream1State { name: "RTMP_1_STATE", aliases: ["RTMP_1_ENABLED", "RTMP_1_STATUS", "RTMP_STREAM_1_STATE"], doc: "Whether the Archive Channel A RTMP push stream is enabled." },
-        RTMPStream2State { name: "RTMP_2_STATE", aliases: ["RTMP_2_ENABLED", "RTMP_2_STATUS", "RTMP_STREAM_2_STATE"], doc: "Whether the Archive Channel B RTMP push stream is enabled." },
-        RTMPStream3State { name: "RTMP_3_STATE", aliases: ["RTMP_3_ENABLED", "RTMP_3_STATUS", "RTMP_STREAM_3_STATE"], doc: "Whether the Confidence RTMP push stream is enabled." },
-        // Whether a push is actually *live* is not here, and not because its
-        // wire form is unknown: SIS offers no write for it. Enabling a stream
-        // arms it; what puts it on air is a scheduled session, which this
-        // protocol does not reach. So live state is a read, and lives in
-        // `Query` alone — the one RTMP field where the read and the write of a
-        // name do not pair up, because the write does not exist.
-    }
+/// A built-in device setting that can be written.
+///
+/// Names are the same canonical spellings [`Query`](super::query::Query)
+/// uses for the read of the same field, so `GET .../fields/TIMEZONE` and
+/// `PUT .../settings/TIMEZONE` name one thing.
+#[catalog]
+pub enum Setting {
+    /// Configured unit name.
+    UnitName,
+    /// Configured timezone.
+    Timezone,
+    /// Whether DHCP is enabled.
+    DhcpMode,
+    /// Whether SNMP is enabled.
+    SnmpState,
+    /// SNMP unit location string.
+    SnmpUnitLocation,
+    /// SNMP unit contact string.
+    SnmpUnitContact,
+    /// Telnet service port.
+    TelnetPort,
+    /// HTTP service port.
+    HttpPort,
+    // One variant per stream rather than one name plus an index argument:
+    // `instruction` is reached by name from `Intent::SetSetting`, and the
+    // whole write path — the `{field}` route, the outbox, the command log —
+    // addresses a setting by that name alone. Names and aliases match
+    // `Query`'s, so the read and the write of a stream are one field.
+    /// Name of stream 1.
+    #[name("STREAM_1_NAME")]
+    #[alias("STREAM_NAME_1")]
+    Stream1Name,
+    /// Name of stream 2.
+    #[name("STREAM_2_NAME")]
+    #[alias("STREAM_NAME_2")]
+    Stream2Name,
+    /// Name of stream 3.
+    #[name("STREAM_3_NAME")]
+    #[alias("STREAM_NAME_3")]
+    Stream3Name,
+    /// Whether stream 1 is enabled.
+    #[name("STREAM_1_STATE")]
+    #[alias("STREAM_1_ENABLED", "STREAM_1_STATUS")]
+    Stream1State,
+    /// Whether stream 2 is enabled.
+    #[name("STREAM_2_STATE")]
+    #[alias("STREAM_2_ENABLED", "STREAM_2_STATUS")]
+    Stream2State,
+    /// Whether stream 3 is enabled.
+    #[name("STREAM_3_STATE")]
+    #[alias("STREAM_3_ENABLED", "STREAM_3_STATUS")]
+    Stream3State,
+    // The RTMP push targets. Named `RTMP_<n>_<FIELD>` with a
+    // `RTMP_<FIELD>_<n>` alias, which is the `STREAM_1_NAME` /
+    // `STREAM_NAME_1` pattern above with `RTMP` in place of `STREAM` — the
+    // index sits in the same place across the whole catalog, so a caller
+    // that guesses one name from another guesses right.
+    //
+    // `<n>` is the stream throughout: 1 is Archive Channel A, 2 is Archive
+    // Channel B (Dual Mode only), 3 is Confidence. Each stream publishes to
+    // a primary and a backup target, which the wire selects with a separate
+    // index — hence a `BACKUP` variant of every field that has one, rather
+    // than six streams.
+    /// Primary RTMP push target URL for stream 1.
+    #[name("RTMP_1_URL")]
+    #[alias("RTMP_URL_1")]
+    RTMPStream1PublishURL,
+    /// Backup RTMP push target URL for stream 1.
+    #[name("RTMP_1_BACKUP_URL")]
+    #[alias("RTMP_BACKUP_URL_1")]
+    RTMPStream1BackupPublishURL,
+    /// Primary RTMP push target URL for stream 2.
+    #[name("RTMP_2_URL")]
+    #[alias("RTMP_URL_2")]
+    RTMPStream2PublishURL,
+    /// Backup RTMP push target URL for stream 2.
+    #[name("RTMP_2_BACKUP_URL")]
+    #[alias("RTMP_BACKUP_URL_2")]
+    RTMPStream2BackupPublishURL,
+    /// Primary RTMP push target URL for stream 3.
+    #[name("RTMP_3_URL")]
+    #[alias("RTMP_URL_3")]
+    RTMPStream3PublishURL,
+    /// Backup RTMP push target URL for stream 3.
+    #[name("RTMP_3_BACKUP_URL")]
+    #[alias("RTMP_BACKUP_URL_3")]
+    RTMPStream3BackupPublishURL,
+    // Enable state per push stream, aliased like `STREAM_1_STATE` is. The
+    // `RTMP_STREAM_<n>_STATE` spelling is carried as an alias rather than as
+    // the canonical name: a name literal must be normalized (uppercase, `_`
+    // for `-`) or `FromStr` — which normalizes its *input* before matching —
+    // can never reach it.
+    /// Whether the Archive Channel A RTMP push stream is enabled.
+    #[name("RTMP_1_STATE")]
+    #[alias("RTMP_1_ENABLED", "RTMP_1_STATUS", "RTMP_STREAM_1_STATE")]
+    RTMPStream1State,
+    /// Whether the Archive Channel B RTMP push stream is enabled.
+    #[name("RTMP_2_STATE")]
+    #[alias("RTMP_2_ENABLED", "RTMP_2_STATUS", "RTMP_STREAM_2_STATE")]
+    RTMPStream2State,
+    /// Whether the Confidence RTMP push stream is enabled.
+    #[name("RTMP_3_STATE")]
+    #[alias("RTMP_3_ENABLED", "RTMP_3_STATUS", "RTMP_STREAM_3_STATE")]
+    RTMPStream3State,
+    // Whether a push is actually *live* is not here, and not because its
+    // wire form is unknown: SIS offers no write for it. Enabling a stream
+    // arms it; what puts it on air is a scheduled session, which this
+    // protocol does not reach. So live state is a read, and lives in
+    // `Query` alone — the one RTMP field where the read and the write of a
+    // name do not pair up, because the write does not exist.
 }
 
 /// What a setting's value must look like on the wire.

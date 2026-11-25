@@ -8,36 +8,51 @@ use winnow::{
 };
 
 use crate::protocol::instructions::Instruction;
-use crate::protocol::instructions::catalog::instruction_catalog;
 use crate::protocol::{
     In, ParseFn, Value,
     control_chars::{CR, ESC, RCDR, RCDR_LOWER},
     parser_of,
     payload_helpers::shorten,
 };
+use sismatic_catalog_macros::catalog;
 
 //
 // ---- Register / token constants from the SIS protocol ---------------------
 
-instruction_catalog! {
-    /// A built-in metadata register that can be written to.
-    pub enum Register {
-        Contributor { name: "CONTRIBUTOR", aliases: [], doc: "Dublin Core 'contributor'." },
-        Course { name: "COURSE", aliases: [], doc: "Course name." },
-        Coverage { name: "COVERAGE", aliases: [], doc: "Dublin Core 'coverage'." },
-        Description { name: "DESCRIPTION", aliases: [], doc: "Dublin Core 'description'." },
-        Format { name: "FORMAT", aliases: [], doc: "Dublin Core 'format'." },
-        Language { name: "LANGUAGE", aliases: [], doc: "Dublin Core 'language'." },
-        Presenter { name: "PRESENTER", aliases: [], doc: "Presenter name." },
-        Publisher { name: "PUBLISHER", aliases: [], doc: "Dublin Core 'publisher'." },
-        Relation { name: "RELATION", aliases: [], doc: "Dublin Core 'relation'." },
-        Rights { name: "RIGHTS", aliases: [], doc: "Dublin Core 'rights'." },
-        Source { name: "SOURCE", aliases: [], doc: "Dublin Core 'source'." },
-        Subject { name: "SUBJECT", aliases: [], doc: "Dublin Core 'subject'." },
-        SystemName { name: "SYSTEMNAME", aliases: [], doc: "System name." },
-        Title { name: "TITLE", aliases: [], doc: "Recording title." },
-        Type { name: "TYPE", aliases: [], doc: "Dublin Core 'type'." },
-    }
+/// A built-in metadata register that can be written to.
+#[catalog]
+pub enum Register {
+    /// Dublin Core 'contributor'.
+    Contributor,
+    /// Course name.
+    Course,
+    /// Dublin Core 'coverage'.
+    Coverage,
+    /// Dublin Core 'description'.
+    Description,
+    /// Dublin Core 'format'.
+    Format,
+    /// Dublin Core 'language'.
+    Language,
+    /// Presenter name.
+    Presenter,
+    /// Dublin Core 'publisher'.
+    Publisher,
+    /// Dublin Core 'relation'.
+    Relation,
+    /// Dublin Core 'rights'.
+    Rights,
+    /// Dublin Core 'source'.
+    Source,
+    /// Dublin Core 'subject'.
+    Subject,
+    /// System name.
+    #[name("SYSTEMNAME")]
+    SystemName,
+    /// Recording title.
+    Title,
+    /// Dublin Core 'type'.
+    Type,
 }
 
 impl Register {

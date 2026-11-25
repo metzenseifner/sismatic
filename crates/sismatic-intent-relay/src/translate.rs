@@ -113,7 +113,7 @@ mod tests {
     ///
     /// The candidates are tried rather than tabled per setting, because a table
     /// keyed by variant is a second catalog to keep in step with the first — the
-    /// thing `instruction_catalog!` exists to avoid. What this pins is that no
+    /// thing `#[catalog]` exists to avoid. What this pins is that no
     /// setting refuses *everything*, which is what a shape wired to the wrong
     /// field would do.
     #[test]

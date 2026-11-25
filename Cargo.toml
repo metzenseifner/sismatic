@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/sismatic-api-types",
+  "crates/sismatic-catalog-macros",
   "crates/sismatic-cli",
   "crates/sismatic-core",
   "crates/sismatic-http-api",
@@ -47,6 +48,7 @@ license = "ECL-2.0"
 # and cargo's caret rule hid it until the next release broke. And do not drop
 # the `version` again — that is the failure above.
 sismatic-api-types = { path = "crates/sismatic-api-types", version = "0" }
+sismatic-catalog-macros = { path = "crates/sismatic-catalog-macros", version = "0" }
 sismatic-core = { path = "crates/sismatic-core", version = "0" }
 sismatic-http-api = { path = "crates/sismatic-http-api", version = "0" }
 sismatic-intent-relay = { path = "crates/sismatic-intent-relay", version = "0" }
@@ -155,6 +157,12 @@ flate2 = { version = "1", default-features = false, features = [
   "rust_backend",
 ] }
 winnow = "1.0.3"
+# The `#[catalog]` attribute macro (sismatic-catalog-macros) and nothing else.
+# Versions are the ones already in Cargo.lock; `full` is what lets syn parse a
+# whole `Item`, so the macro can name the item it was misplaced on.
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "2.0.119", features = ["full"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3.23", features = [
   "registry",
