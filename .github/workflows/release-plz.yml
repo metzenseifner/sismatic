@@ -92,6 +92,14 @@ jobs:
       #
       # Both pins below are load-bearing. `version` stops the CLI floating, so
       # an upstream release can no longer break main without a commit here.
+      #
+      # 0.4.x, specifically, because 0.4.0 stopped running `cargo package` over
+      # the baseline worktree (release-plz#3247). 0.3.x did, so a manifest that
+      # failed to package, once tagged, broke release-pr until a newer tag
+      # existed, and only release-pr can make one. v0.9.0 hit exactly that (a
+      # versioned self dev-dependency). 0.4.x diffs `cargo package --list` and
+      # builds the semver baseline from source via `--baseline-root`.
+      #
       # RUSTUP_TOOLCHAIN — not the action pin — is what actually selects the
       # compiler: rustup ranks the env var (2) above a rust-toolchain.toml
       # directory override (4) and above the default toolchain the action sets
@@ -115,42 +123,11 @@ jobs:
       # new stable, and this job is advisory: it proposes a version bump, it
       # never publishes. Pin it to an explicit version if that trade changes.
       - uses: dtolnay/rust-toolchain@stable
-      # One-shot bootstrap past the v0.9.0 baseline. DELETE once v0.9.1 is tagged
-      # (the guard below already makes it a no-op from then on).
-      #
-      # v0.9.0's sismatic-core declares a *versioned* self dev-dependency (now
-      # path-only, see crates/sismatic-core/Cargo.toml). Packaging that tag's
-      # tree, which release-plz does to diff against it, resolves
-      # `sismatic-core = "0"` against crates.io and dies. Fixing main cannot
-      # help: the baseline is always the highest `v*` tag, and only the release
-      # PR this job opens can move it.
-      #
-      # So patch that one requirement to a stub, visible only to the baseline.
-      # release-plz builds its worktree under /tmp (std::env::temp_dir), and
-      # cargo reads config from every ancestor of its cwd, so /tmp/.cargo reaches
-      # it while this checkout (under /home/runner/work) never sees it. The
-      # stub's version is 0.0.0, not 0.9.0, because two `sismatic-core 0.9.0`
-      # in one lockfile is a "package collision". Packaging runs with
-      # --no-verify, so the stub is resolved but never compiled.
-      - name: Bootstrap v0.9.0 baseline packaging
-        run: |
-          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-          if [ "$latest" != "v0.9.0" ]; then
-            echo "Baseline is $latest, not v0.9.0; nothing to do."
-            exit 0
-          fi
-          stub=/tmp/sismatic-core-baseline-stub
-          mkdir -p "$stub/src" /tmp/.cargo
-          : > "$stub/src/lib.rs"
-          printf '%s\n' '[package]' 'name = "sismatic-core"' 'version = "0.0.0"' \
-            'edition = "2024"' '' '[features]' 'simulator = []' > "$stub/Cargo.toml"
-          printf '%s\n' '[patch.crates-io]' "sismatic-core = { path = \"$stub\" }" \
-            > /tmp/.cargo/config.toml
       - name: release-plz release-pr
         uses: release-plz/action@v0.5
         with:
           command: release-pr
-          version: 0.3.167
+          version: 0.4.3
         env:
           RUSTUP_TOOLCHAIN: stable
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -181,7 +158,7 @@ jobs:
         uses: release-plz/action@v0.5
         with:
           command: release
-          version: 0.3.167
+          version: 0.4.3
         env:
           RUSTUP_TOOLCHAIN: stable
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
