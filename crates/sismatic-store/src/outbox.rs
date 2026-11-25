@@ -230,6 +230,7 @@ pub enum Verb {
     Start,
     Stop,
     Pause,
+    Reboot,
     WriteMetadata,
     WriteSetting,
 }
@@ -242,6 +243,7 @@ impl Verb {
             Intent::StartRecording => Verb::Start,
             Intent::StopRecording => Verb::Stop,
             Intent::PauseRecording => Verb::Pause,
+            Intent::Reboot => Verb::Reboot,
             Intent::SetMetadata { .. } => Verb::WriteMetadata,
             Intent::SetSetting { .. } => Verb::WriteSetting,
         }
@@ -250,7 +252,7 @@ impl Verb {
 
 /// The admission decision, as one total function over `DesiredRecordingState × Verb`.
 ///
-/// Fifteen cases, all written out, so the policy reads as a table rather than
+/// Eighteen cases, all written out, so the policy reads as a table rather than
 /// being inferred from control flow — and is testable without a device, a
 /// store, a clock, or a task.
 ///
@@ -266,12 +268,17 @@ pub const fn admit(
         (Idle, Verb::Start) => Ok(Recording),
         (Idle, Verb::Stop) => Err(Rejection::NotRecording),
         (Idle, Verb::Pause) => Err(Rejection::NotRecording),
+        (Idle, Verb::Reboot) => Ok(Idle),
         (Idle, Verb::WriteMetadata) => Ok(Idle),
         (Idle, Verb::WriteSetting) => Ok(Idle),
 
         (Recording, Verb::Start) => Err(Rejection::AlreadyRecording),
         (Recording, Verb::Stop) => Ok(Idle),
         (Recording, Verb::Pause) => Ok(Paused),
+        // A reboot would end the take in progress, and nothing can bring it
+        // back. Refused rather than admitted-and-ending: the cost of refusing
+        // is one stop first, the cost of admitting is a truncated lecture.
+        (Recording, Verb::Reboot) => Err(Rejection::RecordingInProgress),
         (Recording, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
         (Recording, Verb::WriteSetting) => Ok(Recording),
 
@@ -281,6 +288,7 @@ pub const fn admit(
         (Paused, Verb::Start) => Ok(Recording),
         (Paused, Verb::Stop) => Ok(Idle),
         (Paused, Verb::Pause) => Err(Rejection::AlreadyPaused),
+        (Paused, Verb::Reboot) => Err(Rejection::RecordingInProgress),
         (Paused, Verb::WriteMetadata) => Err(Rejection::MetadataFrozen),
         (Paused, Verb::WriteSetting) => Ok(Paused),
     }
@@ -327,6 +335,28 @@ pub const fn rollback(
     }
 }
 
+/// Whether a write that failed may be attempted again.
+///
+/// The adapter's retry arm consults this before spending another unit of the
+/// retry budget, so the policy lives here beside [`admit`] and [`rollback`]
+/// rather than in each adapter.
+///
+/// Every verb is retryable but one. A failed reboot is the case the retry arm
+/// gets backwards: the device drops the session as it restarts, so the
+/// acknowledgement losing the race against the teardown is the *expected* way
+/// for a reboot that worked to report failure. Retrying it would reboot the
+/// device a second time, and once more each time the budget allows. A failure
+/// is therefore terminal, and reported, for an operator to judge.
+///
+/// Wildcard-free, so a new [`Verb`] stops this compiling until someone has
+/// decided whether sending it twice is safe.
+pub const fn retryable(verb: Verb) -> bool {
+    match verb {
+        Verb::Start | Verb::Stop | Verb::Pause | Verb::WriteMetadata | Verb::WriteSetting => true,
+        Verb::Reboot => false,
+    }
+}
+
 /// The epoch a write admitted from `before` into `after` belongs to.
 ///
 /// A metadata write admitted while idle is preparing the *next* recording, so
@@ -353,16 +383,19 @@ fn the_admission_policy_is_a_table() {
     assert_eq!(admit(Idle, Start), Ok(Recording));
     assert_eq!(admit(Idle, Stop), Err(NotRecording));
     assert_eq!(admit(Idle, Pause), Err(NotRecording));
+    assert_eq!(admit(Idle, Reboot), Ok(Idle));
     assert_eq!(admit(Idle, WriteMetadata), Ok(Idle));
     assert_eq!(admit(Idle, WriteSetting), Ok(Idle));
     assert_eq!(admit(Recording, Start), Err(AlreadyRecording));
     assert_eq!(admit(Recording, Stop), Ok(Idle));
     assert_eq!(admit(Recording, Pause), Ok(Paused));
+    assert_eq!(admit(Recording, Reboot), Err(RecordingInProgress));
     assert_eq!(admit(Recording, WriteMetadata), Err(MetadataFrozen));
     assert_eq!(admit(Recording, WriteSetting), Ok(Recording));
     assert_eq!(admit(Paused, Start), Ok(Recording));
     assert_eq!(admit(Paused, Stop), Ok(Idle));
     assert_eq!(admit(Paused, Pause), Err(AlreadyPaused));
+    assert_eq!(admit(Paused, Reboot), Err(RecordingInProgress));
     assert_eq!(admit(Paused, WriteMetadata), Err(MetadataFrozen));
     assert_eq!(admit(Paused, WriteSetting), Ok(Paused));
 }
@@ -407,7 +440,7 @@ fn rolling_back_a_verb_that_moves_nothing_is_the_identity() {
         DesiredRecordingState::Recording,
         DesiredRecordingState::Paused,
     ] {
-        for verb in [Verb::WriteMetadata, Verb::WriteSetting] {
+        for verb in [Verb::Reboot, Verb::WriteMetadata, Verb::WriteSetting] {
             assert_eq!(
                 rollback(desired_recording_state, verb),
                 desired_recording_state
@@ -433,6 +466,44 @@ fn rollback_leaves_a_desired_state_the_verb_did_not_produce() {
         rollback(DesiredRecordingState::Recording, Verb::Pause),
         DesiredRecordingState::Recording
     );
+}
+
+/// The requirement, stated once against the whole domain: a reboot is admitted
+/// exactly when no recording is in progress, so a take is never ended by one.
+#[test]
+fn a_reboot_is_admitted_exactly_when_no_recording_is_in_progress() {
+    for desired_recording_state in [
+        DesiredRecordingState::Idle,
+        DesiredRecordingState::Recording,
+        DesiredRecordingState::Paused,
+    ] {
+        assert_eq!(
+            admit(desired_recording_state, Verb::Reboot).is_ok(),
+            desired_recording_state == DesiredRecordingState::Idle,
+            "reboot admissibility disagreed with the desired state at \
+             {desired_recording_state:?}"
+        );
+    }
+}
+
+/// Only the reboot is excluded from retries; every other verb keeps the
+/// budget it had.
+#[test]
+fn only_a_reboot_is_never_retried() {
+    use Verb::*;
+    for verb in [Start, Stop, Pause, Reboot, WriteMetadata, WriteSetting] {
+        assert_eq!(retryable(verb), verb != Reboot, "{verb:?}");
+    }
+}
+
+/// An idle reboot is stamped with the next epoch, as an idle metadata write
+/// is. It looks like a bug and is not: the epoch counts takes, a reboot opens
+/// none, and the next start carries the same number.
+#[test]
+fn an_idle_reboot_carries_the_next_epoch_without_opening_a_take() {
+    let after = admit(DesiredRecordingState::Idle, Verb::Reboot).unwrap();
+    assert!(!opens_recording(DesiredRecordingState::Idle, after));
+    assert_eq!(epoch_of(DesiredRecordingState::Idle, after, 4), 5);
 }
 
 /// The device is the authority on every disagreement but one.

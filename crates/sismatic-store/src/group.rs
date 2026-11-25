@@ -107,6 +107,9 @@ pub fn expects(intent: &Intent) -> (FieldName, ReadValue) {
         Intent::StartRecording => state(RecordingState::Started),
         Intent::StopRecording => state(RecordingState::Stopped),
         Intent::PauseRecording => state(RecordingState::Paused),
+        // Admitted only while idle, and a rebooted unit comes back stopped, so
+        // a member that reports anything else afterwards has drifted.
+        Intent::Reboot => state(RecordingState::Stopped),
         Intent::SetMetadata { field, value } | Intent::SetSetting { field, value } => {
             (field.clone(), ReadValue::Text(value.clone()))
         }

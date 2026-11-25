@@ -6,11 +6,13 @@
 // still typed into the boxes — and one order of operations.
 import {useEffect, useMemo, useState} from "react";
 import {
+  useReboot,
   useRecordingCommand,
   type RecordingVerb,
   type WriteTarget,
 } from "../../api/queries";
 import {DeviceCard} from "./DeviceCard";
+import {RebootControl} from "./RebootControl";
 import {RecordingControl} from "./RecordingControl";
 import {RegistersPanel} from "./RegistersPanel";
 import {useRegisterDrafts} from "./registerDrafts";
@@ -70,6 +72,7 @@ export function LiveDeviceCard({
   );
 
   const command = useRecordingCommand(target);
+  const reboot = useReboot(target);
   const drafts = useRegisterDrafts(target, view);
 
   /** The verb being submitted, from the click until the server answers. */
@@ -149,14 +152,27 @@ export function LiveDeviceCard({
       // price of a setting that can be changed in the middle of anything.
       actions={
         controls === "hidden" ? undefined : (
-          <RecordingControl
-            status={status}
-            pending={inFlight}
-            awaiting={awaiting}
-            error={command.error}
-            readOnly={controls === "locked"}
-            onCommand={run}
-          />
+          <>
+            <RecordingControl
+              status={status}
+              pending={inFlight}
+              awaiting={awaiting}
+              error={command.error}
+              readOnly={controls === "locked"}
+              onCommand={run}
+            />
+            {/* Its own control and its own mutation, not a fourth verb: a
+                reboot has no recording status that confirms it, which is
+                what `CONFIRMS` and the belief above are built on. */}
+            <RebootControl
+              status={status}
+              pending={reboot.isPending}
+              accepted={reboot.isSuccess}
+              error={reboot.error}
+              readOnly={controls === "locked"}
+              onReboot={() => reboot.mutate()}
+            />
+          </>
         )
       }
       // Kept in every state: hiding the controls empties the panel of

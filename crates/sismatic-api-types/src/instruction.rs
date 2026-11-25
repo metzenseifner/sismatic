@@ -90,17 +90,19 @@ pub struct FieldCatalog {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WritesCatalog {
-    /// The recording lifecycle instructions — and the one place in this API
-    /// where the word *command* still means what `sismatic-core` means by it.
+    /// The recording lifecycle instructions plus `REBOOT` — and the one place
+    /// in this API where the word *command* still means what `sismatic-core`
+    /// means by it.
     ///
-    /// Every route under `/v1/writes` submits a write; only these three are
+    /// Every route under `/v1/writes` submits a write; only these four are
     /// commands. Beside `metadata` and `settings` the word is unambiguous
     /// again, which is the whole reason the scope is not called `/v1/commands`
     /// any more: out there it named the union and told a caller nothing.
     ///
-    /// The one list whose names are *not* spelled in a URL: each is invoked by
-    /// its own route — `POST /v1/writes/devices/{id}/recording/start` and the
-    /// two beside it — rather than by being passed as a parameter. They are
+    /// The one list whose names are *not* spelled in a URL: each is sent by
+    /// its own route — `POST /v1/writes/devices/{id}/recording/start`, the
+    /// two beside it, and `POST /v1/writes/devices/{id}/reboot` — rather than
+    /// by being passed as a parameter. They are
     /// reported because they are what those routes send, so a reader can tie a
     /// `succeeded` write's echo back to an instruction, and because "what can
     /// this server ask a recorder to do" is answerable in no other way.

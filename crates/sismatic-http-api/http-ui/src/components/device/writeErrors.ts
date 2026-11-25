@@ -36,6 +36,8 @@ export function writeErrorText(error: ApiCallError): string {
       return "That recording was already paused.";
     case "not_recording":
       return "Nothing is recording.";
+    case "recording_in_progress":
+      return "A recording is in progress, and a reboot would end it. Stop the recording first.";
     // Configuration, not a state: this one will refuse forever, so there is
     // nothing to be gained by trying again.
     case "field_disabled":

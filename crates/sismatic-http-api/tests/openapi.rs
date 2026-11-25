@@ -193,7 +193,7 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // A document that described nothing would pass the loop below vacuously.
     assert_eq!(
         paths.len(),
-        34,
+        36,
         "expected every documented route, got {:?}",
         paths.keys().collect::<Vec<_>>()
     );
@@ -254,8 +254,8 @@ async fn every_documented_operation_is_one_the_server_serves() {
     // `/v1/config` is read and written, and the inventory scope's two device and
     // two group resources each carry a read plus the mutations. Asserted rather
     // than assumed, because a path that gained a second method and lost it in
-    // `startup` would otherwise slip through as "34 paths, still fine".
-    assert_eq!(checked, 41, "expected every documented operation");
+    // `startup` would otherwise slip through as "36 paths, still fine".
+    assert_eq!(checked, 43, "expected every documented operation");
 }
 
 /// Every handler carrying a `#[utoipa::path]` attribute appears in the document.
@@ -512,7 +512,7 @@ async fn the_versioned_routes_are_documented_under_their_scope() {
 
     assert_eq!(
         versioned.len(),
-        33,
+        35,
         "expected every reads, group, writes and inventory route under /v1, \
          got {:?}",
         paths.keys().collect::<Vec<_>>()
@@ -724,10 +724,12 @@ async fn the_error_envelope_is_documented_where_it_can_be_returned() {
             "already_recording",
             "already_paused",
             "not_recording",
+            // A reboot asked of a device mid-take.
+            "recording_in_progress",
             // The one that is not about recording state: a field the devices
             // file switches off for the target. It is in the same enum because
             // it shares the status and the axis — which precondition refused —
-            // and apart from the other four in that waiting will never clear it.
+            // and apart from the other five in that waiting will never clear it.
             "field_disabled"
         ]),
         "got {rejection}"

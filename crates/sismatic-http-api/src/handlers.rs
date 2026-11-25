@@ -42,6 +42,6 @@ pub use reads::{field_history, list_fields, read_field};
 pub use writes::{
     IdempotencyKey, ValueWrite, list_group_writes, list_writes, pause_group_recording,
     pause_recording, read_desired_recording_state, read_group_desired_recording_state, read_write,
-    set_group_metadata, set_group_setting, set_metadata, set_setting, start_group_recording,
-    start_recording, stop_group_recording, stop_recording,
+    reboot, reboot_group, set_group_metadata, set_group_setting, set_metadata, set_setting,
+    start_group_recording, start_recording, stop_group_recording, stop_recording,
 };

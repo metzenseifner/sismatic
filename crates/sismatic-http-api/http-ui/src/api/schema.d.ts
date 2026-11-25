@@ -563,8 +563,8 @@ export interface paths {
          *     name.
          * @description Three lists, because the three are written through three different routes:
          *     `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
-         *     `commands` are what the `recording/{verb}` routes send and are never spelled
-         *     in a URL. See [`WritesCatalog`] for the rules that separate them.
+         *     `commands` are what the `recording/{verb}` and `reboot` routes send and are
+         *     never spelled in a URL. See [`WritesCatalog`] for the rules that separate them.
          */
         get: operations["writes_catalog"];
         put?: never;
@@ -609,6 +609,28 @@ export interface paths {
          */
         put: operations["set_metadata"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/writes/devices/{id}/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /v1/writes/devices/{id}/reboot` — restart one device.
+         * @description Not beside the recording verbs: a reboot is not one, and a distinct
+         *     prefix is what lets "may reboot devices" be authorized separately from "may
+         *     start recordings" — see the module docs on coarse authorization by path.
+         */
+        post: operations["reboot"];
         delete?: never;
         options?: never;
         head?: never;
@@ -757,6 +779,26 @@ export interface paths {
          */
         put: operations["set_group_metadata"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/writes/groups/{id}/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /v1/writes/groups/{id}/reboot` — restart every member, with no
+         *     rendezvous.
+         */
+        post: operations["reboot_group"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1650,7 +1692,7 @@ export interface components {
          * @description What a caller wants done.
          *
          *     Internally tagged (`{"kind": "set_metadata", "field": "TITLE", ...}`) rather
-         *     than adjacently tagged like [`ReadValue`]: two variants carry no payload
+         *     than adjacently tagged like [`ReadValue`]: most variants carry no payload
          *     at all, and the adjacent form would render those as `"value": null`.
          */
         Intent: {
@@ -1662,6 +1704,9 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "pause_recording";
+        } | {
+            /** @enum {string} */
+            kind: "reboot";
         } | {
             /** @example TITLE */
             field: string;
@@ -1936,8 +1981,8 @@ export interface components {
          *     [`ApiError::rejection`](crate::ApiError::rejection), so a client branches on
          *     a value rather than on prose.
          *
-         *     A field of its own rather than four more [`ErrorCode`](crate::ErrorCode)
-         *     variants, because all four are conflicts and differ only in which
+         *     A field of its own rather than more [`ErrorCode`](crate::ErrorCode)
+         *     variants, because all of them are conflicts and differ only in which
          *     precondition refused — one axis is "what kind of failure and what status",
          *     the other is "which rule". See [`ApiError`](crate::ApiError) for the whole
          *     argument.
@@ -1945,17 +1990,18 @@ export interface components {
          *     The distinction earns its keep: three of these say the device is already in
          *     the state that was asked for, which a caller can often treat as benign, while
          *     [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was discarded and
-         *     something has to be done about it. A client that could not tell them apart
+         *     [`RecordingInProgress`](Rejection::RecordingInProgress) that a reboot was
+         *     withheld — both something to act on. A client that could not tell them apart
          *     would either treat every `409` as an error or silently lose metadata edits.
          *
          *     [`FieldDisabled`](Rejection::FieldDisabled) adds a third kind, and the one a
-         *     client must handle differently again: the four above are *states* and may
+         *     client must handle differently again: the five above are *states* and may
          *     admit the same request a moment later, so retrying is reasonable. That one is
          *     configuration and will refuse forever until an operator edits the devices
          *     file, so retrying is pure waste.
          * @enum {string}
          */
-        Rejection: "metadata_frozen" | "already_recording" | "already_paused" | "not_recording" | "field_disabled";
+        Rejection: "metadata_frozen" | "already_recording" | "already_paused" | "not_recording" | "recording_in_progress" | "field_disabled";
         /** @description A change to how the write queue is drained. */
         RelayPatch: {
             /**
@@ -2206,17 +2252,19 @@ export interface components {
          */
         WritesCatalog: {
             /**
-             * @description The recording lifecycle instructions — and the one place in this API
-             *     where the word *command* still means what `sismatic-core` means by it.
+             * @description The recording lifecycle instructions plus `REBOOT` — and the one place
+             *     in this API where the word *command* still means what `sismatic-core`
+             *     means by it.
              *
-             *     Every route under `/v1/writes` submits a write; only these three are
+             *     Every route under `/v1/writes` submits a write; only these four are
              *     commands. Beside `metadata` and `settings` the word is unambiguous
              *     again, which is the whole reason the scope is not called `/v1/commands`
              *     any more: out there it named the union and told a caller nothing.
              *
-             *     The one list whose names are *not* spelled in a URL: each is invoked by
-             *     its own route — `POST /v1/writes/devices/{id}/recording/start` and the
-             *     two beside it — rather than by being passed as a parameter. They are
+             *     The one list whose names are *not* spelled in a URL: each is sent by
+             *     its own route — `POST /v1/writes/devices/{id}/recording/start`, the
+             *     two beside it, and `POST /v1/writes/devices/{id}/reboot` — rather than
+             *     by being passed as a parameter. They are
              *     reported because they are what those routes send, so a reader can tie a
              *     `succeeded` write's echo back to an instruction, and because "what can
              *     this server ask a recorder to do" is answerable in no other way.
@@ -3594,7 +3642,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description What a write can name, in three lists. `metadata` names go in the `{field}` of `PUT /v1/writes/devices/{id}/metadata/{field}` and are writable only while nothing is recording; `settings` names go in the `{field}` of `PUT /v1/writes/devices/{id}/settings/{field}` and are writable always. `commands` are the recording instructions behind `POST /v1/writes/devices/{id}/recording/start` and the two beside it — reported for completeness, not to be put in a URL. */
+            /** @description What a write can name, in three lists. `metadata` names go in the `{field}` of `PUT /v1/writes/devices/{id}/metadata/{field}` and are writable only while nothing is recording; `settings` names go in the `{field}` of `PUT /v1/writes/devices/{id}/settings/{field}` and are writable always. `commands` are the instructions behind `POST /v1/writes/devices/{id}/recording/start`, the two beside it, and `POST /v1/writes/devices/{id}/reboot` — reported for completeness, not to be put in a URL. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3688,6 +3736,59 @@ export interface operations {
                 };
             };
             /** @description A recording is in progress, so this device's metadata is sealed for the current epoch. Stop the recording, or write the field before the next one starts. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The storage backend failed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    reboot: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description See the start route. */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Device id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Queued, not rebooted: no device has been contacted yet. The device drops its SSH session as it restarts and is unreachable until it has booted. A reboot is attempted once and never retried, because a lost acknowledgement most likely means the device did reboot — so a `failed` outcome means *unconfirmed*, not *did not happen*. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acceptance"];
+                };
+            };
+            /** @description No device has this id, or the id names a device group — which is refused here and carries the `/v1/writes/groups` URL that does the same thing. The catalog is the configured set, so both are claims about the devices file. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description A recording is in progress (`recording_in_progress`). Stop it first; a reboot would end the take. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4042,6 +4143,59 @@ export interface operations {
                 };
             };
             /** @description A member has a recording in progress, so its metadata is sealed — and the whole submission is refused rather than leaving the group half-written. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The storage backend failed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    reboot_group: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description See the start route. */
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                /** @description Device group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Queued, one write per member, *without* a rendezvous: rebooting in unison buys nothing, so `batch` is null and each member reboots when its own queue reaches it. Each is attempted once and never retried; see the device route. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Acceptance"];
+                };
+            };
+            /** @description No device group has this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description A member has a recording in progress (`recording_in_progress`), so the whole submission was refused rather than rebooting the members that happened to be idle. */
             409: {
                 headers: {
                     [name: string]: unknown;

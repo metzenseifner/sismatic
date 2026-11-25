@@ -48,6 +48,7 @@ pub fn to_instruction(intent: &Intent) -> Result<Instruction, TranslateError> {
         Intent::StartRecording => Ok(Command::Start.instruction()),
         Intent::StopRecording => Ok(Command::Stop.instruction()),
         Intent::PauseRecording => Ok(Command::Pause.instruction()),
+        Intent::Reboot => Ok(Command::Reboot.instruction()),
 
         Intent::SetMetadata { field, value } => Register::from_str(field)
             .map(|register| register.instruction(value))
@@ -70,6 +71,18 @@ pub fn to_instruction(intent: &Intent) -> Result<Instruction, TranslateError> {
 mod tests {
     use super::*;
     use sismatic_core::protocol::instructions::setting::Setting;
+
+    /// The reboot reaches the device as core's own instruction, session-ending
+    /// flag included, so `Device::exec` never replays it.
+    #[test]
+    fn a_reboot_translates_to_the_session_ending_core_command() {
+        let instruction = to_instruction(&Intent::Reboot).unwrap();
+        assert_eq!(instruction.payload, Command::Reboot.instruction().payload);
+        assert_eq!(
+            instruction.session(),
+            sismatic_core::protocol::instructions::Session::Ends
+        );
+    }
 
     #[test]
     fn every_metadata_register_translates() {

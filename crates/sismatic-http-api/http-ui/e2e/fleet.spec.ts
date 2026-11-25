@@ -372,3 +372,32 @@ test("an unreachable inventory degrades instead of blanking the page", async ({
   await expect(halls).toBeVisible();
   await expect(halls.getByText(/0 devices/)).toBeVisible();
 });
+
+test("a reboot takes a second click, and never while recording", async ({page}) => {
+  const submitted = await stubApi(page);
+  await page.goto(".");
+  await page.getByLabel("Controls").selectOption("unlocked");
+
+  // Hall A is recording: the server would refuse, so the button is off and
+  // the card says why.
+  const hallA = card(page, "Hall A");
+  await expect(hallA.getByRole("button", {name: "Reboot…"})).toBeDisabled();
+  await expect(hallA.getByText("Stop the recording to reboot.")).toBeVisible();
+
+  // Hall C has answered nothing. The first click only arms the reboot, and
+  // Cancel disarms it without a request.
+  const hallC = card(page, "Hall C");
+  await hallC.getByRole("button", {name: "Reboot…"}).click();
+  await hallC.getByRole("button", {name: "Cancel"}).click();
+  await hallC.getByRole("button", {name: "Reboot…"}).click();
+  expect(submitted).toHaveLength(0);
+
+  await hallC.getByRole("button", {name: "Reboot now"}).click();
+
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0]).toMatchObject({
+    method: "POST",
+    path: "/v1/writes/devices/Hall C/reboot",
+  });
+  await expect(hallC.getByText(/^Reboot queued/)).toBeVisible();
+});

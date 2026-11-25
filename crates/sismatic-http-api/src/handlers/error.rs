@@ -276,6 +276,7 @@ mod tests {
             Rejection::AlreadyRecording,
             Rejection::AlreadyPaused,
             Rejection::NotRecording,
+            Rejection::RecordingInProgress,
         ] {
             let failure = ApiFailure::Submit(SubmitError::Rejected {
                 device: "atrium-101".to_owned(),
