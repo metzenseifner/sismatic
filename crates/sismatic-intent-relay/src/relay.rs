@@ -296,12 +296,13 @@ async fn dispatch_one(device: &Device, registry: &Registry, drain: &dyn WriteDra
 
 /// One write against one device.
 async fn dispatch_alone(device: &Device, drain: &dyn WriteDrain, record: WriteRecord) {
-    // The one place a stale desired recording state can still do damage: a
+    // The two places a stale desired recording state can still do damage: a
     // recording started from the front panel between admission and now. Re-read
-    // the device before a metadata write, and only before a metadata write —
+    // the device before a metadata write or a reboot, and only before those —
     // every other intent is admissible in every desired state or is itself a
-    // change to one.
-    if matches!(record.intent, Intent::SetMetadata { .. })
+    // change to one. For a reboot the stake is higher than a sealed register:
+    // the take itself would end.
+    if matches!(record.intent, Intent::SetMetadata { .. } | Intent::Reboot)
         && let Some(state) = observe_state(device, drain).await
         && state.is_recording()
     {
@@ -449,7 +450,9 @@ async fn report(drain: &dyn WriteDrain, id: WriteId, outcome: Outcome) {
 /// Metadata and setting writes are replayed, because writing the same value
 /// twice is the same as writing it once. A lifecycle command is *not* replayed
 /// blindly: the device is asked what it is doing, and the answer settles the
-/// write without a second attempt.
+/// write without a second attempt. A reboot is never replayed and cannot be
+/// verified — no query reads a boot count — so it is failed, and
+/// `sismatic_store::outbox::retryable` makes that failure terminal.
 ///
 /// A replay is spelled as [`Outcome::Failed`] rather than a requeue method of
 /// its own. That is not a lie about what happened — the attempt genuinely did
@@ -481,6 +484,13 @@ async fn recover(device: &Device, drain: &dyn WriteDrain) {
             (Intent::SetMetadata { .. } | Intent::SetSetting { .. }, _) => Outcome::Failed(
                 "left in flight by a previous process; replayed, because writing the same \
                  value twice is the same as writing it once"
+                    .into(),
+            ),
+            // Above the wildcards on purpose: without this arm a stranded reboot
+            // fell into them and read as an ordinary failure.
+            (Intent::Reboot, _) => Outcome::Failed(
+                "left in flight by a previous process; a reboot is never replayed, and \
+                 whether it took effect cannot be read back"
                     .into(),
             ),
             // Undecidable, so it is reported rather than guessed at. An
@@ -582,6 +592,84 @@ mod tests {
             },
         );
         (registry, handle)
+    }
+
+    /// A device whose every connection answers `reply` to each exchange.
+    fn answering(id: &str, reply: &'static str) -> Device {
+        let connector = Arc::new(CountingConnector::new(move || {
+            FakeTransport::with_reads([reply; 4])
+        }));
+        Device::new(device_config(id), connector)
+    }
+
+    /// Submit a reboot to an idle `device` and claim it, as the relay would.
+    async fn claimed_reboot(outbox: &MemoryOutbox, device: &str) -> WriteRecord {
+        use sismatic_store::outbox::{Submission, WriteSubmit};
+        outbox
+            .submit(Submission {
+                ids: vec!["reboot".into()],
+                targets: vec![device.into()],
+                group: None,
+                batch: None,
+                barrier: None,
+                intent: Intent::Reboot,
+                at: now(),
+                idempotency_key: None,
+            })
+            .await
+            .expect("an idle device admits a reboot");
+        match outbox.claim_next(device.into(), now()).await.unwrap() {
+            Some(Claim::One(record)) => record,
+            other => panic!("expected the reboot, got {other:?}"),
+        }
+    }
+
+    async fn status(outbox: &MemoryOutbox) -> sismatic_api_types::WriteStatus {
+        use sismatic_store::outbox::WriteLog;
+        outbox.write("reboot".into()).await.unwrap().unwrap().status
+    }
+
+    /// A recording started from the front panel after the reboot was admitted.
+    /// The device is asked first, and the reboot never reaches it.
+    #[tokio::test]
+    async fn a_reboot_is_withheld_from_a_device_that_started_recording() {
+        let outbox = MemoryOutbox::with_max_attempts(3).with_backoff(Duration::ZERO);
+        let record = claimed_reboot(&outbox, "dev").await;
+
+        // Every exchange answers "recording", including the one a reboot would
+        // be: had it been sent, its parser would never have matched.
+        dispatch_alone(&answering("dev", "1\r\n"), &outbox, record).await;
+
+        assert_eq!(
+            status(&outbox).await,
+            sismatic_api_types::WriteStatus::Failed {
+                reason: "a recording was in progress when this write reached the device".into()
+            }
+        );
+    }
+
+    /// A reboot a previous process left in flight is failed, and the failure
+    /// is terminal: with budget to spare it is still not put back in the queue.
+    #[tokio::test]
+    async fn a_stranded_reboot_is_failed_and_never_requeued() {
+        let outbox = MemoryOutbox::with_max_attempts(3).with_backoff(Duration::ZERO);
+        claimed_reboot(&outbox, "dev").await;
+
+        recover(&answering("dev", "0\r\n"), &outbox).await;
+
+        assert!(
+            matches!(
+                status(&outbox).await,
+                sismatic_api_types::WriteStatus::Failed { .. }
+            ),
+            "{:?}",
+            status(&outbox).await
+        );
+        assert_eq!(
+            outbox.claim_next("dev".into(), now()).await.unwrap(),
+            None,
+            "nothing is left to claim"
+        );
     }
 
     #[tokio::test]

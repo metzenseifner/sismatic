@@ -88,11 +88,17 @@ QueryName = Literal[
 
 CommandName = Literal[
     "startrecording",
+    "start_recording",
     "start",
     "stoprecording",
+    "stop_recording",
     "stop",
     "pauserecording",
+    "pause_recording",
     "pause",
+    "reboot",
+    "boot",
+    "restart",
 ]
 
 RegisterName = Literal[
@@ -181,7 +187,7 @@ class Sis:
         ...
 
     def command(self, target: str, name: CommandName) -> str | dict[str, str]:
-        """Run a recorder command (e.g. \"start\", \"stop\") on a device, or on a group (returns a dict keyed by member id)."""
+        """Run a device command (e.g. \"start\", \"stop\", \"reboot\") on a device, or on a group (returns a dict keyed by member id). \"reboot\" ends the SSH session and is never resent."""
         ...
 
     def register(self, target: str, name: RegisterName, value: str) -> str | dict[str, str]:

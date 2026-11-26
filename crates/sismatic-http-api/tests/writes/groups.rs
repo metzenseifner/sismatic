@@ -47,6 +47,7 @@ async fn every_write_verb_is_addressable_under_the_group_space() {
     for (method, tail) in [
         ("post", "/recording/start"),
         ("post", "/recording/stop"),
+        ("post", "/reboot"),
         ("put", "/metadata/title"),
         ("put", "/settings/timezone"),
     ] {
@@ -180,6 +181,47 @@ async fn a_group_start_is_refused_whole_when_one_member_is_already_recording() {
     );
 }
 
+/// A group reboot expands without a rendezvous: nothing lines up across two
+/// rebooted recorders, so no member waits on a barrier for it.
+#[tokio::test]
+async fn a_group_reboot_expands_per_member_without_a_batch() {
+    let (address, _outbox) = spawn();
+
+    let (status, _, body) = post(&address, &format!("/groups/{GROUP}/reboot")).await;
+
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(devices(&body), [ATRIUM, ANNEX]);
+    assert!(body["batch"].is_null(), "{body}");
+}
+
+/// One recording member refuses the whole group reboot, and the idle member
+/// is not rebooted on its own.
+#[tokio::test]
+async fn a_group_reboot_is_refused_whole_when_one_member_is_recording() {
+    let (address, outbox) = spawn();
+
+    let (status, ..) = post(&address, &format!("/devices/{ANNEX}/recording/start")).await;
+    assert_eq!(status, 202);
+
+    let (status, _, body) = post(&address, &format!("/groups/{GROUP}/reboot")).await;
+    assert_eq!(status, 409);
+    assert_eq!(body["rejection"], "recording_in_progress", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains(ANNEX),
+        "the refusing member must be named: {message}"
+    );
+
+    assert!(
+        outbox
+            .writes_for(ATRIUM.to_owned())
+            .await
+            .expect("reading the log")
+            .is_empty(),
+        "a refused group reboot must record nothing for its other members"
+    );
+}
+
 // ---- an id that names nothing, or the wrong thing -------------------------
 
 /// The check that makes the two halves mean what they say. Without it a device
@@ -227,6 +269,7 @@ async fn an_unconfigured_group_is_a_404_on_every_group_route() {
         ("post", "/recording/start"),
         ("post", "/recording/stop"),
         ("post", "/recording/pause"),
+        ("post", "/reboot"),
         ("put", "/metadata/title"),
         ("put", "/settings/timezone"),
         ("get", "/recording"),

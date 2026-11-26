@@ -543,7 +543,7 @@ mod tests {
     fn the_published_catalogs_are_not_empty() {
         assert!(field_catalog().fields.len() > 20);
         let writes = writes_catalog();
-        assert_eq!(writes.commands.len(), 3, "start, stop and pause");
+        assert_eq!(writes.commands.len(), 4, "start, stop, pause and reboot");
         assert!(!writes.metadata.is_empty());
         assert!(!writes.settings.is_empty());
     }

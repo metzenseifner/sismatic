@@ -35,10 +35,10 @@ use crate::handlers::{
     list_devices, list_fields, list_fleet, list_fleet_groups, list_group_fields, list_group_writes,
     list_groups, list_writes, patch_config, pause_group_recording, pause_recording, read_config,
     read_desired_recording_state, read_device, read_field, read_group,
-    read_group_desired_recording_state, read_group_field, read_write, reload_config, remove_device,
-    remove_group, replace_device, replace_group, reset_config, set_group_metadata,
-    set_group_setting, set_metadata, set_setting, start_group_recording, start_recording,
-    stop_group_recording, stop_recording, writes_catalog,
+    read_group_desired_recording_state, read_group_field, read_write, reboot, reboot_group,
+    reload_config, remove_device, remove_group, replace_device, replace_group, reset_config,
+    set_group_metadata, set_group_setting, set_metadata, set_setting, start_group_recording,
+    start_recording, stop_group_recording, stop_recording, writes_catalog,
 };
 use crate::health_check;
 use crate::inventory::{DynLiveInventory, LiveInventory};
@@ -343,6 +343,9 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                                     .route(web::post().to(pause_recording)),
                             )
                             .service(
+                                web::resource("/devices/{id}/reboot").route(web::post().to(reboot)),
+                            )
+                            .service(
                                 web::resource("/devices/{id}/recording")
                                     .route(web::get().to(read_desired_recording_state)),
                             )
@@ -369,6 +372,10 @@ pub fn run(listener: TcpListener, ports: Ports, stamp: Stamp) -> Result<Server, 
                             .service(
                                 web::resource("/groups/{id}/recording/pause")
                                     .route(web::post().to(pause_group_recording)),
+                            )
+                            .service(
+                                web::resource("/groups/{id}/reboot")
+                                    .route(web::post().to(reboot_group)),
                             )
                             .service(
                                 web::resource("/groups/{id}/recording")

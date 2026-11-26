@@ -276,6 +276,13 @@ const RECORDING_ROUTES = {
   },
 } as const;
 
+// Not a `RecordingVerb`: a reboot has no recording status that confirms it,
+// and `LiveDeviceCard` maps every verb to the status that does.
+const REBOOT_ROUTES = {
+  device: "/v1/writes/devices/{id}/reboot",
+  group: "/v1/writes/groups/{id}/reboot",
+} as const;
+
 const METADATA_ROUTES = {
   device: "/v1/writes/devices/{id}/metadata/{field}",
   group: "/v1/writes/groups/{id}/metadata/{field}",
@@ -299,6 +306,32 @@ export function useRecordingCommand(
     mutationFn: async (verb: RecordingVerb) => {
       const {data, error, response} = await api.POST(
         RECORDING_ROUTES[target.kind][verb],
+        {params: {path: {id: target.id}}},
+      );
+      if (error || !data) throw new ApiCallError(response.status, error);
+      return data;
+    },
+    onSuccess: () => invalidateFleet(queryClient),
+  });
+}
+
+/**
+ * Restart one device, or every member of one group.
+ *
+ * As with the recording verbs, the `202` means queued, not rebooted. The
+ * server refuses with `recording_in_progress` while a recording is running,
+ * and attempts the reboot once: a lost acknowledgement most likely means the
+ * device did reboot, so it is never retried.
+ */
+export function useReboot(
+  target: WriteTarget,
+): UseMutationResult<Acceptance, ApiCallError, void> {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async () => {
+      const {data, error, response} = await api.POST(
+        REBOOT_ROUTES[target.kind],
         {params: {path: {id: target.id}}},
       );
       if (error || !data) throw new ApiCallError(response.status, error);

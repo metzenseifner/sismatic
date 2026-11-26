@@ -8,14 +8,15 @@
 //!
 //! # A write, not a command
 //!
-//! Every accepted request is a *write*, whatever it asks for. Only three of
-//! the five [`Intent`]s are commands in the sense `sismatic-core` uses the word
-//! — `StartRecording`, `StopRecording` and `PauseRecording` are its `Command`
-//! enum — while `SetMetadata` and `SetSetting` write a register and are not
-//! commands at all. Naming the whole class after one third of it is what made
-//! `GET /v1/commands` ambiguous, so the class is named for what all five have
-//! in common: they go out on the write path. [`WritesCatalog`] is where both
-//! words survive together, and there `commands` means only the lifecycle trio.
+//! Every accepted request is a *write*, whatever it asks for. Only four of
+//! the six [`Intent`]s are commands in the sense `sismatic-core` uses the word
+//! — `StartRecording`, `StopRecording`, `PauseRecording` and `Reboot` are its
+//! `Command` enum — while `SetMetadata` and `SetSetting` write a register and
+//! are not commands at all. Naming the whole class after a part of it is what
+//! made `GET /v1/commands` ambiguous, so the class is named for what all six
+//! have in common: they go out on the write path. [`WritesCatalog`] is where
+//! both words survive together, and there `commands` means the recorder verbs
+//! plus `REBOOT`.
 //!
 //! [`WritesCatalog`]: crate::WritesCatalog
 
@@ -58,7 +59,7 @@ pub enum Barrier {
 /// What a caller wants done.
 ///
 /// Internally tagged (`{"kind": "set_metadata", "field": "TITLE", ...}`) rather
-/// than adjacently tagged like [`ReadValue`]: two variants carry no payload
+/// than adjacently tagged like [`ReadValue`]: most variants carry no payload
 /// at all, and the adjacent form would render those as `"value": null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -68,6 +69,12 @@ pub enum Intent {
     StartRecording,
     StopRecording,
     PauseRecording,
+    /// Restart the device. Ends the SSH session, and the device is unreachable
+    /// until it has booted. Admissible only while the device's
+    /// [`DesiredRecordingState`] is [`DesiredRecordingState::Idle`], and never
+    /// retried: a reboot whose acknowledgement was lost most likely happened,
+    /// and a second attempt would reboot the device again.
+    Reboot,
     /// Write one metadata register. Admissible only while the device's
     /// [`DesiredRecordingState`] is [`DesiredRecordingState::Idle`] — see
     /// `sismatic_store::outbox::admit`.
@@ -104,8 +111,8 @@ pub enum DesiredRecordingState {
 /// [`ApiError::rejection`](crate::ApiError::rejection), so a client branches on
 /// a value rather than on prose.
 ///
-/// A field of its own rather than four more [`ErrorCode`](crate::ErrorCode)
-/// variants, because all four are conflicts and differ only in which
+/// A field of its own rather than more [`ErrorCode`](crate::ErrorCode)
+/// variants, because all of them are conflicts and differ only in which
 /// precondition refused — one axis is "what kind of failure and what status",
 /// the other is "which rule". See [`ApiError`](crate::ApiError) for the whole
 /// argument.
@@ -113,11 +120,12 @@ pub enum DesiredRecordingState {
 /// The distinction earns its keep: three of these say the device is already in
 /// the state that was asked for, which a caller can often treat as benign, while
 /// [`MetadataFrozen`](Rejection::MetadataFrozen) says an edit was discarded and
-/// something has to be done about it. A client that could not tell them apart
+/// [`RecordingInProgress`](Rejection::RecordingInProgress) that a reboot was
+/// withheld — both something to act on. A client that could not tell them apart
 /// would either treat every `409` as an error or silently lose metadata edits.
 ///
 /// [`FieldDisabled`](Rejection::FieldDisabled) adds a third kind, and the one a
-/// client must handle differently again: the four above are *states* and may
+/// client must handle differently again: the five above are *states* and may
 /// admit the same request a moment later, so retrying is reasonable. That one is
 /// configuration and will refuse forever until an operator edits the devices
 /// file, so retrying is pure waste.
@@ -131,10 +139,15 @@ pub enum Rejection {
     AlreadyRecording,
     AlreadyPaused,
     NotRecording,
+    /// A reboot arrived while a recording was in progress. Refused rather than
+    /// admitted, because a reboot ends the take mid-lecture and cannot be taken
+    /// back. A *state*, like the four above: stop the recording, and the same
+    /// request is admitted.
+    RecordingInProgress,
     /// The write names a field the target device's `disabled_fields` switches
     /// off — or, for a group, that at least one member switches off.
     ///
-    /// The odd one out among these, and worth saying how. The other four are
+    /// The odd one out among these, and worth saying how. The others are
     /// *states*: they change on their own, and the same request a moment later
     /// may well be admitted. This one is configuration, so it will refuse the
     /// same request forever until an operator edits the devices file. A client
@@ -169,6 +182,10 @@ impl std::fmt::Display for Rejection {
             Rejection::NotRecording => {
                 f.write_str("not_recording: this device has no recording in progress")
             }
+            Rejection::RecordingInProgress => f.write_str(
+                "recording_in_progress: this device is recording, and a reboot would end \
+                 the take; stop the recording first",
+            ),
             Rejection::FieldDisabled => f.write_str(
                 "field_disabled: this field is switched off in the devices file for \
                  the device this write addresses",

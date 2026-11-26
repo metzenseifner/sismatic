@@ -139,6 +139,11 @@ const WRITES = {
     {name: "STARTRECORDING", aliases: ["START"], description: "Start recording."},
     {name: "STOPRECORDING", aliases: ["STOP"], description: "Stop recording."},
     {name: "PAUSERECORDING", aliases: ["PAUSE"], description: "Pause recording."},
+    {
+      name: "REBOOT",
+      aliases: ["BOOT", "RESTART"],
+      description: "Restart the device. Ends any recording in progress and the SSH session.",
+    },
   ],
   metadata: [
     {name: "PRESENTER", aliases: [], description: "Presenter name."},

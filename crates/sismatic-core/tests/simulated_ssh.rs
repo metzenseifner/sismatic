@@ -324,3 +324,28 @@ async fn commands_mutate_the_running_state() {
         );
     }
 }
+
+/// A reboot is acknowledged with `Boot1`, then the simulated unit drops the
+/// session like the hardware. The next call must dial a fresh session rather
+/// than write into the ended one, and finds the recording ended.
+#[tokio::test]
+async fn reboot_is_acknowledged_and_ends_the_session() {
+    let simulated_device = spawn_device(ReplyStream::Stderr).await;
+    let device = connected(&simulated_device).await;
+
+    device.run(&Command::Start.instruction()).await.unwrap();
+    assert_eq!(
+        device
+            .run(&Command::Reboot.instruction())
+            .await
+            .expect("the reboot should be acknowledged"),
+        Value::Ack("Boot1".into())
+    );
+    assert_eq!(
+        device
+            .run(&Query::RunningState.instruction())
+            .await
+            .expect("the call after a reboot dials a fresh session"),
+        Value::State(RecordingState::Stopped)
+    );
+}

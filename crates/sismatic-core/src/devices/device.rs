@@ -47,7 +47,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::protocol::Value;
-use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::{Instruction, Session};
 
 use super::auto_disabled::{AutoDisabled, VetoSource};
 use super::config::DeviceConfig;
@@ -360,6 +360,11 @@ impl Device {
     /// [`eager_retry`]: super::config::DeviceConfig::eager_retry
     /// [`cold_backoff`]: super::config::DeviceConfig::cold_backoff
     pub async fn probe(&self, instruction: &Instruction) -> Result<Value, DeviceError> {
+        debug_assert_eq!(
+            instruction.session(),
+            Session::Preserved,
+            "the keepalive must never end the session it keeps alive"
+        );
         self.exec(instruction, Dial::Always).await
     }
 
@@ -381,7 +386,15 @@ impl Device {
             let controller = link.conn.as_mut().expect("connection just ensured");
 
             match controller.run(instruction).await {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    if instruction.session() == Session::Ends {
+                        // The device acknowledged and is about to drop the
+                        // session; handing it to the next caller would cost
+                        // that caller a failed exchange into a booting unit.
+                        link.conn = None;
+                    }
+                    return Ok(value);
+                }
                 // A refusal is an answer. The device read the verb, decided
                 // against it, and said so in a complete reply — so the channel
                 // is in sync, the connection is as good as it was a moment ago,
@@ -395,7 +408,11 @@ impl Device {
                 }
                 Err(err) => {
                     link.conn = None; // the channel may be desynced; discard it
-                    if was_cached && !reconnected {
+                    // A session-ending instruction is never replayed: losing
+                    // its reply most likely means the device acted (a reboot
+                    // tearing down networking before `Boot1` arrives), and a
+                    // resend onto a fresh dial would act a second time.
+                    if was_cached && !reconnected && instruction.session() == Session::Preserved {
                         // The cached connection may have been closed while idle;
                         // heal transparently by retrying once on a fresh one.
                         reconnected = true;
@@ -475,6 +492,7 @@ mod tests {
     use crate::devices::transport::Transport;
     use crate::devices::transport::fake::FakeTransport;
     use crate::protocol::SisError;
+    use crate::protocol::instructions::commands::Command;
     use crate::protocol::instructions::query::Query;
 
     const PORT_REPLY: &str = "22023\r\n";
@@ -618,6 +636,69 @@ mod tests {
             opens.load(Ordering::SeqCst),
             2,
             "stale connection must reconnect"
+        );
+    }
+
+    /// `Boot1` arrives before the device drops the session. The exchange
+    /// succeeds, and the connection it ran on must not be handed to the next
+    /// caller: the scripted second reply would answer on it if it were.
+    #[tokio::test]
+    async fn a_session_ending_command_discards_its_connection_on_success() {
+        // The first connection would answer a port query after `Boot1` with a
+        // port no later connection gives, so reusing it is visible in the value.
+        let dialed = AtomicUsize::new(0);
+        let connector = Arc::new(CountingConnector::new(move || {
+            if dialed.fetch_add(1, Ordering::SeqCst) == 0 {
+                FakeTransport::with_reads(["Boot1\r\n", "9999\r\n"])
+            } else {
+                FakeTransport::with_reads([PORT_REPLY])
+            }
+        }));
+        let opens = connector.opens_handle();
+        let device = Device::new(config(500), connector);
+
+        assert_eq!(
+            device.run(&Command::Reboot.instruction()).await.unwrap(),
+            Value::Ack("Boot1".into())
+        );
+        assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            2,
+            "the call after a reboot must dial, not reuse the ended session"
+        );
+    }
+
+    /// The inverse of `reconnects_transparently_after_a_stale_connection_fails`.
+    /// The device drops the session before `Boot1` reaches us, on a cached
+    /// connection. Healing would redial and send the reboot a second time.
+    #[tokio::test]
+    async fn a_session_ending_command_is_never_replayed() {
+        // Each connection answers exactly once, then closes.
+        let connector = Arc::new(CountingConnector::new(|| {
+            FakeTransport::with_reads([PORT_REPLY])
+        }));
+        let opens = connector.opens_handle();
+        let device = Device::new(config(500), connector);
+
+        // Warm the connection, so `was_cached` is true for the reboot.
+        assert_eq!(device.run(&port_query()).await.unwrap(), Value::Port(22023));
+
+        let err = device
+            .run(&Command::Reboot.instruction())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DeviceError::Command(ControllerError::ConnectionClosed { .. })
+            ),
+            "the lost reply must surface, not be healed past: {err:?}"
+        );
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            1,
+            "a reboot must not be resent on a fresh dial"
         );
     }
 

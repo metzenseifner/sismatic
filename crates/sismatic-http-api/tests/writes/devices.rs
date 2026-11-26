@@ -55,7 +55,7 @@ async fn an_accepted_write_is_pending_and_no_device_was_contacted() {
 }
 
 /// The URL decides which intent is built, which is the whole reason the write
-/// surface is five routes and not one polymorphic endpoint.
+/// surface is six routes and not one polymorphic endpoint.
 #[tokio::test]
 async fn the_path_decides_the_intent() {
     let (address, outbox) = spawn_app();
@@ -65,6 +65,7 @@ async fn the_path_decides_the_intent() {
     post(&address, &url("/recording/start")).await;
     post(&address, &url("/recording/pause")).await;
     post(&address, &url("/recording/stop")).await;
+    post(&address, &url("/reboot")).await;
 
     let intents = recorded_intents(&outbox, DEVICE).await;
     assert_eq!(
@@ -83,6 +84,7 @@ async fn the_path_decides_the_intent() {
             Intent::StartRecording,
             Intent::PauseRecording,
             Intent::StopRecording,
+            Intent::Reboot,
         ]
     );
 }
@@ -167,6 +169,43 @@ async fn each_lifecycle_verb_is_refused_by_the_state_that_contradicts_it() {
     assert_eq!(body["rejection"], "already_paused", "{body}");
 }
 
+/// A reboot would end the take in progress, so it is refused while recording
+/// *and* while paused, and admitted again once the recording is stopped.
+#[tokio::test]
+async fn a_reboot_is_refused_while_a_recording_is_in_progress() {
+    let (address, outbox) = spawn_app();
+
+    post(&address, &url("/recording/start")).await;
+    let (status, location, body) = post(&address, &url("/reboot")).await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["rejection"], "recording_in_progress", "{body}");
+    assert_eq!(location, None, "a conflict is not a write");
+
+    post(&address, &url("/recording/pause")).await;
+    let (status, _, body) = post(&address, &url("/reboot")).await;
+    assert_eq!(
+        status, 409,
+        "a paused recording is still a recording: {body}"
+    );
+    assert_eq!(body["rejection"], "recording_in_progress", "{body}");
+
+    post(&address, &url("/recording/stop")).await;
+    let (status, location, body) = post(&address, &url("/reboot")).await;
+    assert_eq!(status, 202, "{body}");
+    assert!(location.is_some_and(|l| l.starts_with("/v1/writes/")));
+
+    assert_eq!(
+        recorded_intents(&outbox, DEVICE).await,
+        vec![
+            Intent::StartRecording,
+            Intent::PauseRecording,
+            Intent::StopRecording,
+            Intent::Reboot,
+        ],
+        "the refused reboots must not be in the log"
+    );
+}
+
 /// A refused submission must leave no trace. A 409 that still queued the
 /// write would dispatch the very write it just told the caller it refused.
 #[tokio::test]
@@ -215,7 +254,12 @@ async fn a_write_to_an_unconfigured_device_is_refused_at_submission() {
 async fn every_write_route_refuses_an_unconfigured_target() {
     let (address, _outbox) = spawn_app();
 
-    for path in ["/recording/start", "/recording/stop", "/recording/pause"] {
+    for path in [
+        "/recording/start",
+        "/recording/stop",
+        "/recording/pause",
+        "/reboot",
+    ] {
         let (status, ..) = post(&address, &format!("/devices/typo{path}")).await;
         assert_eq!(status, 404, "POST {path} was not guarded");
     }
@@ -244,6 +288,7 @@ async fn every_device_route_in_this_scope_refuses_a_device_group_id() {
         ("post", "/recording/start"),
         ("post", "/recording/stop"),
         ("post", "/recording/pause"),
+        ("post", "/reboot"),
         ("put", "/metadata/TITLE"),
         ("put", "/settings/TIMEZONE"),
     ] {

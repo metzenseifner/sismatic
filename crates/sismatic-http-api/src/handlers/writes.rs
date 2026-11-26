@@ -1,4 +1,4 @@
-//! The write routes: five ways to spell an [`Intent`], one way to submit it —
+//! The write routes: six ways to spell an [`Intent`], one way to submit it —
 //! addressed to a device or to a device group.
 //!
 //! Every path below is relative to the `/v1/writes` scope [`crate::startup`]
@@ -8,12 +8,14 @@
 //! POST /devices/{id}/recording/start      begin a recording
 //! POST /devices/{id}/recording/stop       end one
 //! POST /devices/{id}/recording/pause      suspend one
+//! POST /devices/{id}/reboot               restart the device
 //! PUT  /devices/{id}/metadata/{field}     write a metadata register
 //! PUT  /devices/{id}/settings/{field}     write a device setting
 //!
-//! POST /groups/{id}/recording/start       the same five, addressed to a
+//! POST /groups/{id}/recording/start       the same six, addressed to a
 //! POST /groups/{id}/recording/stop        device group
 //! POST /groups/{id}/recording/pause
+//! POST /groups/{id}/reboot
 //! PUT  /groups/{id}/metadata/{field}
 //! PUT  /groups/{id}/settings/{field}
 //!
@@ -27,17 +29,17 @@
 //!
 //! # Why "write" rather than "command"
 //!
-//! Three of the five verbs above are not commands. `SetMetadata` and
-//! `SetSetting` write a register; only the recording trio is a
+//! Two of the six verbs above are not commands. `SetMetadata` and
+//! `SetSetting` write a register; only the recording trio and the reboot are a
 //! `sismatic_core::protocol::instructions::commands::Command`, and that type
 //! keeps the word because down there it means one thing. Up here the word had
 //! been stretched to cover every accepted write, which left a caller reading
-//! `GET .../commands` no way to tell whether the list it got back was the three
-//! lifecycle verbs or everything the device had been told. A *write* is any
-//! row the outbox admitted; a *command* is one of three. [`WritesCatalog`]
+//! `GET .../commands` no way to tell whether the list it got back was the
+//! device verbs or everything the device had been told. A *write* is any
+//! row the outbox admitted; a *command* is one of four. [`WritesCatalog`]
 //! is where both words appear side by side and the distinction is finally
-//! visible: its `commands` list is the lifecycle verbs, and `metadata` and
-//! `settings` are the other two thirds of what a write can be.
+//! visible: its `commands` list is the device verbs, and `metadata` and
+//! `settings` are the rest of what a write can be.
 //!
 //! [`WritesCatalog`]: sismatic_api_types::WritesCatalog
 //!
@@ -49,7 +51,7 @@
 //! and a device id under `/v1/writes/groups` are both a `404` naming the URL that
 //! would have worked.
 //!
-//! The `/groups` write routes are not a second code path for that: all ten
+//! The `/groups` write routes are not a second code path for that: all twelve
 //! funnel into one private [`submit`] over an already-resolved target list, so
 //! there is still one path from an intent to a response, and the kind check is
 //! the only thing that differs between them.
@@ -78,19 +80,19 @@
 //! Every `202` carries a `Location: /v1/writes/{id}`, which is the route that
 //! answers what happened.
 //!
-//! # Why five routes rather than one `POST /writes`
+//! # Why six routes rather than one `POST /writes`
 //!
 //! One endpoint taking a polymorphic body would be fewer lines here and worse
 //! everywhere else. The classification of metadata-versus-setting would move
 //! from the URL into the body, so an access log would read `POST .../writes`
 //! for a title edit and for a recording start alike; the generated OpenAPI
-//! would have one operation with a `oneOf` body instead of five named ones; and
+//! would have one operation with a `oneOf` body instead of six named ones; and
 //! coarse authorization by path prefix — the cheapest way to let one credential
 //! start recordings and another edit metadata — would stop being possible. The
 //! `.wrap(YourAuthMiddleware::default())` placeholder in [`crate::startup`] is
 //! what makes that last point concrete rather than hypothetical.
 //!
-//! The multiplication is in the URL space only: all ten funnel into one
+//! The multiplication is in the URL space only: all twelve funnel into one
 //! private [`submit`], so there is one path from an intent to a response.
 //!
 //! # `{field}` is a parameter, as on the read side
@@ -191,6 +193,10 @@ impl actix_web::FromRequest for IdempotencyKey {
 const fn needs_rendezvous(intent: &Intent) -> bool {
     match intent {
         Intent::StartRecording | Intent::StopRecording | Intent::PauseRecording => true,
+        // A verb, but not one that gains from unison: nothing lines up across
+        // two rebooted recorders, and a rendezvous would only expose each
+        // member to a barrier timeout. Each reboots when its queue reaches it.
+        Intent::Reboot => false,
         Intent::SetMetadata { .. } | Intent::SetSetting { .. } => false,
     }
 }
@@ -266,18 +272,21 @@ async fn submit(
 
 /// The field a write names, or `None` for one that names none.
 ///
-/// The three recording verbs are the `None` case, and deliberately so: a
+/// The three recording verbs and the reboot are the `None` case, and deliberately so: a
 /// `disabled_fields` entry may only name a *field* — something a read can ask
 /// for or a write can address by name — and `STARTRECORDING` is a verb. A
 /// deployment that wants a recorder to stop recording removes it from the fleet
 /// rather than vetoing its verbs, which is why core's config layer refuses a
 /// `Command` name in that list in the first place.
 ///
-/// Wildcard-free, so a sixth [`Intent`] stops this compiling until someone has
+/// Wildcard-free, so a seventh [`Intent`] stops this compiling until someone has
 /// decided whether it carries a field.
 const fn field_of(intent: &Intent) -> Option<&String> {
     match intent {
-        Intent::StartRecording | Intent::StopRecording | Intent::PauseRecording => None,
+        Intent::StartRecording
+        | Intent::StopRecording
+        | Intent::PauseRecording
+        | Intent::Reboot => None,
         Intent::SetMetadata { field, .. } | Intent::SetSetting { field, .. } => Some(field),
     }
 }
@@ -539,6 +548,57 @@ pub async fn pause_recording(
         path.into_inner(),
         "recording/pause",
         Intent::PauseRecording,
+        key.0,
+    )
+    .await
+}
+
+/// `POST /v1/writes/devices/{id}/reboot` — restart one device.
+///
+/// Not beside the recording verbs: a reboot is not one, and a distinct
+/// prefix is what lets "may reboot devices" be authorized separately from "may
+/// start recordings" — see the module docs on coarse authorization by path.
+#[utoipa::path(
+    post,
+    path = "/devices/{id}/reboot",
+    context_path = "/v1/writes",
+    tag = "writes",
+    params(
+        ("id" = String, Path, description = "Device id."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    responses(
+        (status = 202, description = "Queued, not rebooted: no device has been contacted \
+             yet. The device drops its SSH session as it restarts and is unreachable \
+             until it has booted. A reboot is attempted once and never retried, because \
+             a lost acknowledgement most likely means the device did reboot — so a \
+             `failed` outcome means *unconfirmed*, not *did not happen*.",
+         body = Acceptance),
+        (status = 409, description = "A recording is in progress \
+             (`recording_in_progress`). Stop it first; a reboot would end the take.",
+         body = ApiError),
+        (status = 404, description = "No device has this id, or the id names a \
+             device group — which is refused here and carries the `/v1/writes/groups` URL \
+             that does the same thing. The catalog is the configured set, so both \
+             are claims about the devices file.",
+         body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn reboot(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn WriteSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<String>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    submit_device(
+        &**catalog,
+        &**port,
+        &stamp,
+        path.into_inner(),
+        "reboot",
+        Intent::Reboot,
         key.0,
     )
     .await
@@ -875,6 +935,48 @@ pub async fn pause_group_recording(
         path.into_inner(),
         "recording/pause",
         Intent::PauseRecording,
+        key.0,
+    )
+    .await
+}
+
+/// `POST /v1/writes/groups/{id}/reboot` — restart every member, with no
+/// rendezvous.
+#[utoipa::path(
+    post,
+    path = "/groups/{id}/reboot",
+    context_path = "/v1/writes",
+    tag = "writes",
+    params(
+        ("id" = String, Path, description = "Device group id."),
+        ("Idempotency-Key" = Option<String>, Header, description = "See the start route."),
+    ),
+    responses(
+        (status = 202, description = "Queued, one write per member, *without* a \
+             rendezvous: rebooting in unison buys nothing, so `batch` is null and each \
+             member reboots when its own queue reaches it. Each is attempted once and \
+             never retried; see the device route.", body = Acceptance),
+        (status = 409, description = "A member has a recording in progress \
+             (`recording_in_progress`), so the whole submission was refused rather than \
+             rebooting the members that happened to be idle.", body = ApiError),
+        (status = 404, description = "No device group has this id.", body = ApiError),
+        (status = 500, description = "The storage backend failed.", body = ApiError),
+    ),
+)]
+pub async fn reboot_group(
+    catalog: web::Data<dyn DeviceCatalog>,
+    port: web::Data<dyn WriteSubmit>,
+    stamp: web::Data<Stamp>,
+    path: web::Path<String>,
+    key: IdempotencyKey,
+) -> Result<HttpResponse, ApiFailure> {
+    submit_group(
+        &**catalog,
+        &**port,
+        &stamp,
+        path.into_inner(),
+        "reboot",
+        Intent::Reboot,
         key.0,
     )
     .await

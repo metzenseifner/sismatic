@@ -77,8 +77,8 @@ pub async fn field_catalog(fields: web::Data<FieldCatalog>) -> HttpResponse {
 ///
 /// Three lists, because the three are written through three different routes:
 /// `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
-/// `commands` are what the `recording/{verb}` routes send and are never spelled
-/// in a URL. See [`WritesCatalog`] for the rules that separate them.
+/// `commands` are what the `recording/{verb}` and `reboot` routes send and are
+/// never spelled in a URL. See [`WritesCatalog`] for the rules that separate them.
 #[utoipa::path(
     get,
     path = "",
@@ -90,9 +90,10 @@ pub async fn field_catalog(fields: web::Data<FieldCatalog>) -> HttpResponse {
              `PUT /v1/writes/devices/{id}/metadata/{field}` and are writable only \
              while nothing is recording; `settings` names go in the `{field}` of \
              `PUT /v1/writes/devices/{id}/settings/{field}` and are writable \
-             always. `commands` are the recording instructions behind \
-             `POST /v1/writes/devices/{id}/recording/start` and the two beside \
-             it — reported for completeness, not to be put in a URL.",
+             always. `commands` are the instructions behind \
+             `POST /v1/writes/devices/{id}/recording/start`, the two beside it, \
+             and `POST /v1/writes/devices/{id}/reboot` — reported for \
+             completeness, not to be put in a URL.",
          body = WritesCatalog),
     ),
 )]

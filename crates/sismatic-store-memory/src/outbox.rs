@@ -91,7 +91,7 @@ use sismatic_api_types::{
 use sismatic_store::group::{GroupState, expects};
 use sismatic_store::outbox::{
     BarrierPolicy, Claim, Outcome, Submission, SubmitError, Verb, WriteDrain, WriteLog,
-    WriteSubmit, admit, epoch_of, opens_recording, reconcile, rollback,
+    WriteSubmit, admit, epoch_of, opens_recording, reconcile, retryable, rollback,
 };
 use sismatic_store::{ReadError, WriteError};
 
@@ -827,7 +827,11 @@ impl WriteDrain for MemoryOutbox {
             Outcome::Succeeded(value) => {
                 record.status = WriteStatus::Succeeded { value };
             }
-            Outcome::Failed(_) if record.attempts < self.max_attempts() => {
+            // `retryable` before the budget: a reboot that failed most likely
+            // happened, so a second attempt would reboot the device again.
+            Outcome::Failed(_)
+                if retryable(Verb::of(&record.intent)) && record.attempts < self.max_attempts() =>
+            {
                 record.status = WriteStatus::Pending;
                 // Back onto the *front* of the queue: a retry must not be
                 // overtaken by writes submitted after it.
@@ -1339,6 +1343,52 @@ mod tests {
                 reason: "down".to_owned()
             }
         );
+    }
+
+    /// A failed reboot is terminal on its first attempt, budget or no budget,
+    /// and the write queued behind it is the next thing claimed.
+    #[tokio::test]
+    async fn a_failed_reboot_is_never_retried() {
+        let outbox = outbox();
+        submit(&outbox, "reboot", Intent::Reboot).await.unwrap();
+        submit(&outbox, "after", title("a")).await.unwrap();
+
+        dispatch(&outbox, Outcome::Failed("channel closed".into())).await;
+
+        let record = outbox.write("reboot".to_owned()).await.unwrap().unwrap();
+        assert_eq!(record.attempts, 1);
+        assert_eq!(
+            record.status,
+            WriteStatus::Failed {
+                reason: "channel closed".to_owned()
+            }
+        );
+        let next = outbox.claim_next(DEV.to_owned(), at(T0)).await.unwrap();
+        assert!(
+            matches!(next, Some(Claim::One(ref r)) if r.id == "after"),
+            "the reboot must not be re-queued ahead of the next write: {next:?}"
+        );
+    }
+
+    /// The refusal reaches the submitter, and nothing is queued.
+    #[tokio::test]
+    async fn a_reboot_is_refused_while_recording() {
+        let outbox = outbox();
+        submit(&outbox, "start", Intent::StartRecording)
+            .await
+            .unwrap();
+        let refused = submit(&outbox, "reboot", Intent::Reboot).await;
+        assert!(
+            matches!(
+                refused,
+                Err(SubmitError::Rejected {
+                    rejection: Rejection::RecordingInProgress,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(outbox.write("reboot".to_owned()).await.unwrap(), None);
     }
 
     #[tokio::test]

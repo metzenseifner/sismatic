@@ -4,7 +4,7 @@ use winnow::token::{literal, one_of, take_while};
 use winnow::{ModalResult, Parser};
 
 // ---- Query (gettable) enum ------------------------------------------------
-use crate::protocol::instructions::Instruction;
+use crate::protocol::instructions::{Instruction, Session};
 use crate::protocol::payload_helpers::{esc_cr, esc_rcdr, is_not_cr};
 use crate::protocol::states::RecordingState;
 use crate::protocol::{In, MacAddr, ParseFn, RecordingEvent, Step, Value, anchored, parser_of};
@@ -255,6 +255,7 @@ impl Query {
         Instruction {
             name: self.name().to_string(),
             payload,
+            session: Session::Preserved,
             parser,
         }
     }
