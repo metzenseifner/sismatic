@@ -142,6 +142,10 @@ class Sis:
         \"\"\"Write `value` into a metadata register (e.g. \\\"title\\\") on a device, or on a group (returns a dict keyed by member id).\"\"\"
         ...
 
+    def raw(self, target: str, payload: str, until: str = \"\\r\\n\") -> str | dict[str, str]:
+        \"\"\"EXPERIMENTAL: send `payload` verbatim; return the reply up to and including `until`. Not replay-safe on a warm connection.\"\"\"
+        ...
+
     def close(self) -> None:
         \"\"\"Close all SSH connections and shut the session down. Idempotent.\"\"\"
         ...
