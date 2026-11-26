@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/metzenseifner/sismatic/compare/v0.9.1...v0.10.0) - 2026-11-26
+
+### Added
+
+- *(core)* reboot device command
+- *(python)* Add support for raw sis in python
+
+### Other
+
+- Smp reboot ([#83](https://github.com/metzenseifner/sismatic/pull/83))
+
 ## [0.9.0](https://github.com/metzenseifner/sismatic/compare/v0.8.0...v0.9.0) - 2026-11-24
 
 ### Added
