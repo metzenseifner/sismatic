@@ -141,6 +141,14 @@ http:
 $ sismatic-server -c configuration.yaml
 ```
 
+or
+
+```
+$ nix develop
+$ pushd crates/sismatic-http-api/http-ui && pnpm build && popd
+$ cargo run --bin sismatic-server --features=ui -- -c crates/sismatic-server/tests/fixtures/configuration-all-fields.yaml
+```
+
 **4. Use it:**
 
 ```console
