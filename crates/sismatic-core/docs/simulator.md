@@ -252,6 +252,39 @@ two can collide and nothing has to be reserved. The report names the ports that 
 actually handed out — it is the only place to learn them, and they differ on every
 run, so pass a real base if you want them stable between restarts.
 
+### Pointing the server at it
+
+`sismatic-server` has the same two overrides on the dialing side, under names that
+leave its own `--host` (where the HTTP API listens) alone:
+
+| `simulated-fleet` | `sismatic-server` |
+| --- | --- |
+| `--host ADDR` | `--device-host ADDR` |
+| `--port-base N` | `--device-port-base N` |
+
+Both programs place devices through one function,
+`sismatic_core::devices::placement::Placement::place`, so the same document and the
+same pair of values put every device in the same place on both sides:
+
+```console
+$ simulated-fleet devices.yaml --host 127.0.0.1 --port-base 2401
+$ sismatic-server -c configuration.yaml --device-host 127.0.0.1 --device-port-base 2401
+```
+
+Three things differ, and each is deliberate:
+
+- **The server refuses `--device-port-base 0`.** For a listener, `0` means "kernel,
+  choose"; a client cannot follow that, so it would dial port 0.
+- **Only the dial address moves.** The API, `GET /v1/inventory`, exports and
+  persisted runtime state all keep the file's own address, so a test run cannot leak
+  `127.0.0.1` into a file that goes back to production. The server logs a warning at
+  startup, then one `device placement` line per device showing `declared` and
+  `dialed`.
+- **Ports are pinned per id, not re-counted.** The file's devices get `base + 0, 1,
+  2, …` in document order at startup. A device added at runtime takes the next port
+  after the highest one assigned, and a removed device's port is never reused, so the
+  remaining devices keep the ports the simulator gave them.
+
 ### What crosses over from the inventory, and what does not
 
 A devices file describes how a *server* should talk to recorders. Most of it is

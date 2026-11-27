@@ -66,6 +66,21 @@
 //! command line is not. See
 //! [the module docs](sismatic_server::configuration#relative-paths).
 //!
+//! `--device-host` and `--device-port-base` are the exception to all of the
+//! above: they have no config key and no environment variable, and they do not
+//! go through [`Overrides`]. They move where the server *dials* each device —
+//! the same rule, from the same code, as `simulated-fleet --host` and
+//! `--port-base` use to decide where each unit *listens* — so that a production
+//! devices file can be run against a simulated fleet on one machine:
+//!
+//! ```text
+//! simulated-fleet devices.yaml --host 127.0.0.1 --port-base 2301
+//! sismatic-server --device-host 127.0.0.1 --device-port-base 2301
+//! ```
+//!
+//! A testing aid, not a deployment setting, which is why neither the file nor
+//! the environment can reach it. See [`sismatic_core::devices::placement`].
+//!
 //! `inventory.runtime_config_path` has no flag. It names a file the server
 //! *writes*, and a command-line path would be anchored differently from the one
 //! in the document it is overriding — an ambiguity worth taking on for a file
@@ -84,6 +99,7 @@ use sismatic_server::telemetry::{get_subscriber, init_subscriber};
 use clap::{CommandFactory, Parser};
 use sismatic_core::devices::config;
 use sismatic_core::devices::config::RawConfig;
+use sismatic_core::devices::placement::Placement;
 use sismatic_http_api::ApiDoc;
 use sismatic_server::configuration::{CONFIG_PATH_ENV, ConfigSource, Overrides, ServerConfig};
 use sismatic_server::run;
@@ -112,6 +128,20 @@ struct Args {
     /// [env: SISMATIC_SERVER__HTTP__PORT] [default: from config, else 8080]
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Dial every device on this address instead of the one the devices file
+    /// gives it, e.g. 127.0.0.1. The device-side twin of `simulated-fleet
+    /// --host`; the API and any persisted state keep the file's address
+    #[arg(long, value_name = "ADDR")]
+    device_host: Option<String>,
+
+    /// Dial devices on consecutive ports from here, in devices-file order,
+    /// instead of their own. The twin of `simulated-fleet --port-base`; a
+    /// device added at runtime takes the next port after the file's
+    // `1..` rather than `u16`: the simulator's `--port-base 0` means "kernel,
+    // choose", which a client cannot follow — it would dial port 0.
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    device_port_base: Option<u16>,
 
     /// Print every environment variable this server accepts, as JSON, and exit
     // `exclusive` because this answers a question about the binary rather than
@@ -225,7 +255,16 @@ async fn main() -> Result<(), std::io::Error> {
 
     let devices = load_device_set(&cfg);
 
-    run(cfg, source, devices, shutdown_signal()).await
+    // Not part of `ConfigSource`: these place the *devices*, not the server, and
+    // no file or environment layer names them — they exist to run a production
+    // inventory against `simulated-fleet` on one machine. They are fixed for
+    // the life of the process, so a reload or an inventory reset keeps them.
+    let placement = Placement {
+        host: args.device_host,
+        port_base: args.device_port_base,
+    };
+
+    run(cfg, source, devices, placement, shutdown_signal()).await
 }
 
 /// Write the environment surface to stdout as JSON.

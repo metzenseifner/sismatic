@@ -56,6 +56,9 @@ use serde::Serialize;
 use sismatic_core::devices::config::{
     self, Barrier, ConfigError, DeviceConfig, GroupConfig, Password, Resolved,
 };
+// Shared with `sismatic-server`, which dials where this binds: one rule, so a
+// server pointed at the same document with the same two flags finds every unit.
+use sismatic_core::devices::placement::Placement;
 use sismatic_core::simulator::{
     DeviceState, Issue, Overrides, ReplyStream, SimulatedDevice, bind, canonical_name,
     catalog_streams,
@@ -309,32 +312,6 @@ impl UnitView {
     }
 }
 
-/// How to place a fleet: the two overrides, or neither.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Placement {
-    host: Option<String>,
-    port_base: Option<u16>,
-}
-
-impl Placement {
-    /// Where the `index`-th device of the document goes.
-    ///
-    /// Ports count from `port_base` in document order, with the one exception
-    /// the flag documents: a base of `0` places every unit on `0`, because
-    /// port 0 means "kernel, choose" and incrementing from it would ask for
-    /// real ports 1, 2, 3 — privileged, and not what anyone meant.
-    fn place(&self, declared: &Where, index: usize) -> Where {
-        Where {
-            host: self.host.clone().unwrap_or_else(|| declared.host.clone()),
-            port: match self.port_base {
-                None => declared.port,
-                Some(0) => 0,
-                Some(base) => base.saturating_add(index as u16),
-            },
-        }
-    }
-}
-
 /// Turn a resolved document into the fleet it describes.
 ///
 /// Placement, identity and credentials only. What each unit *answers* is its
@@ -351,7 +328,10 @@ fn plan(devices: &[DeviceConfig], placement: &Placement) -> Vec<Unit> {
             Unit {
                 id: device.id.clone(),
                 uuid: device.uuid.to_string(),
-                listening: placement.place(&declared, index),
+                listening: {
+                    let (host, port) = placement.place(&declared.host, declared.port, index);
+                    Where { host, port }
+                },
                 declared,
                 username: device.username.clone(),
                 password: device.password.clone(),

@@ -11,6 +11,24 @@ From within `sismatic-server`,
 cargo run -- -c configuration.yaml
 ```
 
+### Against a simulated fleet
+
+To run a production devices file locally, serve it with `simulated-fleet` and point
+the server at the simulator with the same two values:
+
+```console
+simulated-fleet devices.yaml --host 127.0.0.1 --port-base 2401
+cargo run -- -c configuration.yaml --device-host 127.0.0.1 --device-port-base 2401
+```
+
+`--device-host` dials every device on that address, and `--device-port-base` dials
+them on consecutive ports in devices-file order. Both use the simulator's own
+placement rule, so device *n* is dialed where unit *n* listens. Only the dial
+address changes; the API, exports and persisted state keep the file's addresses.
+These two flags have no config key or environment variable, because they are a
+testing aid rather than a deployment setting. See
+[the simulator docs](../sismatic-core/docs/simulator.md#pointing-the-server-at-it).
+
 ## Configuration
 
 By default, a `configuration.yaml` (or other toml) file is read from the current working directory. Optionally, you can provide input on the command line.
