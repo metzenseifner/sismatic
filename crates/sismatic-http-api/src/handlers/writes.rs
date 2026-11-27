@@ -555,9 +555,8 @@ pub async fn pause_recording(
 
 /// `POST /v1/writes/devices/{id}/reboot` — restart one device.
 ///
-/// Not beside the recording verbs: a reboot is not one, and a distinct
-/// prefix is what lets "may reboot devices" be authorized separately from "may
-/// start recordings" — see the module docs on coarse authorization by path.
+/// Restarts a device and marks any warm connection as stale so that
+/// any queued up instruction after the reboot instruction will wait for a new connection.
 #[utoipa::path(
     post,
     path = "/devices/{id}/reboot",
