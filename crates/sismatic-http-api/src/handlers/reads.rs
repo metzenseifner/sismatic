@@ -171,11 +171,8 @@ pub(crate) fn reject_conflicting_field(query: &ReadQuery, field: &str) -> Result
 /// `GET /v1/reads/devices/{id}/fields` — every field's most recent value for
 /// one device.
 ///
-/// An unknown device yields an empty list rather than a 404: the store cannot
-/// tell "no such device" from "this device has answered nothing yet", and
-/// answering 404 would report a device that is merely unreachable as one that is
-/// not configured. The device registry is the authority on existence, and it
-/// lives on the write side.
+/// An unknown device yields an empty list, not a `404`: the store cannot tell an
+/// unconfigured device from one that has not answered yet.
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields",
@@ -218,9 +215,7 @@ pub async fn list_fields(
 /// `GET /v1/reads/devices/{id}/fields/{field}` — one field's most recent
 /// value.
 ///
-/// A bare [`Read`] rather than a one-element list: the response answers a
-/// point question, and its `at` is the freshness of *this* value, which is the
-/// thing a caller checks before trusting it.
+/// A single [`Read`]; its `at` is when this value was read.
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}",
@@ -275,10 +270,8 @@ pub async fn read_field(
 /// `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&where=&filter=&limit=` —
 /// one field over time, oldest first.
 ///
-/// Every parameter is optional: omit the bounds for all of recorded history,
-/// omit `limit` for `DEFAULT_LIMIT`. An empty result is a `200` with an empty
-/// list, not a 404 — "nothing happened in that window" is an answer, and the
-/// same request over a wider span may well return rows.
+/// Every parameter is optional: omit the bounds for all recorded history, and
+/// `limit` for `DEFAULT_LIMIT`. An empty window is a `200` with an empty list.
 #[utoipa::path(
     get,
     path = "/devices/{id}/fields/{field}/history",

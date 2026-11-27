@@ -98,10 +98,8 @@ const DEFAULT_LIMIT: u32 = 100;
 /// `GET /v1/reads/devices?fields=&devices=&group=&where=&filter=&limit=&after=` —
 /// every configured device's latest values, one row per device, ordered by id.
 ///
-/// Every filter is optional: omit them all for the whole fleet with every field
-/// each device has reported. A device that is configured and has never answered
-/// is a row with an empty `latest` rather than an absent one — see the module
-/// docs for why that row is the point.
+/// Every filter is optional. A configured device that has never answered is
+/// listed with an empty `latest`.
 #[utoipa::path(
     get,
     path = "/devices",

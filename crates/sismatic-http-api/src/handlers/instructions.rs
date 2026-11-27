@@ -48,10 +48,9 @@ use sismatic_api_types::{FieldCatalog, WritesCatalog};
 
 /// `GET /v1/reads` — every field a read can be asked for.
 ///
-/// A field listed here is one this server knows how to *ask* a device for. It
-/// is not a promise that anything has: whether a field is polled, and how often,
-/// is the sync schedule's business, so a name can appear here and never appear
-/// under `GET /v1/reads/devices/{id}/fields`.
+/// Listed fields are ones this server can ask a device for. Whether one is polled
+/// is the sync schedule's business, so a listed field may never appear under
+/// `GET /v1/reads/devices/{id}/fields`.
 #[utoipa::path(
     get,
     path = "",
@@ -75,10 +74,9 @@ pub async fn field_catalog(fields: web::Data<FieldCatalog>) -> HttpResponse {
 /// `GET /v1/writes` — every command, metadata register, and setting a write can
 /// name.
 ///
-/// Three lists, because the three are written through three different routes:
-/// `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
-/// `commands` are what the `recording/{verb}` and `reboot` routes send and are
-/// never spelled in a URL. See [`WritesCatalog`] for the rules that separate them.
+/// `metadata` and `settings` are the `{field}` of their `PUT` routes; `commands`
+/// are sent by the `recording/{verb}` and `reboot` routes and never appear in a
+/// URL. See [`WritesCatalog`].
 #[utoipa::path(
     get,
     path = "",
