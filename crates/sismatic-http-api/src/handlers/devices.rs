@@ -223,26 +223,13 @@ pub async fn read_device(
 
 /// `POST /v1/inventory/devices` — add a device to the running fleet.
 ///
-/// The change takes effect immediately: poll loops start for the new device's
-/// fields, the relay gains a task for its queue, and if it is `eager` the
-/// keepalive opens its connection. Nothing else in the fleet is disturbed.
+/// Takes effect immediately: poll loops start for its fields, the relay gains a
+/// task for its queue, and an `eager` device opens its connection. Other devices
+/// are undisturbed.
 ///
-/// **The devices file is never written**, whatever else happens — it stays the
-/// thing a deployment can put in version control, which is the same contract
-/// `PATCH /v1/config` keeps for settings.
-///
-/// Whether the change *survives a restart* is a second question, and the answer
-/// is the deployment's `inventory.runtime_config_path`:
-///
-/// * **Unset**, the default: it does not. A restart returns to whatever the
-///   devices file says. An operator who wants the device back puts it there —
-///   `GET /v1/inventory/config/export` renders the running fleet in a form the
-///   file accepts.
-/// * **Set**: it does. The whole document is written to that path after every
-///   change, and that file is what the next startup loads *instead of* the
-///   devices file. Which is worth knowing in both directions: a fleet edited
-///   here survives, and an edit made to the devices file meanwhile does not take
-///   effect until `POST /v1/inventory/config/reset` adopts it.
+/// The devices file is never written. The addition survives a restart only when
+/// `inventory.runtime_config_path` is set: the whole fleet is then written there
+/// after every change and loaded at startup *instead of* the devices file.
 #[utoipa::path(
     post,
     path = "/devices",
@@ -273,18 +260,10 @@ pub async fn add_device(
 
 /// `PUT /v1/inventory/devices/{id}` — replace a device wholesale.
 ///
-/// A device is immutable, so this does not edit one: it builds a *different*
-/// device with a different [`uuid`] and swaps it in. The consequence worth
-/// knowing is that the device's SSH session is dropped and re-opened, because
-/// the connection belonged to the configuration that is being replaced.
-///
-/// What survives is everything filed under the *id*: its stored reads, its
-/// queued writes, and what the server has learned about which fields it
-/// refuses — that last being evidence about the recorder at that address, not
-/// about the configuration used to reach it.
-///
-/// Every key the body omits takes the server's default rather than the previous
-/// device's value. Read the device first and send back what you want kept.
+/// Swaps in a new device with a new [`uuid`], dropping and reopening its SSH
+/// session. Its stored reads, queued writes and learned field vetoes are keyed by
+/// id and carry over. Keys the body omits take the server default, not the
+/// previous value.
 ///
 /// [`uuid`]: sismatic_api_types::DeviceSummary::uuid
 #[utoipa::path(
@@ -315,21 +294,11 @@ pub async fn replace_device(
 
 /// `DELETE /v1/inventory/devices/{id}` — take a device out of the fleet.
 ///
-/// More than a deletion, because a device that leaves strands things behind.
-/// The implementation stops that device's poll loops and relay task, cancels
-/// every write still queued for it, and — only if the deployment's
-/// `store.cleanup_on_remove` says so — drops its recorded reads. The body
-/// reports both counts, so an operator can tell an idle recorder from one that
-/// had eleven queued writes.
+/// Stops its poll loops and relay task, cancels its queued writes, and drops its
+/// recorded reads if `store.cleanup_on_remove` is set; the body reports both
+/// counts. Cancelled writes stay readable at `GET /v1/writes/{id}` as `canceled`.
 ///
-/// Cancelled writes stay readable at `GET /v1/writes/{id}`, reporting
-/// `canceled`. Purging them would turn a caller's poll into a `404` and destroy
-/// the evidence the cancellation created.
-///
-/// **A device a group still names is refused.** Cascading would silently change
-/// what that group means, and a group quietly losing a member is the same
-/// half-a-recording failure the write side's barrier defaults against — so the
-/// group is edited first, and the message says so.
+/// Refused while any group names the device.
 #[utoipa::path(
     delete,
     path = "/devices/{id}",
@@ -357,33 +326,16 @@ pub async fn remove_device(
 /// `GET /v1/inventory/config/export` — the running configuration as a devices
 /// file.
 ///
-/// The answer to what a runtime-mutable fleet costs: changes made through this
-/// scope never reach the devices file, so without this there would be no way to
-/// get them back into one. The body is text in the format asked for, and saving
-/// it under that extension produces a file the loader reads unchanged.
+/// The whole document — `[defaults]`, every `[[device]]` and every `[[group]]` —
+/// as text in the requested format. This is how runtime changes get back into a
+/// devices file; the `inventory.runtime_config_path` state file is not for
+/// editing.
 ///
-/// That holds whether or not `inventory.runtime_config_path` is set. A
-/// deployment with
-/// one persists its changes and they survive a restart — but to a *state* file,
-/// which is the server's to write and not a thing anyone edits or reviews. This
-/// route is how the running fleet becomes a devices file again: one a human
-/// reads, a repository holds, and `POST /v1/inventory/config/reset` adopts.
-///
-/// It is the whole document — `[defaults]`, every `[[device]]` and every
-/// `[[group]]` — because that is what "loads back as the same fleet" requires.
-/// A group left out would take its members' ability to act together with it.
-///
-/// **Credentials are omitted unless `include_secrets` is set**, so the default
-/// export is not directly loadable and that is deliberate: it lands in shell
-/// history, ticket attachments and CI logs, where a plaintext recorder password
-/// outlives every process that could have rotated it. The credentials come back
-/// from `[defaults]`, an environment variable, or a secret store.
-///
-/// `promote_auto_disabled_fields_to_disabled_fields` closes the discovery loop.
-/// The fleet works out which fields a recorder refuses; this writes those
-/// findings into the document as *declared* vetoes; committing the result makes
-/// them permanent and free, since a declared veto starts no poll loop at all
-/// where an inferred one costs a timer tick per interval.
+/// Credentials are omitted unless `include_secrets` is set, so by default the
+/// export loads only once credentials come from `[defaults]`, the environment, or
+/// a secret store. `promote_auto_disabled_fields_to_disabled_fields` writes the
+/// fields the fleet has learned a recorder refuses as declared vetoes, which
+/// start no poll loop.
 #[utoipa::path(
     get,
     path = "/config/export",
@@ -423,17 +375,10 @@ pub async fn export_config(
 /// `POST /v1/inventory/config/reset` — discard runtime changes and adopt the
 /// file.
 ///
-/// Every add, replace and remove since startup is undone at once, and what is
-/// left is exactly what the devices file describes. The escape hatch for a fleet
-/// that has drifted — and the one operation that makes the file authoritative
-/// again without a restart.
-///
-/// It is a whole-fleet `apply`, so the same rules hold as for any other: a
-/// device the file and the running fleet agree on keeps its warm SSH session and
-/// its learned vetoes, and only what actually differs is disturbed. Devices the
-/// file does not describe are *removed*, which cancels their queued writes — so
-/// this can strand work in the same way a `DELETE` does, and reports the fleet
-/// it ended with so a caller can see what happened.
+/// Undoes every runtime add, replace and remove, leaving exactly what the devices
+/// file describes. Devices both agree on keep their SSH session and learned
+/// vetoes; devices the file omits are removed, which cancels their queued writes
+/// as a `DELETE` does. Returns the resulting fleet.
 #[utoipa::path(
     post,
     path = "/config/reset",
@@ -474,10 +419,8 @@ pub async fn list_groups(catalog: web::Data<dyn DeviceCatalog>) -> web::Json<Gro
 
 /// `POST /v1/inventory/groups` — add a device group to the running fleet.
 ///
-/// A group is a name over devices that already exist plus a policy for what
-/// happens when they cannot act together. Every member must resolve, and the id
-/// must be free in the namespace devices and groups share — both refused here
-/// rather than discovered at the first write addressed to it.
+/// Every member must be a configured device, and the id must not already name a
+/// device or a group.
 #[utoipa::path(
     post,
     path = "/groups",
@@ -507,10 +450,8 @@ pub async fn add_group(
 
 /// `PUT /v1/inventory/groups/{id}` — replace a device group wholesale.
 ///
-/// `devices` replaces the membership entirely rather than adding to it, so
-/// removing a member is sending the list without it. The same replace-not-merge
-/// contract the device route has, and the one most likely to surprise here:
-/// there is no "add a member" verb because there is no partial update.
+/// `devices` replaces the membership; to remove a member, send the list without
+/// it. There is no partial update.
 #[utoipa::path(
     put,
     path = "/groups/{id}",
@@ -540,14 +481,9 @@ pub async fn replace_group(
 
 /// `DELETE /v1/inventory/groups/{id}` — take a device group out of the fleet.
 ///
-/// Strands nothing, which is what makes it different from removing a device. A
-/// group owns no queue: a write addressed to one is expanded into per-device
-/// rows at submission, so what was accepted is owed to devices that still exist
-/// and still dispatches. What goes with the group is the record of what it was
-/// last told.
-///
-/// It is also the route that clears the way for a device removal, which is
-/// refused while any group still names the device.
+/// Cancels nothing: a group write is expanded into per-device writes at
+/// submission, and those still dispatch. Drops the record of what the group was
+/// last told. Unblocks removing a device the group named.
 #[utoipa::path(
     delete,
     path = "/groups/{id}",

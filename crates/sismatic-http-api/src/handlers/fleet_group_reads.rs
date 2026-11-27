@@ -103,10 +103,8 @@ use crate::query::{Check, Query};
 /// `GET /v1/reads/groups?fields=&groups=&where=&sync=&limit=&after=` — every
 /// configured device group's state, one row per group, ordered by id.
 ///
-/// Every filter is optional: omit them all for every group with every field it
-/// knows about. A configured group no member of which has ever answered is a row
-/// with an empty `fields` rather than an absent one, for the reason the device
-/// index lists a silent device.
+/// Every filter is optional. A group no member has answered for is listed with an
+/// empty `fields`.
 #[utoipa::path(
     get,
     path = "/groups",

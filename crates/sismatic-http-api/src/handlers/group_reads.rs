@@ -84,11 +84,7 @@ use crate::query::Query;
 /// `GET /v1/reads/groups/{id}/fields` — every field any member has reported
 /// or the group has been told about, with each member's latest value.
 ///
-/// The field set is the *union* of the two: a field only some members have
-/// reported still appears (with `null` for the silent ones, which is the point
-/// — a member that stopped reporting is the finding), and so does a field the
-/// group was told to set but no member has answered on yet, which is what a
-/// write that reached nobody looks like.
+/// A member with no value for a listed field shows `null`.
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields",
@@ -251,9 +247,8 @@ pub(crate) fn rolled_up(fields: &[GroupFieldState]) -> GroupSyncState {
 /// `GET /v1/reads/groups/{id}/fields/{field}` — one field across the whole
 /// group.
 ///
-/// The route a dashboard polls to answer "is this device group recording?", and
-/// the one place the two comparisons are both in view: `sync` against what was
-/// asked, `uniform` against each other.
+/// `sync` compares the members against what the group was told; `uniform`
+/// compares them against each other.
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields/{field}",
@@ -310,12 +305,8 @@ pub async fn read_group_field(
 /// `GET /v1/reads/groups/{id}/fields/{field}/history?start=&end=&limit=` —
 /// one field over time, one series per member.
 ///
-/// `limit` is **per member**, not per response: a caller asking for the last
-/// hundred points of `RUNNING_STATE` in a five-member device group wants a
-/// hundred points each, and a shared budget would return whichever member the
-/// loop reached first. The response is therefore bounded by `limit × members`
-/// rather than by `limit`, which is the honest cost of asking one question of
-/// five devices.
+/// `limit` applies per member, so the response holds up to `limit × members`
+/// points.
 #[utoipa::path(
     get,
     path = "/groups/{id}/fields/{field}/history",

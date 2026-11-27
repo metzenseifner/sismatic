@@ -13,30 +13,8 @@ export interface paths {
         };
         /**
          * `GET /health_check` — is this process alive and serving?
-         * @description Answers `200 OK` with an empty body, and the status *is* the payload. A
-         *     probe — a load balancer deciding whether to keep sending traffic here, a
-         *     supervisor deciding whether to restart the process, a deployment script
-         *     waiting for the new version to come up — reads a status code, and a body
-         *     would only add a shape to parse and a schema to version for a question whose
-         *     answer is one bit.
-         *
-         *     # Liveness, not readiness
-         *
-         *     The signature is the contract: no extractors, so no state, so nothing this
-         *     handler can consult and nothing it can be slow because of. It answers exactly
-         *     one question — *did this process reach the point of accepting and routing a
-         *     request?* — and that question is answerable by having answered it.
-         *
-         *     The store is deliberately not consulted, even though [`run`] does put it
-         *     within reach. A health check that read from the store would report a store
-         *     outage as *this process is dead*, and the supervisor watching this endpoint
-         *     would answer a dependency's failure by killing a process that is working
-         *     perfectly — turning one fault into two. Which devices are reachable, and how
-         *     stale their last reads are, are real questions and belong on real routes
-         *     over the store, where a caller can ask about a device rather than about the
-         *     server.
-         *
-         *     [`run`]: crate::run
+         * @description `200 OK` with an empty body. Liveness only: it consults no state, the store
+         *     included, so a store outage does not read as a dead process.
          */
         get: operations["health_check"];
         put?: never;
@@ -56,11 +34,8 @@ export interface paths {
         };
         /**
          * `GET /v1/config` — every setting this server is running under.
-         * @description The body is a complete statement rather than a diff against the built-in
-         *     defaults: a setting nobody has ever named appears here at the value it
-         *     resolved to, so the answer to "what is this process actually doing" needs no
-         *     second document beside it. It is also a valid `PATCH` body, which is what
-         *     makes read-modify-write safe to script.
+         * @description Every setting appears at its resolved value, defaults included. The body is
+         *     also a valid `PATCH /v1/config` body.
          */
         get: operations["read_config"];
         put?: never;
@@ -70,10 +45,8 @@ export interface paths {
         head?: never;
         /**
          * `PATCH /v1/config` — change some of the settings, leaving the rest alone.
-         * @description Applied whole or not at all, and applied *live*: by the time the response is
-         *     written, the poll loops are on the new schedule and the sweeper on the new
-         *     window. The body that comes back is every setting as it now stands, so a
-         *     caller never has to re-read to see what its own request produced.
+         * @description Applied atomically and live: poll loops and the sweeper are on the new values
+         *     before the response is written. Returns every setting as it now stands.
          */
         patch: operations["patch_config"];
         trace?: never;
@@ -89,11 +62,8 @@ export interface paths {
         put?: never;
         /**
          * `POST /v1/config/reload` — read the config file again and apply what it says.
-         * @description The route a mounted ConfigMap is picked up by. It takes no body: the file —
-         *     with the environment and the command line layered over it exactly as at
-         *     startup — is the whole of what it reads, so there is nothing for a caller to
-         *     state and no way for a request to disagree with the file it is asking the
-         *     server to honour.
+         * @description Takes no body. Resolves the file with the environment and command line
+         *     layered over it, as at startup, and applies the result live.
          */
         post: operations["reload_config"];
         delete?: never;
@@ -112,33 +82,16 @@ export interface paths {
         /**
          * `GET /v1/inventory/config/export` — the running configuration as a devices
          *     file.
-         * @description The answer to what a runtime-mutable fleet costs: changes made through this
-         *     scope never reach the devices file, so without this there would be no way to
-         *     get them back into one. The body is text in the format asked for, and saving
-         *     it under that extension produces a file the loader reads unchanged.
+         * @description The whole document — `[defaults]`, every `[[device]]` and every `[[group]]` —
+         *     as text in the requested format. This is how runtime changes get back into a
+         *     devices file; the `inventory.runtime_config_path` state file is not for
+         *     editing.
          *
-         *     That holds whether or not `inventory.runtime_config_path` is set. A
-         *     deployment with
-         *     one persists its changes and they survive a restart — but to a *state* file,
-         *     which is the server's to write and not a thing anyone edits or reviews. This
-         *     route is how the running fleet becomes a devices file again: one a human
-         *     reads, a repository holds, and `POST /v1/inventory/config/reset` adopts.
-         *
-         *     It is the whole document — `[defaults]`, every `[[device]]` and every
-         *     `[[group]]` — because that is what "loads back as the same fleet" requires.
-         *     A group left out would take its members' ability to act together with it.
-         *
-         *     **Credentials are omitted unless `include_secrets` is set**, so the default
-         *     export is not directly loadable and that is deliberate: it lands in shell
-         *     history, ticket attachments and CI logs, where a plaintext recorder password
-         *     outlives every process that could have rotated it. The credentials come back
-         *     from `[defaults]`, an environment variable, or a secret store.
-         *
-         *     `promote_auto_disabled_fields_to_disabled_fields` closes the discovery loop.
-         *     The fleet works out which fields a recorder refuses; this writes those
-         *     findings into the document as *declared* vetoes; committing the result makes
-         *     them permanent and free, since a declared veto starts no poll loop at all
-         *     where an inferred one costs a timer tick per interval.
+         *     Credentials are omitted unless `include_secrets` is set, so by default the
+         *     export loads only once credentials come from `[defaults]`, the environment, or
+         *     a secret store. `promote_auto_disabled_fields_to_disabled_fields` writes the
+         *     fields the fleet has learned a recorder refuses as declared vetoes, which
+         *     start no poll loop.
          */
         get: operations["export_config"];
         put?: never;
@@ -161,17 +114,10 @@ export interface paths {
         /**
          * `POST /v1/inventory/config/reset` — discard runtime changes and adopt the
          *     file.
-         * @description Every add, replace and remove since startup is undone at once, and what is
-         *     left is exactly what the devices file describes. The escape hatch for a fleet
-         *     that has drifted — and the one operation that makes the file authoritative
-         *     again without a restart.
-         *
-         *     It is a whole-fleet `apply`, so the same rules hold as for any other: a
-         *     device the file and the running fleet agree on keeps its warm SSH session and
-         *     its learned vetoes, and only what actually differs is disturbed. Devices the
-         *     file does not describe are *removed*, which cancels their queued writes — so
-         *     this can strand work in the same way a `DELETE` does, and reports the fleet
-         *     it ended with so a caller can see what happened.
+         * @description Undoes every runtime add, replace and remove, leaving exactly what the devices
+         *     file describes. Devices both agree on keep their SSH session and learned
+         *     vetoes; devices the file omits are removed, which cancels their queued writes
+         *     as a `DELETE` does. Returns the resulting fleet.
          */
         post: operations["reset_config"];
         delete?: never;
@@ -192,26 +138,13 @@ export interface paths {
         put?: never;
         /**
          * `POST /v1/inventory/devices` — add a device to the running fleet.
-         * @description The change takes effect immediately: poll loops start for the new device's
-         *     fields, the relay gains a task for its queue, and if it is `eager` the
-         *     keepalive opens its connection. Nothing else in the fleet is disturbed.
+         * @description Takes effect immediately: poll loops start for its fields, the relay gains a
+         *     task for its queue, and an `eager` device opens its connection. Other devices
+         *     are undisturbed.
          *
-         *     **The devices file is never written**, whatever else happens — it stays the
-         *     thing a deployment can put in version control, which is the same contract
-         *     `PATCH /v1/config` keeps for settings.
-         *
-         *     Whether the change *survives a restart* is a second question, and the answer
-         *     is the deployment's `inventory.runtime_config_path`:
-         *
-         *     * **Unset**, the default: it does not. A restart returns to whatever the
-         *       devices file says. An operator who wants the device back puts it there —
-         *       `GET /v1/inventory/config/export` renders the running fleet in a form the
-         *       file accepts.
-         *     * **Set**: it does. The whole document is written to that path after every
-         *       change, and that file is what the next startup loads *instead of* the
-         *       devices file. Which is worth knowing in both directions: a fleet edited
-         *       here survives, and an edit made to the devices file meanwhile does not take
-         *       effect until `POST /v1/inventory/config/reset` adopts it.
+         *     The devices file is never written. The addition survives a restart only when
+         *     `inventory.runtime_config_path` is set: the whole fleet is then written there
+         *     after every change and loaded at startup *instead of* the devices file.
          */
         post: operations["add_device"];
         delete?: never;
@@ -234,18 +167,10 @@ export interface paths {
         get: operations["read_device"];
         /**
          * `PUT /v1/inventory/devices/{id}` — replace a device wholesale.
-         * @description A device is immutable, so this does not edit one: it builds a *different*
-         *     device with a different [`uuid`] and swaps it in. The consequence worth
-         *     knowing is that the device's SSH session is dropped and re-opened, because
-         *     the connection belonged to the configuration that is being replaced.
-         *
-         *     What survives is everything filed under the *id*: its stored reads, its
-         *     queued writes, and what the server has learned about which fields it
-         *     refuses — that last being evidence about the recorder at that address, not
-         *     about the configuration used to reach it.
-         *
-         *     Every key the body omits takes the server's default rather than the previous
-         *     device's value. Read the device first and send back what you want kept.
+         * @description Swaps in a new device with a new [`uuid`], dropping and reopening its SSH
+         *     session. Its stored reads, queued writes and learned field vetoes are keyed by
+         *     id and carry over. Keys the body omits take the server default, not the
+         *     previous value.
          *
          *     [`uuid`]: sismatic_api_types::DeviceSummary::uuid
          */
@@ -253,21 +178,11 @@ export interface paths {
         post?: never;
         /**
          * `DELETE /v1/inventory/devices/{id}` — take a device out of the fleet.
-         * @description More than a deletion, because a device that leaves strands things behind.
-         *     The implementation stops that device's poll loops and relay task, cancels
-         *     every write still queued for it, and — only if the deployment's
-         *     `store.cleanup_on_remove` says so — drops its recorded reads. The body
-         *     reports both counts, so an operator can tell an idle recorder from one that
-         *     had eleven queued writes.
+         * @description Stops its poll loops and relay task, cancels its queued writes, and drops its
+         *     recorded reads if `store.cleanup_on_remove` is set; the body reports both
+         *     counts. Cancelled writes stay readable at `GET /v1/writes/{id}` as `canceled`.
          *
-         *     Cancelled writes stay readable at `GET /v1/writes/{id}`, reporting
-         *     `canceled`. Purging them would turn a caller's poll into a `404` and destroy
-         *     the evidence the cancellation created.
-         *
-         *     **A device a group still names is refused.** Cascading would silently change
-         *     what that group means, and a group quietly losing a member is the same
-         *     half-a-recording failure the write side's barrier defaults against — so the
-         *     group is edited first, and the message says so.
+         *     Refused while any group names the device.
          */
         delete: operations["remove_device"];
         options?: never;
@@ -287,10 +202,8 @@ export interface paths {
         put?: never;
         /**
          * `POST /v1/inventory/groups` — add a device group to the running fleet.
-         * @description A group is a name over devices that already exist plus a policy for what
-         *     happens when they cannot act together. Every member must resolve, and the id
-         *     must be free in the namespace devices and groups share — both refused here
-         *     rather than discovered at the first write addressed to it.
+         * @description Every member must be a configured device, and the id must not already name a
+         *     device or a group.
          */
         post: operations["add_group"];
         delete?: never;
@@ -310,23 +223,16 @@ export interface paths {
         get: operations["read_group"];
         /**
          * `PUT /v1/inventory/groups/{id}` — replace a device group wholesale.
-         * @description `devices` replaces the membership entirely rather than adding to it, so
-         *     removing a member is sending the list without it. The same replace-not-merge
-         *     contract the device route has, and the one most likely to surprise here:
-         *     there is no "add a member" verb because there is no partial update.
+         * @description `devices` replaces the membership; to remove a member, send the list without
+         *     it. There is no partial update.
          */
         put: operations["replace_group"];
         post?: never;
         /**
          * `DELETE /v1/inventory/groups/{id}` — take a device group out of the fleet.
-         * @description Strands nothing, which is what makes it different from removing a device. A
-         *     group owns no queue: a write addressed to one is expanded into per-device
-         *     rows at submission, so what was accepted is owed to devices that still exist
-         *     and still dispatches. What goes with the group is the record of what it was
-         *     last told.
-         *
-         *     It is also the route that clears the way for a device removal, which is
-         *     refused while any group still names the device.
+         * @description Cancels nothing: a group write is expanded into per-device writes at
+         *     submission, and those still dispatch. Drops the record of what the group was
+         *     last told. Unblocks removing a device the group named.
          */
         delete: operations["remove_group"];
         options?: never;
@@ -343,10 +249,9 @@ export interface paths {
         };
         /**
          * `GET /v1/reads` — every field a read can be asked for.
-         * @description A field listed here is one this server knows how to *ask* a device for. It
-         *     is not a promise that anything has: whether a field is polled, and how often,
-         *     is the sync schedule's business, so a name can appear here and never appear
-         *     under `GET /v1/reads/devices/{id}/fields`.
+         * @description Listed fields are ones this server can ask a device for. Whether one is polled
+         *     is the sync schedule's business, so a listed field may never appear under
+         *     `GET /v1/reads/devices/{id}/fields`.
          */
         get: operations["field_catalog"];
         put?: never;
@@ -367,10 +272,8 @@ export interface paths {
         /**
          * `GET /v1/reads/devices?fields=&devices=&group=&where=&filter=&limit=&after=` —
          *     every configured device's latest values, one row per device, ordered by id.
-         * @description Every filter is optional: omit them all for the whole fleet with every field
-         *     each device has reported. A device that is configured and has never answered
-         *     is a row with an empty `latest` rather than an absent one — see the module
-         *     docs for why that row is the point.
+         * @description Every filter is optional. A configured device that has never answered is
+         *     listed with an empty `latest`.
          */
         get: operations["list_fleet"];
         put?: never;
@@ -391,11 +294,8 @@ export interface paths {
         /**
          * `GET /v1/reads/devices/{id}/fields` — every field's most recent value for
          *     one device.
-         * @description An unknown device yields an empty list rather than a 404: the store cannot
-         *     tell "no such device" from "this device has answered nothing yet", and
-         *     answering 404 would report a device that is merely unreachable as one that is
-         *     not configured. The device registry is the authority on existence, and it
-         *     lives on the write side.
+         * @description An unknown device yields an empty list, not a `404`: the store cannot tell an
+         *     unconfigured device from one that has not answered yet.
          */
         get: operations["list_fields"];
         put?: never;
@@ -416,9 +316,7 @@ export interface paths {
         /**
          * `GET /v1/reads/devices/{id}/fields/{field}` — one field's most recent
          *     value.
-         * @description A bare [`Read`] rather than a one-element list: the response answers a
-         *     point question, and its `at` is the freshness of *this* value, which is the
-         *     thing a caller checks before trusting it.
+         * @description A single [`Read`]; its `at` is when this value was read.
          */
         get: operations["read_field"];
         put?: never;
@@ -439,10 +337,8 @@ export interface paths {
         /**
          * `GET /v1/reads/devices/{id}/fields/{field}/history?start=&end=&where=&filter=&limit=` —
          *     one field over time, oldest first.
-         * @description Every parameter is optional: omit the bounds for all of recorded history,
-         *     omit `limit` for `DEFAULT_LIMIT`. An empty result is a `200` with an empty
-         *     list, not a 404 — "nothing happened in that window" is an answer, and the
-         *     same request over a wider span may well return rows.
+         * @description Every parameter is optional: omit the bounds for all recorded history, and
+         *     `limit` for `DEFAULT_LIMIT`. An empty window is a `200` with an empty list.
          */
         get: operations["field_history"];
         put?: never;
@@ -463,10 +359,8 @@ export interface paths {
         /**
          * `GET /v1/reads/groups?fields=&groups=&where=&sync=&limit=&after=` — every
          *     configured device group's state, one row per group, ordered by id.
-         * @description Every filter is optional: omit them all for every group with every field it
-         *     knows about. A configured group no member of which has ever answered is a row
-         *     with an empty `fields` rather than an absent one, for the reason the device
-         *     index lists a silent device.
+         * @description Every filter is optional. A group no member has answered for is listed with an
+         *     empty `fields`.
          */
         get: operations["list_fleet_groups"];
         put?: never;
@@ -487,11 +381,7 @@ export interface paths {
         /**
          * `GET /v1/reads/groups/{id}/fields` — every field any member has reported
          *     or the group has been told about, with each member's latest value.
-         * @description The field set is the *union* of the two: a field only some members have
-         *     reported still appears (with `null` for the silent ones, which is the point
-         *     — a member that stopped reporting is the finding), and so does a field the
-         *     group was told to set but no member has answered on yet, which is what a
-         *     write that reached nobody looks like.
+         * @description A member with no value for a listed field shows `null`.
          */
         get: operations["list_group_fields"];
         put?: never;
@@ -512,9 +402,8 @@ export interface paths {
         /**
          * `GET /v1/reads/groups/{id}/fields/{field}` — one field across the whole
          *     group.
-         * @description The route a dashboard polls to answer "is this device group recording?", and
-         *     the one place the two comparisons are both in view: `sync` against what was
-         *     asked, `uniform` against each other.
+         * @description `sync` compares the members against what the group was told; `uniform`
+         *     compares them against each other.
          */
         get: operations["read_group_field"];
         put?: never;
@@ -535,12 +424,8 @@ export interface paths {
         /**
          * `GET /v1/reads/groups/{id}/fields/{field}/history?start=&end=&limit=` —
          *     one field over time, one series per member.
-         * @description `limit` is **per member**, not per response: a caller asking for the last
-         *     hundred points of `RUNNING_STATE` in a five-member device group wants a
-         *     hundred points each, and a shared budget would return whichever member the
-         *     loop reached first. The response is therefore bounded by `limit × members`
-         *     rather than by `limit`, which is the honest cost of asking one question of
-         *     five devices.
+         * @description `limit` applies per member, so the response holds up to `limit × members`
+         *     points.
          */
         get: operations["group_field_history"];
         put?: never;
@@ -561,10 +446,9 @@ export interface paths {
         /**
          * `GET /v1/writes` — every command, metadata register, and setting a write can
          *     name.
-         * @description Three lists, because the three are written through three different routes:
-         *     `metadata` and `settings` are the `{field}` of their respective `PUT`s, while
-         *     `commands` are what the `recording/{verb}` and `reboot` routes send and are
-         *     never spelled in a URL. See [`WritesCatalog`] for the rules that separate them.
+         * @description `metadata` and `settings` are the `{field}` of their `PUT` routes; `commands`
+         *     are sent by the `recording/{verb}` and `reboot` routes and never appear in a
+         *     URL. See [`WritesCatalog`].
          */
         get: operations["writes_catalog"];
         put?: never;
@@ -626,9 +510,10 @@ export interface paths {
         put?: never;
         /**
          * `POST /v1/writes/devices/{id}/reboot` — restart one device.
-         * @description Not beside the recording verbs: a reboot is not one, and a distinct
-         *     prefix is what lets "may reboot devices" be authorized separately from "may
-         *     start recordings" — see the module docs on coarse authorization by path.
+         * @description Queues a reboot. The relay checks that no recording has started before
+         *     sending it. Once the device acknowledges, its SSH connection is discarded, so
+         *     the next exchange (a later write or a poll) dials a new session instead of
+         *     reusing the one the reboot ended.
          */
         post: operations["reboot"];
         delete?: never;
@@ -647,10 +532,9 @@ export interface paths {
         /**
          * `GET /v1/writes/devices/{id}/recording` — the write side's desired
          *     recording state and epoch.
-         * @description What the *outbox* believes, which is not the same as what the device last
-         *     reported: the desired state moves the moment a start is accepted, before any device
-         *     has been contacted. `GET /v1/reads/devices/{id}/fields/RUNNING_STATE` is the other
-         *     question — what the device said, and when.
+         * @description This is what the outbox intends, and it changes as soon as a start is
+         *     accepted, before the device is contacted. What the device last reported is at
+         *     `GET /v1/reads/devices/{id}/fields/RUNNING_STATE`.
          */
         get: operations["read_desired_recording_state"];
         put?: never;
@@ -751,10 +635,9 @@ export interface paths {
         /**
          * `GET /v1/writes/groups/{id}/history` — what each member has been asked to
          *     do, newest first within each member.
-         * @description Partitioned rather than merged, for the reason the device route is a flat
-         *     list and this one is not: two submissions can share an instant, so a merged
-         *     list would have no total order to present them in. A row's `batch` is what
-         *     ties one group-addressed request back together across members.
+         * @description One list per member rather than one merged list, since submissions can share
+         *     an instant. A row's `batch` ties together the per-member writes of one group
+         *     request.
          */
         get: operations["list_group_writes"];
         put?: never;
@@ -815,15 +698,9 @@ export interface paths {
         /**
          * `GET /v1/writes/groups/{id}/recording` — every member's desired recording
          *     state, and the one they agree on.
-         * @description Not an alias of the device route with a group id, and cannot be: the outbox
-         *     keys its logs by device, so that route answers `idle` at epoch `0` for a
-         *     group id — a claim about a device that does not exist. This one asks the
-         *     port once per member and reports what it actually said.
-         *
-         *     `desired_recording_state` is `null` when the members are not all in the same
-         *     one, which is a finding rather than a missing value: a group whose members
-         *     have diverged is one where a start reached some of them. Epochs are never
-         *     rolled up — see [`GroupDesiredRecordingState::members`].
+         * @description `desired_recording_state` is `null` when the members differ, as when a start
+         *     reached only some of them. Epochs stay per member; see
+         *     [`GroupDesiredRecordingState::members`].
          */
         get: operations["read_group_desired_recording_state"];
         put?: never;
@@ -923,12 +800,7 @@ export interface paths {
         };
         /**
          * `GET /v1/writes/{id}` — what became of one submitted write.
-         * @description The one route in this scope addressed by neither a device nor a group, and
-         *     so the one mounted directly on the scope root: a write id is globally
-         *     unique, so it needs no device to address it. That is also why it is
-         *     registered *last* — within the scope, `/v1/writes/{id}` is one segment
-         *     where `/v1/writes/devices/…` and `/v1/writes/groups/…` are two or more,
-         *     so it can only ever catch what the others did not.
+         * @description Write ids are globally unique, so no device or group is needed to address one.
          */
         get: operations["read_write"];
         put?: never;

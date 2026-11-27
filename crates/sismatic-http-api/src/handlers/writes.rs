@@ -555,9 +555,10 @@ pub async fn pause_recording(
 
 /// `POST /v1/writes/devices/{id}/reboot` — restart one device.
 ///
-/// Not beside the recording verbs: a reboot is not one, and a distinct
-/// prefix is what lets "may reboot devices" be authorized separately from "may
-/// start recordings" — see the module docs on coarse authorization by path.
+/// Queues a reboot. The relay checks that no recording has started before
+/// sending it. Once the device acknowledges, its SSH connection is discarded, so
+/// the next exchange (a later write or a poll) dials a new session instead of
+/// reusing the one the reboot ended.
 #[utoipa::path(
     post,
     path = "/devices/{id}/reboot",
@@ -714,12 +715,7 @@ pub async fn set_setting(
 
 /// `GET /v1/writes/{id}` — what became of one submitted write.
 ///
-/// The one route in this scope addressed by neither a device nor a group, and
-/// so the one mounted directly on the scope root: a write id is globally
-/// unique, so it needs no device to address it. That is also why it is
-/// registered *last* — within the scope, `/v1/writes/{id}` is one segment
-/// where `/v1/writes/devices/…` and `/v1/writes/groups/…` are two or more,
-/// so it can only ever catch what the others did not.
+/// Write ids are globally unique, so no device or group is needed to address one.
 #[utoipa::path(
     get,
     path = "/{id}",
@@ -749,10 +745,9 @@ pub async fn read_write(
 /// `GET /v1/writes/devices/{id}/recording` — the write side's desired
 /// recording state and epoch.
 ///
-/// What the *outbox* believes, which is not the same as what the device last
-/// reported: the desired state moves the moment a start is accepted, before any device
-/// has been contacted. `GET /v1/reads/devices/{id}/fields/RUNNING_STATE` is the other
-/// question — what the device said, and when.
+/// This is what the outbox intends, and it changes as soon as a start is
+/// accepted, before the device is contacted. What the device last reported is at
+/// `GET /v1/reads/devices/{id}/fields/RUNNING_STATE`.
 #[utoipa::path(
     get,
     path = "/devices/{id}/recording",
@@ -1085,15 +1080,9 @@ pub async fn set_group_setting(
 /// `GET /v1/writes/groups/{id}/recording` — every member's desired recording
 /// state, and the one they agree on.
 ///
-/// Not an alias of the device route with a group id, and cannot be: the outbox
-/// keys its logs by device, so that route answers `idle` at epoch `0` for a
-/// group id — a claim about a device that does not exist. This one asks the
-/// port once per member and reports what it actually said.
-///
-/// `desired_recording_state` is `null` when the members are not all in the same
-/// one, which is a finding rather than a missing value: a group whose members
-/// have diverged is one where a start reached some of them. Epochs are never
-/// rolled up — see [`GroupDesiredRecordingState::members`].
+/// `desired_recording_state` is `null` when the members differ, as when a start
+/// reached only some of them. Epochs stay per member; see
+/// [`GroupDesiredRecordingState::members`].
 #[utoipa::path(
     get,
     path = "/groups/{id}/recording",
@@ -1172,10 +1161,9 @@ pub(crate) async fn group_desired_recording_state(
 /// `GET /v1/writes/groups/{id}/history` — what each member has been asked to
 /// do, newest first within each member.
 ///
-/// Partitioned rather than merged, for the reason the device route is a flat
-/// list and this one is not: two submissions can share an instant, so a merged
-/// list would have no total order to present them in. A row's `batch` is what
-/// ties one group-addressed request back together across members.
+/// One list per member rather than one merged list, since submissions can share
+/// an instant. A row's `batch` ties together the per-member writes of one group
+/// request.
 #[utoipa::path(
     get,
     path = "/groups/{id}/history",

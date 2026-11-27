@@ -57,11 +57,8 @@ use crate::handlers::error::ApiFailure;
 
 /// `GET /v1/config` — every setting this server is running under.
 ///
-/// The body is a complete statement rather than a diff against the built-in
-/// defaults: a setting nobody has ever named appears here at the value it
-/// resolved to, so the answer to "what is this process actually doing" needs no
-/// second document beside it. It is also a valid `PATCH` body, which is what
-/// makes read-modify-write safe to script.
+/// Every setting appears at its resolved value, defaults included. The body is
+/// also a valid `PATCH /v1/config` body.
 #[utoipa::path(
     get,
     path = "",
@@ -80,10 +77,8 @@ pub async fn read_config(config: web::Data<dyn LiveConfig>) -> HttpResponse {
 
 /// `PATCH /v1/config` — change some of the settings, leaving the rest alone.
 ///
-/// Applied whole or not at all, and applied *live*: by the time the response is
-/// written, the poll loops are on the new schedule and the sweeper on the new
-/// window. The body that comes back is every setting as it now stands, so a
-/// caller never has to re-read to see what its own request produced.
+/// Applied atomically and live: poll loops and the sweeper are on the new values
+/// before the response is written. Returns every setting as it now stands.
 #[utoipa::path(
     patch,
     path = "",
@@ -114,11 +109,8 @@ pub async fn patch_config(
 
 /// `POST /v1/config/reload` — read the config file again and apply what it says.
 ///
-/// The route a mounted ConfigMap is picked up by. It takes no body: the file —
-/// with the environment and the command line layered over it exactly as at
-/// startup — is the whole of what it reads, so there is nothing for a caller to
-/// state and no way for a request to disagree with the file it is asking the
-/// server to honour.
+/// Takes no body. Resolves the file with the environment and command line
+/// layered over it, as at startup, and applies the result live.
 #[utoipa::path(
     post,
     path = "/reload",
