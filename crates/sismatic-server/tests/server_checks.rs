@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 use sismatic_core::devices::config::{self, RawConfig};
+use sismatic_core::devices::placement::Placement;
 use sismatic_core::protocol::instructions::query::Query;
 use sismatic_server::configuration::{
     CONFIG_PATH_ENV, ConfigSource, FieldConfig, InventoryConfig, Overrides, ServerConfig,
@@ -420,6 +421,7 @@ async fn run_starts_and_shuts_down_without_touching_the_filesystem() {
         test_config("127.0.0.1", 0),
         test_source(),
         RawConfig::default(),
+        Placement::default(),
         std::future::ready(()),
     )
     .await
@@ -456,6 +458,7 @@ async fn run_serves_the_health_check_on_the_configured_port() {
         test_config("127.0.0.1", port),
         test_source(),
         RawConfig::default(),
+        Placement::default(),
         async {
             // A dropped sender resolves this too, so a failing test tears the
             // server down rather than hanging.
@@ -507,6 +510,7 @@ async fn a_patch_changes_the_settings_the_running_server_reports() {
         test_config("127.0.0.1", port),
         test_source(),
         RawConfig::default(),
+        Placement::default(),
         async {
             let _ = shutdown.await;
         },

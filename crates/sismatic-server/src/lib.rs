@@ -45,6 +45,7 @@ use sismatic_api_types::{
 use sismatic_core::devices::config::{
     Barrier, DeviceConfig, GroupConfig, RawConfig, resolve_config,
 };
+use sismatic_core::devices::placement::{PlacedConnector, Placement};
 use sismatic_core::devices::registry::Registry;
 use sismatic_core::devices::sis_keepalive::SisKeepalive;
 use sismatic_core::devices::transport::ssh::RusshConnector;
@@ -60,7 +61,7 @@ use sismatic_store::{DynDeviceCatalog, DynDeviceStatus};
 use sismatic_store::{DynReadStore, DynWriteStore};
 use sismatic_store_memory::{MemoryCatalog, MemoryOutbox, MemoryStore};
 use tokio::task::JoinHandle;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
 use crate::configuration::{ConfigSource, ServerConfig};
@@ -83,10 +84,15 @@ use crate::status::RegistryStatus;
 /// exactly as one in the file does, and the only way to guarantee that is to
 /// amend this document and put it back through the one function that resolves
 /// it. See [`fleet::LiveFleet`].
+///
+/// `placement` moves where each device is *dialed* — and nothing else; see
+/// [`sismatic_core::devices::placement`]. [`Placement::default`] dials every
+/// device where the document puts it.
 pub async fn run(
     cfg: ServerConfig,
     source: ConfigSource,
     devices: RawConfig,
+    placement: Placement,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), std::io::Error> {
     let resolved = resolve_config(devices.clone()).map_err(|e| {
@@ -154,10 +160,17 @@ pub async fn run(
     // one object or the read routes would serve a fleet that no longer exists.
     let catalog_port: DynDeviceCatalog = Arc::new(catalog.clone());
 
+    let connector = PlacedConnector::new(
+        RusshConnector,
+        placement.clone(),
+        resolved.devices.iter().map(|device| device.id.as_str()),
+    );
+    announce_placement(&placement, &connector, &resolved.devices);
+
     let registry = Arc::new(Registry::build(
         resolved.devices,
         resolved.groups,
-        Arc::new(RusshConnector),
+        Arc::new(connector),
     ));
 
     // Over the registry rather than the config: this is the one read whose
@@ -311,6 +324,38 @@ pub async fn run(
 /// nothing else it could truthfully say. The live value comes from
 /// [`RegistryStatus`] and is overlaid by the two device routes — which is why
 /// this is a second port rather than a field this function could fill.
+/// Say, once and loudly, that devices are not being dialed where the document
+/// says — and where each one is.
+///
+/// A `warn!` for the same reason the persisted-state notice in `main` is one:
+/// a server dialing `127.0.0.1` while its API reports `10.0.150.1` is
+/// correct, and is also exactly the kind of correct that costs an afternoon if
+/// nobody said so.
+fn announce_placement<C>(
+    placement: &Placement,
+    connector: &PlacedConnector<C>,
+    devices: &[DeviceConfig],
+) {
+    if placement.is_identity() {
+        return;
+    }
+    warn!(
+        device_host = placement.host.as_deref(),
+        device_port_base = placement.port_base,
+        "devices are dialed at overridden addresses; the API and any persisted state \
+         still report the devices file's own"
+    );
+    for device in devices {
+        let (host, port) = connector.address_of(device);
+        info!(
+            id = %device.id,
+            declared = %format_args!("{}:{}", device.host, device.port),
+            dialed = %format_args!("{host}:{port}"),
+            "device placement"
+        );
+    }
+}
+
 pub(crate) fn summarize(config: &DeviceConfig) -> DeviceSummary {
     DeviceSummary {
         id: config.id.clone(),
